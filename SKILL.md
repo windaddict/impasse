@@ -107,7 +107,7 @@ refuse; see "Environment & fallback"). Then:
      --kind <code|document|decision|research|data|other> \
      --instruction-file <instr.txt> --artifact-file <artifact> \
      --schema "$IMPASSE_ROOT/schemas/reviewer-response.v1.json" \
-     [--backend codex|claude] [--approve-send <endpoint>] [--effort low|medium|high] [--wall 180] [--idle 60]
+     [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort low|medium|high] [--wall 180] [--idle 60]
    ```
    It returns JSON: on success, `response` is the reviewer's **untrusted** structured output;
    on failure, a `failure` with a code (`consent_denied|timeout|backend_error|invalid_response`).

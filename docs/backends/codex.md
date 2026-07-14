@@ -23,7 +23,8 @@ nvm/fnm installs are on `PATH` in a normal shell; from a stripped non-interactiv
 ```
 codex exec --json --output-last-message <file> \
   --sandbox read-only --color never --skip-git-repo-check --ephemeral \
-  [-c model_reasoning_effort="low"] \
+  --ignore-user-config --ignore-rules \
+  [-m <model>] [-c model_reasoning_effort="low"] \
   "<reviewer instruction + the reviewer-response schema>"   # artifact piped on stdin, then EOF
 ```
 
@@ -41,7 +42,16 @@ are version observations, not a durable API):
   `invalid_json_schema`). So the runner **embeds the schema in the instruction** and validates
   the returned JSON afterward, rather than relying on the CLI to enforce it.
 - **Reasoning effort:** valid values are `none|low|medium|high|xhigh`; **`minimal` is rejected**.
-  The runner allowlists these.
+  The runner allowlists these. `-c model_reasoning_effort` still applies under `--ignore-user-config`.
+- **Hermetic by default.** The runner adds `--ignore-user-config` (ignore `~/.codex/config.toml`)
+  and `--ignore-rules` (ignore repo `AGENTS.md`): config can't reroute the endpoint away from the
+  consented destination, and an artifact's own repo can't inject instructions into the read-only
+  reviewer. Auth in `~/.codex/auth.json` survives `--ignore-user-config` (verified). Opt out with
+  `IMPASSE_CODEX_RESPECT_CONFIG=1`.
+- **`--output-schema` unreliability is real:** OpenAI's own issues report it is silently ignored
+  when tools/MCP are active (openai/codex#15451) and doesn't apply to only the final message
+  (#19816) — so the embed-schema-in-prompt-then-validate approach above is the right call; don't
+  "fix" it back to `--output-schema`.
 - This build's `codex exec` has **no `--ask-for-approval`**; access is controlled with
   `--sandbox` only.
 
@@ -51,9 +61,18 @@ The destination is `OPENAI_BASE_URL` (default `https://api.openai.com`). Consent
 the normalized endpoint, so a custom base URL (Azure, a gateway, localhost) requires its own
 grant. See `docs/security-model.md`.
 
-**Known limitation (consent keying).** Impasse derives the consent destination from
-`OPENAI_BASE_URL`, but the Codex CLI also reads its own `~/.codex/config.toml`, which can point at
-a different provider or base URL. Impasse can't inspect that config, so if you've pointed Codex
-elsewhere there, the destination you approved may not be where data actually goes. Keep `~/.codex`
-consistent with the endpoint you grant (or set `OPENAI_BASE_URL` explicitly). The `claude` backend
-has the analogous limit and additionally *refuses* under `CLAUDE_CODE_USE_BEDROCK/VERTEX`.
+**Consent keying — hardened.** The runner launches Codex with `--ignore-user-config` by default, so
+a custom `base_url`/provider in `~/.codex/config.toml` can't silently reroute data away from the
+consented `OPENAI_BASE_URL` destination (auth in `~/.codex/auth.json` is unaffected — verified). If
+you *rely* on `~/.codex/config.toml` (e.g. an enterprise gateway), set `IMPASSE_CODEX_RESPECT_CONFIG=1`
+to honor it — then keep that config consistent with the endpoint you grant. (The `claude` backend
+has the analogous concern and *refuses* under `CLAUDE_CODE_USE_BEDROCK/VERTEX`.)
+
+## Model selection
+
+The runner omits `-m` by default, so Codex uses its built-in default — and because
+`--ignore-user-config` is on, a model pinned in `~/.codex/config.toml` is ignored, so pass it
+explicitly if you want a specific one. Choose per-run with `--model <name>`, or persist a default in
+`IMPASSE_CODEX_MODEL` (the per-run flag wins). The `claude` backend mirrors this with `--model` /
+`IMPASSE_CLAUDE_MODEL` — pinning a reviewer model *different* from the host's climbs a rung on the
+independence ladder.

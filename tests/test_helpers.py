@@ -265,6 +265,14 @@ def main() -> int:
     check("--strict-mcp-config" in argv_c and argv_c[argv_c.index("--permission-mode") + 1] == "default", "build_claude_argv: strict MCP + pinned default permission mode")
     check(all(t in argv_c for t in ("Bash", "WebFetch", "WebSearch", "Task")), "build_claude_argv: denylist covers exec + exfil + spawn (defense in depth)")
     check(argv_c.index("--disallowed-tools") == len(argv_c) - 1 - len(run._CLAUDE_DENIED_TOOLS), "build_claude_argv: variadic --disallowed-tools comes last")
+    argv_x = run.build_codex_argv(["/x/codex"], instruction="INSTR", output_last_message="/tmp/o", effort="low", model="gpt-x")
+    check("--ignore-user-config" in argv_x and "--ignore-rules" in argv_x, "build_codex_argv: hermetic (ignores user config + repo rules) by default")
+    check(argv_x[argv_x.index("-m") + 1] == "gpt-x" and argv_x[-1] == "INSTR", "build_codex_argv: -m model set, instruction stays the final positional")
+    os.environ["IMPASSE_CODEX_RESPECT_CONFIG"] = "1"
+    check("--ignore-user-config" not in run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o"), "build_codex_argv: IMPASSE_CODEX_RESPECT_CONFIG opts out of hermetic mode")
+    os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
+    argv_cm = run.build_claude_argv(["/x/claude"], instruction="I", model="claude-x")
+    check(argv_cm[argv_cm.index("--model") + 1] == "claude-x" and argv_cm.index("--model") < argv_cm.index("--disallowed-tools"), "build_claude_argv: --model set, before the trailing --disallowed-tools")
     check(run._parse_reviewer_json('```json\n{"a":1}\n```')["a"] == 1, "parse: strips a ```json fence")
     check(run._parse_reviewer_json('here you go:\n{"a":2} thanks')["a"] == 2, "parse: extracts JSON from surrounding prose")
     check(run._parse_reviewer_json('{"note":"a } brace inside","a":3}')["a"] == 3, "parse: string-aware — a brace inside a string value doesn't end the object")
@@ -329,6 +337,12 @@ def main() -> int:
     os.environ["FAKE_EXIT"] = "0"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] and res.get("recorded") is True, "run record: review persists a record by default")
+    os.environ["IMPASSE_CODEX_MODEL"] = "persisted-x"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm.get("model") == "persisted-x", "review: persisted IMPASSE_CODEX_MODEL resolved into the run")
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", model="perrun-x", no_record=True)
+    check(rm.get("model") == "perrun-x", "review: per-run --model overrides the persisted default")
+    os.environ.pop("IMPASSE_CODEX_MODEL", None)
     check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
     check(res.get("record_path") and "Recorded locally" in (res.get("record_notice") or ""), "run record: result surfaces where it was saved")
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)

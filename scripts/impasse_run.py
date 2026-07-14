@@ -235,7 +235,7 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
 
 
 def build_codex_argv(backend_command, *, instruction: str, output_last_message: str,
-                     effort: str | None = None) -> list[str]:
+                     effort: str | None = None, model: str | None = None) -> list[str]:
     """Assemble a read-only `codex exec` review command. The artifact is fed on stdin
     (as context), not as an argv element, so large artifacts don't hit ARG_MAX and
     stdin still reaches EOF.
@@ -250,6 +250,14 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
         "--sandbox", "read-only", "--color", "never",
         "--skip-git-repo-check", "--ephemeral",
     ]
+    # Hermetic by default: ignore ~/.codex/config.toml (so a custom base_url/provider there can't
+    # reroute data away from the destination the operator consented to) and repo AGENTS.md rules
+    # (so an artifact's own repository can't inject instructions into the read-only reviewer).
+    # Verified auth survives --ignore-user-config. Opt out with IMPASSE_CODEX_RESPECT_CONFIG=1.
+    if not os.environ.get("IMPASSE_CODEX_RESPECT_CONFIG"):
+        argv += ["--ignore-user-config", "--ignore-rules"]
+    if model:
+        argv += ["-m", model]
     if effort:
         argv += ["-c", f'model_reasoning_effort="{effort}"']
     argv += [instruction]
@@ -266,7 +274,7 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
 _CLAUDE_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "WebFetch", "WebSearch", "Task"]
 
 
-def build_claude_argv(backend_command, *, instruction: str) -> list[str]:
+def build_claude_argv(backend_command, *, instruction: str, model: str | None = None) -> list[str]:
     """Assemble a headless read-only `claude -p` review (the same-provider fallback backend).
 
     The artifact is piped on stdin as context (reaches EOF via the supervisor, same as codex);
@@ -276,14 +284,17 @@ def build_claude_argv(backend_command, *, instruction: str) -> list[str]:
     last. Read-only is
     enforced fail-closed — see the note on `_CLAUDE_DENIED_TOOLS` and docs/backends/claude.md.
     """
-    return list(backend_command) + [
+    argv = list(backend_command) + [
         "-p", instruction,
         "--output-format", "text",
         "--permission-mode", "default",
         "--strict-mcp-config",
         "--allowed-tools", "",
-        "--disallowed-tools", *_CLAUDE_DENIED_TOOLS,
     ]
+    if model:
+        argv += ["--model", model]
+    argv += ["--disallowed-tools", *_CLAUDE_DENIED_TOOLS]   # variadic — must stay last
+    return argv
 
 
 def _parse_reviewer_json(text: str) -> dict:
@@ -361,7 +372,7 @@ def _fail(code, message, kind, notice, manifest, termination=None) -> dict:
 
 def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "codex",
            schema_path: str | None = None, approve_send: str | None = None,
-           effort: str | None = None, wall_timeout: float = 180.0,
+           effort: str | None = None, model: str | None = None, wall_timeout: float = 180.0,
            idle_timeout: float = 60.0, no_record: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
@@ -376,6 +387,10 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     except (FileNotFoundError, ValueError) as e:
         return _fail("backend_error", str(e), kind, str(e), manifest)
 
+    # Per-run --model overrides a persisted default (IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL);
+    # falling through to the backend's own default when neither is set.
+    model = model or os.environ.get(f"IMPASSE_{be.name.upper()}_MODEL") or None
+
     independence_notice = None
     if be.independence == "same_provider":
         independence_notice = (
@@ -386,7 +401,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         )
     # disclosure carried on EVERY return path (success and failure), not just success
     bmeta = {"backend": be.name, "provider": be.provider, "independence": be.independence,
-             "independence_notice": independence_notice}
+             "model": model, "independence_notice": independence_notice}
 
     approved, notice = consent.check(be, manifest=manifest, approve_send=approve_send)
     if not approved:
@@ -411,9 +426,9 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
             os.close(out_fd)
             argv = build_codex_argv(be.command, instruction=full_instruction,
-                                    output_last_message=out_last, effort=effort)
+                                    output_last_message=out_last, effort=effort, model=model)
         elif be.type == "claude-cli":
-            argv = build_claude_argv(be.command, instruction=full_instruction)
+            argv = build_claude_argv(be.command, instruction=full_instruction, model=model)
         else:
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
@@ -505,6 +520,8 @@ def _main(argv=None) -> int:
     rv.add_argument("--approve-send", default=None)
     rv.add_argument("--effort", default=None, choices=sorted(_ALLOWED_EFFORT),
                     help="codex reasoning effort (ignored by the claude backend)")
+    rv.add_argument("--model", default=None,
+                    help="reviewer model (else IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL, else the backend default)")
     rv.add_argument("--wall", type=float, default=180.0)
     rv.add_argument("--idle", type=float, default=60.0)
     rv.add_argument("--no-record", action="store_true", help="don't persist the run record")
@@ -538,8 +555,8 @@ def _main(argv=None) -> int:
             return 1
         result = review(kind=args.kind, instruction=instruction, artifact_bytes=artifact_bytes,
                         backend=args.backend, schema_path=args.schema, approve_send=args.approve_send,
-                        effort=args.effort, wall_timeout=args.wall, idle_timeout=args.idle,
-                        no_record=args.no_record)
+                        effort=args.effort, model=args.model, wall_timeout=args.wall,
+                        idle_timeout=args.idle, no_record=args.no_record)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
     return 2
