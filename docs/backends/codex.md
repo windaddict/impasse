@@ -23,9 +23,8 @@ nvm/fnm installs are on `PATH` in a normal shell; from a stripped non-interactiv
 ```
 codex exec --json --output-last-message <file> \
   --sandbox read-only --color never --skip-git-repo-check --ephemeral \
-  [--output-schema schemas/reviewer-response.v1.json] \
   [-c model_reasoning_effort="low"] \
-  "<reviewer instruction>"     # artifact is piped on stdin (as context), then EOF
+  "<reviewer instruction + the reviewer-response schema>"   # artifact piped on stdin, then EOF
 ```
 
 Verified behaviors (on `codex-cli 0.144.0-alpha.4` — re-check with `codex exec --help`, these
@@ -36,7 +35,11 @@ are version observations, not a durable API):
   artifact is piped, not passed as an argv element (also avoids `ARG_MAX`).
 - **`--json`** streams JSONL events; **`--output-last-message`** writes the final answer to a
   file (the runner reads the answer there and treats the JSONL as telemetry).
-- **`--output-schema`** makes the CLI enforce the response shape.
+- **NOT `--output-schema`.** It routes to OpenAI's structured-output mode, which requires a
+  *restricted* schema (every property in `required`; no `oneOf`/`allOf`/`if-then`/`minLength`/
+  `pattern`). The rich `reviewer-response.v1.json` doesn't qualify (the API returns
+  `invalid_json_schema`). So the runner **embeds the schema in the instruction** and validates
+  the returned JSON afterward, rather than relying on the CLI to enforce it.
 - **Reasoning effort:** valid values are `none|low|medium|high|xhigh`; **`minimal` is rejected**.
   The runner allowlists these.
 - This build's `codex exec` has **no `--ask-for-approval`**; access is controlled with

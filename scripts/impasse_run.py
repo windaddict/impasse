@@ -225,17 +225,21 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
 
 
 def build_codex_argv(backend_command, *, instruction: str, output_last_message: str,
-                     schema_path: str | None = None, effort: str | None = None) -> list[str]:
+                     effort: str | None = None) -> list[str]:
     """Assemble a read-only `codex exec` review command. The artifact is fed on stdin
     (as context), not as an argv element, so large artifacts don't hit ARG_MAX and
-    stdin still reaches EOF."""
+    stdin still reaches EOF.
+
+    NOTE: we do NOT use `--output-schema`. OpenAI's structured-output mode requires a
+    restricted schema (every property in `required`, no oneOf/allOf/if-then/minLength/
+    pattern) — the rich reviewer-response schema doesn't qualify. Instead the schema is
+    embedded in the instruction (see review()) and the output is validated afterward.
+    """
     argv = list(backend_command) + [
         "exec", "--json", "--output-last-message", output_last_message,
         "--sandbox", "read-only", "--color", "never",
         "--skip-git-repo-check", "--ephemeral",
     ]
-    if schema_path:
-        argv += ["--output-schema", schema_path]
     if effort:
         argv += ["-c", f'model_reasoning_effort="{effort}"']
     argv += [instruction]
@@ -269,8 +273,20 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
     try:
         out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
         os.close(out_fd)
-        argv = build_codex_argv(backend.command, instruction=instruction,
-                                output_last_message=out_last, schema_path=schema_path, effort=effort)
+        full_instruction = instruction
+        if schema_path:
+            try:
+                with open(schema_path, encoding="utf-8") as f:
+                    schema_text = f.read()
+                full_instruction = (
+                    instruction
+                    + "\n\nReturn ONLY a JSON object — no prose, no markdown fence — that "
+                    "validates against this JSON Schema:\n" + schema_text
+                )
+            except OSError:
+                pass
+        argv = build_codex_argv(backend.command, instruction=full_instruction,
+                                output_last_message=out_last, effort=effort)
         result = supervise(argv, input_bytes=artifact_bytes,
                            wall_timeout=wall_timeout, idle_timeout=idle_timeout)
 
