@@ -57,6 +57,7 @@ class Backend:
     destination_id: str  # normalized endpoint consent is keyed on, e.g. "https://api.openai.com"
     endpoint: str        # the raw configured endpoint
     command: list[str]   # argv to invoke, e.g. ["/path/to/codex"]
+    independence: str = "cross_provider"  # "cross_provider" (Codex) | "same_provider" (Claude fallback)
 
 
 def _resolve_from_env(*names: str) -> list[str] | None:
@@ -104,6 +105,33 @@ def resolve_codex_command() -> list[str] | None:
     return None
 
 
+def resolve_claude_command() -> list[str] | None:
+    """Resolve the claude (Claude Code) binary cross-platform. See docs/backends/claude.md.
+
+    Order: IMPASSE_CLAUDE_BIN / CLAUDE_BIN override -> PATH -> known locations. Returns argv,
+    or None if not found. Used only for the same-provider fallback backend.
+    """
+    override = _resolve_from_env("IMPASSE_CLAUDE_BIN", "CLAUDE_BIN")
+    if override:
+        return override
+    on_path = shutil.which("claude")
+    if on_path:
+        return [on_path]
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    appdata = (os.environ.get("APPDATA") or "").replace("\\", "/")
+    candidates = [
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        os.path.join(home, ".local/bin/claude"),
+        os.path.join(home, ".npm-global/bin/claude"),
+        f"{appdata}/npm/claude" if appdata else "",
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return [c]
+    return None
+
+
 def normalize_destination(endpoint: str) -> str:
     """Canonical destination id from an endpoint URL, for keying consent.
 
@@ -127,27 +155,60 @@ def _provider_label(destination_id: str) -> str:
     host = urlsplit(destination_id).hostname or ""
     if host == "api.openai.com" or host.endswith(".openai.com") or host == "openai.com":
         return "OpenAI"
+    if host == "api.anthropic.com" or host.endswith(".anthropic.com") or host == "anthropic.com":
+        return "Anthropic"
     return destination_id
 
 
 def get_backend(name: str = "codex") -> Backend:
-    """Return a resolved Backend. v1 supports only 'codex'."""
-    if name != "codex":
-        raise ValueError(f"unknown backend '{name}' (v1 supports: codex)")
-    cmd = resolve_codex_command()
-    if not cmd:
-        raise FileNotFoundError(
-            "codex CLI not found. Install it (npm i -g @openai/codex, or the Codex "
-            "desktop app), or set CODEX_BIN / IMPASSE_CODEX_BIN."
+    """Return a resolved Backend.
+
+    'codex' (default) is the cross-provider reviewer — real independence. 'claude' is a
+    same-provider FALLBACK for users without Codex: it shares the host's blind spots, so it
+    buys breadth / an adversarial second pass, NOT independence. See docs/backends/claude.md
+    and the independence ladder in the Guardrails.
+    """
+    if name == "codex":
+        cmd = resolve_codex_command()
+        if not cmd:
+            raise FileNotFoundError(
+                "codex CLI not found. Install it (npm i -g @openai/codex, or the Codex "
+                "desktop app), or set CODEX_BIN / IMPASSE_CODEX_BIN."
+            )
+        # A custom base URL (Azure, an enterprise gateway, localhost) changes where data
+        # actually goes; normalize it so consent is keyed to the real destination.
+        endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+        destination_id = normalize_destination(endpoint)
+        return Backend(
+            name="codex", type="codex-cli", provider=_provider_label(destination_id),
+            destination_id=destination_id, endpoint=endpoint, command=cmd,
+            independence="cross_provider",
         )
-    # A custom base URL (Azure, an enterprise gateway, localhost) changes where data
-    # actually goes; normalize it so consent is keyed to the real destination.
-    endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
-    destination_id = normalize_destination(endpoint)
-    return Backend(
-        name="codex", type="codex-cli", provider=_provider_label(destination_id),
-        destination_id=destination_id, endpoint=endpoint, command=cmd,
-    )
+    if name == "claude":
+        # Claude Code can route to AWS Bedrock / GCP Vertex via these env vars. Then the data does
+        # NOT go to api.anthropic.com, so keying consent to the Anthropic endpoint would be a lie.
+        # Refuse rather than mis-key the consent gate (the whole point of the gate is honesty).
+        if os.environ.get("CLAUDE_CODE_USE_BEDROCK") or os.environ.get("CLAUDE_CODE_USE_VERTEX"):
+            raise ValueError(
+                "the claude backend keys consent to the Anthropic API, but Claude Code is "
+                "configured for Bedrock/Vertex (CLAUDE_CODE_USE_BEDROCK/VERTEX) — data would go "
+                "to AWS/GCP instead. Use the codex backend, or unset those to route via "
+                "api.anthropic.com."
+            )
+        cmd = resolve_claude_command()
+        if not cmd:
+            raise FileNotFoundError(
+                "claude CLI not found. Install Claude Code, or set CLAUDE_BIN / IMPASSE_CLAUDE_BIN."
+            )
+        # A custom ANTHROPIC_BASE_URL (a gateway/proxy) still keys consent to wherever data goes.
+        endpoint = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        destination_id = normalize_destination(endpoint)
+        return Backend(
+            name="claude", type="claude-cli", provider=_provider_label(destination_id),
+            destination_id=destination_id, endpoint=endpoint, command=cmd,
+            independence="same_provider",
+        )
+    raise ValueError(f"unknown backend '{name}' (supported: codex, claude)")
 
 
 def sha256_prefixed(data: bytes) -> str:

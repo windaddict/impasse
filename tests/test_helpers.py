@@ -48,6 +48,29 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
 
 
+_VALID_REVIEW = ('{"schema_version":"1.0","review_id":"cr","artifact":{"kind":"decision",'
+                 '"revision":{"algorithm":"sha256","value":"x"}},"assessment":"needs_attention",'
+                 '"summary":"s","findings":[]}')
+
+FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import sys, os
+try:
+    sys.stdin.buffer.read()   # drain the piped artifact (reaches EOF)
+except Exception:
+    pass
+mode = os.environ.get("FAKE_CLAUDE_MODE", "valid")
+valid = ''' + repr(_VALID_REVIEW) + r'''
+out = {
+    "valid": valid,
+    "fenced": "```json\n" + valid + "\n```",
+    "preamble": "Here is my review:\n\n" + valid,   # chat backends sometimes prepend prose
+    "notjson": "I could not produce JSON.",
+}.get(mode, valid)
+sys.stdout.write(out)
+sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0")))
+'''
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="impasse-test-")
     os.environ["IMPASSE_CONFIG_DIR"] = tmp
@@ -213,6 +236,66 @@ def main() -> int:
     check(fi.index("no stake") < fi.index("EVALUATE THE MEMO"), "compose: stance precedes the host's task lens")
     check("JSON Schema" in fi and fi.index("EVALUATE THE MEMO") < fi.index("JSON Schema"), "compose: schema appended after the host instruction")
     check(run.compose_full_instruction("X").endswith("X"), "compose: no schema block when schema omitted")
+
+    # --- Claude fallback backend: resolution, backend metadata, argv, tolerant parsing, e2e ---
+    check(lib._provider_label("https://api.anthropic.com") == "Anthropic", "provider_label: Anthropic host")
+    check(lib._provider_label("https://api.anthropic.com.evil.net") != "Anthropic", "provider_label: not fooled by Anthropic substring host")
+    fake_claude = os.path.join(tmp, "fake-claude")
+    with open(fake_claude, "w") as f:
+        f.write(FAKE_CLAUDE)
+    os.chmod(fake_claude, 0o755)
+    os.environ["IMPASSE_CLAUDE_BIN"] = fake_claude
+    os.environ.pop("ANTHROPIC_BASE_URL", None)
+    be_c = lib.get_backend("claude")
+    check(be_c.type == "claude-cli" and be_c.provider == "Anthropic", "get_backend('claude'): type + provider")
+    check(be_c.independence == "same_provider" and be_c.destination_id == "https://api.anthropic.com", "get_backend('claude'): same-provider tier + Anthropic destination")
+    for ev in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+        os.environ[ev] = "1"
+        routed_ok = False
+        try:
+            lib.get_backend("claude")
+        except ValueError:
+            routed_ok = True
+        os.environ.pop(ev, None)
+        check(routed_ok, f"get_backend('claude'): refuses under {ev} (would mis-key consent to Anthropic)")
+    argv_c = run.build_claude_argv(be_c.command, instruction="LENS")
+    check("-p" in argv_c and "LENS" in argv_c and argv_c[argv_c.index("--output-format") + 1] == "text", "build_claude_argv: -p + text output")
+    check("--output-last-message" not in argv_c, "build_claude_argv: no output-file (reads stdout)")
+    check(argv_c[argv_c.index("--allowed-tools") + 1] == "", "build_claude_argv: empty allowlist (fails closed)")
+    check("--strict-mcp-config" in argv_c and argv_c[argv_c.index("--permission-mode") + 1] == "default", "build_claude_argv: strict MCP + pinned default permission mode")
+    check(all(t in argv_c for t in ("Bash", "WebFetch", "WebSearch", "Task")), "build_claude_argv: denylist covers exec + exfil + spawn (defense in depth)")
+    check(argv_c.index("--disallowed-tools") == len(argv_c) - 1 - len(run._CLAUDE_DENIED_TOOLS), "build_claude_argv: variadic --disallowed-tools comes last")
+    check(run._parse_reviewer_json('```json\n{"a":1}\n```')["a"] == 1, "parse: strips a ```json fence")
+    check(run._parse_reviewer_json('here you go:\n{"a":2} thanks')["a"] == 2, "parse: extracts JSON from surrounding prose")
+    check(run._parse_reviewer_json('{"note":"a } brace inside","a":3}')["a"] == 3, "parse: string-aware — a brace inside a string value doesn't end the object")
+    check(run._parse_reviewer_json('prefix {"a":4} tail }')["a"] == 4, "parse: balanced scan ignores a stray trailing brace")
+    parse_bad = False
+    try:
+        run._parse_reviewer_json("no json here at all")
+    except ValueError:   # JSONDecodeError is a ValueError subclass
+        parse_bad = True
+    check(parse_bad, "parse: non-JSON raises (classified invalid_response, never a false pass)")
+
+    consent.grant("https://api.anthropic.com", "claude-cli", "https://api.anthropic.com", "Anthropic")
+    os.environ["FAKE_CLAUDE_MODE"] = "valid"
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude")
+    check(res["ok"] and res["response"]["schema_version"] == "1.0", "review(claude): valid stdout JSON -> ok, parsed")
+    check(res.get("independence") == "same_provider" and "Same-provider" in (res.get("independence_notice") or ""), "review(claude): surfaces the same-provider independence notice")
+    check(res.get("backend") == "claude" and res.get("provider") == "Anthropic", "review(claude): result names the backend + provider")
+    os.environ["FAKE_CLAUDE_MODE"] = "preamble"
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    check(res["ok"], "review(claude): tolerant parse survives a chat preamble before the JSON")
+    os.environ["FAKE_CLAUDE_MODE"] = "notjson"
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    check(res["ok"] is False and res["failure"]["code"] == "invalid_response", "review(claude): non-JSON stdout -> invalid_response")
+    # a fresh Anthropic-only backend (no per-run approve_send) is approved by the persistent grant,
+    # while the separate OpenAI grant is untouched
+    check(consent.check(lib.get_backend("claude"))[0] is True, "review(claude): persistent Anthropic grant approves; codex grant is separate")
+    os.environ["FAKE_MODE"] = "valid"
+    os.environ["FAKE_EXIT"] = "0"
+    codex_only = run.review(kind="code", instruction="review", artifact_bytes=b"code")
+    check(codex_only.get("independence") == "cross_provider" and codex_only.get("independence_notice") is None, "review(codex): cross-provider, no downgrade notice")
+    os.environ.pop("FAKE_CLAUDE_MODE", None)
 
     # --- run records (audit trail) + report ---
     import json as _json

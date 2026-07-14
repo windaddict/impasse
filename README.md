@@ -74,8 +74,11 @@ genuine judgment calls come to you. Each `show` closes with a running tally acro
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) (the host).
-- The [OpenAI Codex CLI](https://github.com/openai/codex) installed and logged in (the
-  reference reviewer backend) — [`docs/backends/codex.md`](docs/backends/codex.md).
+- The [OpenAI Codex CLI](https://github.com/openai/codex) installed and logged in — the
+  recommended, cross-provider reviewer backend — [`docs/backends/codex.md`](docs/backends/codex.md).
+  **No Codex?** A same-provider **Claude fallback** (`--backend claude`) runs on Claude Code alone,
+  no second vendor account — but it shares the host's blind spots, so it buys breadth, not
+  independence — [`docs/backends/claude.md`](docs/backends/claude.md).
 - Python 3 (standard library only — the shipped helpers have no pip dependencies).
 - macOS or Linux. Windows via WSL; native Windows is a [roadmap](docs/windows.md).
 

@@ -246,6 +246,77 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
     return argv
 
 
+# A denylist can only FAIL OPEN — the reviewer keeps Read/Glob/Grep/ToolSearch (and can load
+# WebFetch through ToolSearch), held back only by the ambient permission prompt, which a
+# permissive settings.json or --permission-mode defeats. So the read-only posture is an ALLOWLIST
+# of nothing (the artifact is on stdin; the reviewer needs no tool), plus --strict-mcp-config (no
+# MCP servers load) and a pinned --permission-mode so it can't inherit acceptEdits/bypass. The
+# denylist below is defense-in-depth if a future CLI ever misreads the empty allowlist.
+# (Verified on claude 2.1.197: this config blocks Read AND WebFetch, yet still answers from stdin.)
+_CLAUDE_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "WebFetch", "WebSearch", "Task"]
+
+
+def build_claude_argv(backend_command, *, instruction: str, effort: str | None = None) -> list[str]:
+    """Assemble a headless read-only `claude -p` review (the same-provider fallback backend).
+
+    The artifact is piped on stdin as context (reaches EOF via the supervisor, same as codex);
+    the instruction is the prompt. The final message is read from STDOUT — `claude -p` has no
+    `--output-last-message` file. `effort` has no Claude analog and is ignored. Both variadic
+    tool flags must come after the fixed flags; `--disallowed-tools` comes last. Read-only is
+    enforced fail-closed — see the note on `_CLAUDE_DENIED_TOOLS` and docs/backends/claude.md.
+    """
+    return list(backend_command) + [
+        "-p", instruction,
+        "--output-format", "text",
+        "--permission-mode", "default",
+        "--strict-mcp-config",
+        "--allowed-tools", "",
+        "--disallowed-tools", *_CLAUDE_DENIED_TOOLS,
+    ]
+
+
+def _parse_reviewer_json(text: str) -> dict:
+    """Parse the reviewer's final message into JSON. Tolerant of a code fence or leading/trailing
+    prose — chat-style backends (the Claude fallback) sometimes wrap the JSON in reasoning. Falls
+    back to a STRING-AWARE balanced-brace scan (braces inside string values don't confuse it, and a
+    stray trailing brace in prose can't extend the object). Raises on genuinely non-JSON output;
+    a raise is safe — the caller classifies it as invalid_response, never a false pass."""
+    s = text.strip()
+    if s.startswith("```"):
+        nl = s.find("\n")
+        if nl != -1:
+            s = s[nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    start = s.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("no JSON object found in reviewer output", s, 0)
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(s[start:i + 1])
+    raise json.JSONDecodeError("no balanced JSON object in reviewer output", s, start)
+
+
 _REVIEWER_STANCE = (
     "You are an independent reviewer with no stake in the artifact under review. You did not "
     "write it; assume it is flawed and your job is to break it. Give it no benefit of the doubt "
@@ -277,25 +348,44 @@ def _fail(code, message, kind, notice, manifest, termination=None) -> dict:
     return r
 
 
-def review(*, kind: str, instruction: str, artifact_bytes: bytes,
+def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "codex",
            schema_path: str | None = None, approve_send: str | None = None,
            effort: str | None = None, wall_timeout: float = 180.0,
            idle_timeout: float = 60.0, no_record: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
-    The returned 'response' is UNTRUSTED reviewer output — validate against the schema."""
+    The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
+    `backend` selects the reviewer: 'codex' (cross-provider, default) or 'claude' (same-provider
+    fallback — the result carries an `independence_notice` disclosing the weaker guarantee)."""
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
 
-    backend = lib.get_backend("codex")
     manifest = consent.manifest_for_bytes(artifact_bytes)
-    approved, notice = consent.check(backend, manifest=manifest, approve_send=approve_send)
+    try:
+        be = lib.get_backend(backend)
+    except (FileNotFoundError, ValueError) as e:
+        return _fail("backend_error", str(e), kind, str(e), manifest)
+
+    independence_notice = None
+    if be.independence == "same_provider":
+        independence_notice = (
+            f"⚠ Same-provider review via {be.provider} (backend '{be.name}'): the reviewer shares "
+            "the host's training and blind spots, so this is an adversarial second pass / breadth, "
+            "NOT cross-provider independence — agreement is weak evidence. Prefer the codex backend "
+            "when available."
+        )
+    # disclosure carried on EVERY return path (success and failure), not just success
+    bmeta = {"backend": be.name, "provider": be.provider, "independence": be.independence,
+             "independence_notice": independence_notice}
+
+    approved, notice = consent.check(be, manifest=manifest, approve_send=approve_send)
     if not approved:
-        return _fail("consent_denied", notice, kind, notice, manifest)
+        return {**_fail("consent_denied", notice, kind, notice, manifest), **bmeta}
+
+    def _f(code, message, **kw):
+        return {**_fail(code, message, kind, notice, manifest, **kw), **bmeta}
 
     scratch = tempfile.mkdtemp(prefix="impasse-run-", dir=lib.ensure_config_dir())
     try:
-        out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
-        os.close(out_fd)
         schema_text = None
         if schema_path:
             try:
@@ -304,37 +394,51 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
             except OSError:
                 schema_text = None
         full_instruction = compose_full_instruction(instruction, schema_text)
-        argv = build_codex_argv(backend.command, instruction=full_instruction,
-                                output_last_message=out_last, effort=effort)
+
+        out_last = None
+        if be.type == "codex-cli":
+            out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
+            os.close(out_fd)
+            argv = build_codex_argv(be.command, instruction=full_instruction,
+                                    output_last_message=out_last, effort=effort)
+        elif be.type == "claude-cli":
+            argv = build_claude_argv(be.command, instruction=full_instruction, effort=effort)
+        else:
+            return _f("backend_error", f"unsupported backend type '{be.type}'")
+
         result = supervise(argv, input_bytes=artifact_bytes,
                            wall_timeout=wall_timeout, idle_timeout=idle_timeout)
 
         if result.termination == "spawn_error":
-            return _fail("backend_error", result.stderr.decode("utf-8", "replace")[-800:], kind, notice, manifest)
+            return _f("backend_error", result.stderr.decode("utf-8", "replace")[-800:])
         if result.termination in ("wall_timeout", "idle_timeout", "termination_failed"):
-            return _fail("timeout", f"backend {result.termination} after {result.duration_s:.0f}s",
-                         kind, notice, manifest, termination=result.termination)
+            return _f("timeout", f"backend {result.termination} after {result.duration_s:.0f}s",
+                      termination=result.termination)
         if result.exit_code != 0:
-            return _fail("backend_error",
-                         f"exit={result.exit_code}; stderr: {result.stderr.decode('utf-8', 'replace')[-800:]}",
-                         kind, notice, manifest)
+            return _f("backend_error",
+                      f"exit={result.exit_code}; stderr: {result.stderr.decode('utf-8', 'replace')[-800:]}")
 
         final = None
-        try:
-            with open(out_last, "rb") as f:
-                final = f.read().decode("utf-8", "replace")
-        except OSError:
-            pass
+        if out_last is not None:            # codex writes the final message to a file
+            try:
+                with open(out_last, "rb") as f:
+                    final = f.read().decode("utf-8", "replace")
+            except OSError:
+                pass
+        else:                               # claude -p prints the final message to stdout
+            if result.stdout_truncated:     # stdout hit the capture cap — the JSON is cut off
+                return _f("invalid_response", "reviewer output exceeded the capture cap (truncated)")
+            final = result.stdout.decode("utf-8", "replace")
         if not final or not final.strip():
-            return _fail("invalid_response", "reviewer produced no final message", kind, notice, manifest)
+            return _f("invalid_response", "reviewer produced no final message")
         if len(final) > _MAX_FINAL:
-            return _fail("invalid_response", f"final message exceeds {_MAX_FINAL} bytes", kind, notice, manifest)
+            return _f("invalid_response", f"final message exceeds {_MAX_FINAL} bytes")
         try:
-            parsed = json.loads(final)
-        except json.JSONDecodeError as e:
-            return _fail("invalid_response", f"final message is not valid JSON: {e}", kind, notice, manifest)
+            parsed = _parse_reviewer_json(final)
+        except (json.JSONDecodeError, ValueError) as e:
+            return _f("invalid_response", f"final message is not valid JSON: {e}")
         if not isinstance(parsed, dict) or "schema_version" not in parsed or not (("findings" in parsed) or ("items" in parsed)):
-            return _fail("invalid_response", "final message JSON is missing expected top-level fields", kind, notice, manifest)
+            return _f("invalid_response", "final message JSON is missing expected top-level fields")
 
         run_id = parsed.get("review_id")
         recorded = False
@@ -356,6 +460,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
         return {
             "ok": True, "kind": kind, "termination": result.termination,
             "duration_s": round(result.duration_s, 2),
+            **bmeta,
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
             "run_id": run_id, "recorded": recorded, "record_path": record_path,
             "record_notice": record_notice,
@@ -383,6 +488,8 @@ def _main(argv=None) -> int:
     rv.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     rv.add_argument("--instruction-file", required=True)
     rv.add_argument("--artifact-file", required=True)
+    rv.add_argument("--backend", default="codex", choices=["codex", "claude"],
+                    help="reviewer backend: codex (cross-provider, default) or claude (same-provider fallback)")
     rv.add_argument("--schema", default=None)
     rv.add_argument("--approve-send", default=None)
     rv.add_argument("--effort", default=None)
@@ -400,8 +507,9 @@ def _main(argv=None) -> int:
                               "failure": {"code": "artifact_unavailable", "message": str(e)}}, indent=2))
             return 1
         result = review(kind=args.kind, instruction=instruction, artifact_bytes=artifact_bytes,
-                        schema_path=args.schema, approve_send=args.approve_send, effort=args.effort,
-                        wall_timeout=args.wall, idle_timeout=args.idle, no_record=args.no_record)
+                        backend=args.backend, schema_path=args.schema, approve_send=args.approve_send,
+                        effort=args.effort, wall_timeout=args.wall, idle_timeout=args.idle,
+                        no_record=args.no_record)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
     return 2
