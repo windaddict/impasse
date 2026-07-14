@@ -2,12 +2,14 @@
 
 > An independent second opinion for any high-stakes call — business, strategy, writing,
 > research, or code — from a cross-provider AI whose blind spots don't match your own.
-> It verifies and reconciles the review, then hands you the problems worth acting on and
-> the disagreements that need your decision.
+> The host verifies and reconciles the review under a defined protocol, then hands you the
+> problems worth acting on and the disagreements that need your decision.
 
-**Status: pre-release.** The Codex CLI review path, the consent helper, and the schemas are
-implemented and tested; verification, reconciliation, and escalation are currently directed by
-the host skill rather than enforced end to end. Expect rough edges.
+**Status: pre-release.** Impasse is the open reimplementation of the workflow described in the
+essay [*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
+The Codex CLI review path, the consent helper, and the schemas are implemented and tested; the
+verify → reconcile → escalate reasoning is **directed by the host skill** (the agent follows the
+protocol below), not a standalone engine. Expect rough edges.
 
 ## Why
 
@@ -39,6 +41,9 @@ It is **domain-general** — the same protocol reviews:
    > **Question for you:** The reviewer argues that entering Europe first reduces concentration
    > risk; the memo argues it delays break-even by nine months. Which matters more here —
    > runway, or geographic diversification?
+
+**See a full decision review** end to end — a build-vs-buy memo, not code — from rival finding
+to the single call that needs a human: [`docs/walkthrough-decision.md`](docs/walkthrough-decision.md).
 
 Full protocol: [`docs/protocol.md`](docs/protocol.md).
 
@@ -98,7 +103,8 @@ with read-only and adversarial **code** review, an optional review gate, and del
 tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
 (decisions, documents, research, data, and code) that verifies each finding and reconciles the
 two models, escalating only what they can't settle rather than returning the review to triage.
-It uses the Codex CLI as its reference backend; the protocol is backend-neutral.
+It uses the Codex CLI as its **one backend today**; the protocol is backend-neutral by design,
+but no second backend is wired up yet.
 
 ## Repository layout
 
@@ -109,6 +115,16 @@ scripts/              stdlib-Python helpers (consent, supervised runner, lib)
 docs/                 protocol, security model, backend, delegate mode, platform support
 tests/                schema validation + helper tests (CI)
 ```
+
+## Who builds this
+
+Impasse is a working artifact from [Moving Average](https://www.movingavg.com/), an AI advisory
+practice for CEOs and founders. The pattern behind it — running a rival model as an independent
+reviewer and routing only the real disagreements to a human — is written up in the essay
+[*AI's Second Opinion*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
+Wiring model-to-model governance into how a team actually decides is the kind of thing the
+[AI Workshop for CEOs](https://www.movingavg.com/ai-workshop-for-ceos.html) works through with a
+group of executives. If that's the problem you're facing, start there.
 
 ## License & trademarks
 

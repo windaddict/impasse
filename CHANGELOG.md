@@ -37,3 +37,13 @@ All notable changes to Impasse are documented here. This project adheres to
   are now proven to *reject*); positive `approve`/`failed` fixtures; consent-integrity tests
   (malformed/wrong-version/symlink → block; notice-version drift); supervisor spawn-error +
   truncation; `review()` timeout + no-final classification; ruff lint in CI.
+
+### Ship-decision improvements (four-lens rubric: CEO buyer, brand strategist, adversarial skeptic, Codex)
+- Reframed as the open, pre-release **reimplementation of the essay's workflow**; made the
+  top-line present-tense-accurate (verify/reconcile/escalate is *host-directed*, not a standalone
+  engine) — closes the claim-vs-code seam.
+- Added an advisory funnel: a "Who builds this" section linking the essay + AI Workshop for CEOs.
+- Added `docs/walkthrough-decision.md` — a full **business-decision** review end to end (not
+  code), reconciling the shipped decision fixtures; aligned `decision.reconciliation-result.json`
+  with the reviewer fixture so the two tell one story.
+- Qualified "backend-neutral" → "backend-neutral by design; one backend (Codex CLI) today".

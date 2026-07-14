@@ -1,35 +1,39 @@
 {
   "schema_version": "1.0",
-  "reconciliation_id": "rc-decision-001",
-  "review_id": "rev-decision-001",
-  "artifact_revision": { "algorithm": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+  "reconciliation_id": "rc-2026-decision-build-vs-buy-payments-0007",
+  "review_id": "rev-2026-decision-build-vs-buy-payments-0007",
+  "artifact_revision": { "algorithm": "sha256", "value": "3b1f9a0c7d24e58b6f0a1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f607" },
   "outcome": "deadlocked",
-  "started_at": "2026-07-13T19:10:00Z",
-  "completed_at": "2026-07-13T19:12:05Z",
+  "started_at": "2026-07-13T15:44:00Z",
+  "completed_at": "2026-07-13T15:51:20Z",
   "rounds_used": 1,
   "producer": { "backend": "codex-cli", "model": "gpt-5.x-codex" },
   "items": [
     {
       "finding_id": "F001",
-      "state": "accepted",
-      "host_position": "Agreed — the memo omits vendor lock-in as an unaddressed risk of the buy option.",
-      "reviewer_position": "The buy option's assumptions omit the switching cost and vendor dependency.",
+      "state": "resolved",
+      "host_position": "Verified. The Build option's assumptions[0] does assume a single-quarter hard cutover with no dual-run, and its risks[] array has no migration-slippage entry. Re-ran the cost comparison with a one-quarter dual-run added: Build's advantage over Buy narrows from 18% to 4% but still wins, so the recommendation holds once the risk is made explicit.",
+      "reviewer_position": "The single-quarter, no-dual-run assumption is load-bearing and unhedged; the cost comparison could invert under a real dual-run.",
       "verification": [
-        { "method": "artifact_inspection", "result": "supports", "detail": "The decision record's /options/1/assumptions list contains no lock-in or exit-cost entry." }
+        { "method": "artifact_inspection", "result": "supports", "detail": "Confirmed assumptions[0] and the absent migration risk in options[1] of the decision record." },
+        { "method": "command", "result": "supports", "detail": "Re-scored the record's own cost spreadsheet under a dual-run scenario; Build margin dropped 18% -> 4%." }
       ],
-      "resolution": "Added a lock-in risk and a contractual exit clause to the buy option before recommending."
+      "resolution": "Added a migration-slippage risk with a dual-run contingency to options[1], and recorded the dual-run cost scenario. Recommendation (Build) unchanged, now with the risk visible."
     },
     {
       "finding_id": "F002",
       "state": "deadlocked",
-      "host_position": "Prioritizing speed-to-market over long-term flexibility is the deliberate bet for this cycle.",
-      "reviewer_position": "The memo under-prices the flexibility it gives up; a slower in-house build preserves optionality worth more over three years.",
+      "host_position": "The mismatch is real — 'Strategic Context' names speed-to-market the top factor while the weights table sets cost 0.40 > time-to-market 0.20 — but whether that is an error or a deliberate choice is not something the record settles. It depends on what the business actually intends to prioritize this year.",
+      "reviewer_position": "The scoring silently trades away the priority the memo declares most important; the weights should be reconciled with the stated urgency.",
+      "verification": [
+        { "method": "artifact_inspection", "result": "supports", "detail": "The weights table (cost 0.40, time-to-market 0.20) does contradict the stated 'speed to launch is the single most important factor this year.'" }
+      ],
       "escalation": {
         "dispute_kind": "value_or_priority_tradeoff",
         "stop_reason": "operator_authority_required",
-        "host_position": "Speed-to-market is the priority this cycle; we accept reduced flexibility.",
-        "reviewer_position": "Optionality has material long-term value the memo does not quantify.",
-        "operator_question": "Is near-term speed-to-market worth the reduced long-term flexibility here, or should we preserve optionality by building in-house?"
+        "host_position": "The inconsistency is verified, but the fix is a priority call, not a factual correction — raise the time-to-market weight, or justify cost's higher weight.",
+        "reviewer_position": "The declared strategic priority (speed) should govern the weights unless there is a stated reason it shouldn't.",
+        "operator_question": "The memo calls speed-to-market the top priority this year, but its scoring weights cost higher. Which should actually govern the decision — protect runway (weight cost), or maximize speed-to-market (weight time-to-market)? Your answer changes which option wins."
       }
     }
   ]

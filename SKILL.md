@@ -143,4 +143,5 @@ with read-only and adversarial **code** review, an optional review gate, and del
 tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
 (decisions, documents, research, data, and code) that **verifies each finding and reconciles
 the two models**, escalating only what they can't settle rather than returning the review to
-triage. It uses the Codex CLI as its reference backend; the protocol is backend-neutral.
+triage. It uses the Codex CLI as its **one backend today**; the protocol is backend-neutral by
+design, but no second backend is wired up yet.
