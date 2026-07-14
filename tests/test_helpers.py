@@ -227,6 +227,36 @@ def main() -> int:
     check("reviewer ▶" in out and "you      ◀" in out, "report: shows the reviewer/host back-and-forth")
     check("Question for you" in out and "decision(s) need you" in out, "report: shows the escalated question")
     check(any(r["run_id"] == drid for r in lib.list_runs()), "run record: listed by list_runs")
+
+    # --- lifetime recap: aggregate value across reconciled runs (isolated config dir) ---
+    recap_dir = tempfile.mkdtemp(prefix="impasse-recap-")
+    _prev_cfg = os.environ["IMPASSE_CONFIG_DIR"]
+    os.environ["IMPASSE_CONFIG_DIR"] = recap_dir
+    check(report.lifetime_recap() == "", "recap: empty when nothing reconciled")
+    rec_a = {"schema_version": "1.0", "reconciliation_id": "a", "review_id": "recap-a",
+             "outcome": "deadlocked", "items": [
+                 {"finding_id": "F1", "state": "accepted"},
+                 {"finding_id": "F2", "state": "rejected"},
+                 {"finding_id": "F3", "state": "deadlocked",
+                  "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                                 "stop_reason": "operator_authority_required", "operator_question": "q?"}}]}
+    rec_b = {"schema_version": "1.0", "reconciliation_id": "b", "review_id": "recap-b",
+             "outcome": "converged", "items": [
+                 {"finding_id": "F1", "state": "accepted"},
+                 {"finding_id": "F2", "state": "resolved", "resolution": "done"}]}
+    lib.save_run_doc("recap-a", "reconciliation-result", rec_a)
+    lib.save_run_doc("recap-b", "reconciliation-result", rec_b)
+    recap = report.lifetime_recap()
+    check("2 reviews reconciled" in recap, "recap: counts reconciled runs")
+    check("5 findings reviewed" in recap and "2 accepted" in recap, "recap: sums findings + accepted")
+    check("1 refuted with evidence" in recap and "2 escalated to you" in recap, "recap: refuted + (resolved+deadlocked) as yours")
+    lib.save_run_doc("recap-review-only", "reviewer-response",
+                     {"schema_version": "1.0", "review_id": "recap-review-only",
+                      "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                      "assessment": "approve", "summary": "s", "findings": []})
+    check("2 reviews reconciled" in report.lifetime_recap(), "recap: review-only runs don't inflate the count")
+    os.environ["IMPASSE_CONFIG_DIR"] = _prev_cfg
+
     check(lib.forget_run(drid) is True and lib.load_run(drid)["reviewer_response"] is None, "run record: forget deletes it")
 
     # --- housekeeping: open-escalation detection + prune ---

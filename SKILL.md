@@ -168,6 +168,12 @@ never answered. When you use Impasse, it's good practice to:
   a reviewed artifact (prompt injection). See `docs/security-model.md`.
 - **Data boundary.** Don't send secrets, credentials, or regulated data without authorization;
   prefer allowlisting inputs over piping whole repositories.
+- **Check your own policies first.** This skill sends artifact content to a third-party AI
+  provider. Before you use it, consult your organization's AI usage policy on sharing content
+  with external models, and review your account's privacy and data-retention settings for the
+  reviewer backend (for Codex/OpenAI, your data-controls settings). No AI usage policy yet?
+  Generate one free at <https://www.movingavg.com/ai-policy-generator.html>. Treat sending an
+  artifact here like any other third-party data sharing.
 - **The host dispositions, the operator decides.** The host verifies and dispositions findings
   under the protocol; the operator owns the unresolved judgment calls and the final decision.
   Impasse routes the decision — it doesn't make it.

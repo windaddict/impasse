@@ -9,11 +9,15 @@
 essay [*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
 The Codex CLI review path, the consent helper, and the schemas are implemented and tested; the
 verify → reconcile → escalate reasoning is **directed by the host skill** (the agent follows the
-protocol below), not a standalone engine. Expect rough edges.
+protocol below), not enforced by the software — so a review is only as good as the host's
+adherence to the protocol, not a guarantee in code. Running it on its own source caught a real
+bug before release (a schema incompatibility with the Codex CLI's structured-output mode). It
+pins to a fast-moving alpha of the Codex CLI and is maintained on a best-effort basis: expect
+rough edges, and pin versions if you build on it.
 
 ## Why
 
-The value of a second AI isn't a smarter answer — it's *independence*. A reviewer trained by a
+The value of a second AI is *independence*, not a smarter answer. A reviewer trained by a
 different provider may fail in different places, so a disagreement is a useful signal for where
 a human should look. Impasse runs that cross-provider review, **verifies each finding**,
 reconciles the two models, and reports the verified problems plus the disagreements that need
@@ -46,6 +50,26 @@ It is **domain-general** — the same protocol reviews:
 to the single call that needs a human: [`docs/walkthrough-decision.md`](docs/walkthrough-decision.md).
 
 Full protocol: [`docs/protocol.md`](docs/protocol.md).
+
+## What a run surfaces
+
+The output is what *survived* scrutiny — the reviewer's findings, with a disposition on each. On
+a decision artifact (a market-entry memo, not code), a run can produce all three outcomes:
+
+- **Accepted** — the reviewer flags that the revenue model leans on a churn rate cited nowhere
+  in the memo. The host checks, confirms the number is unsupported, and accepts it. → a real
+  gap to fix.
+- **Refuted with evidence** — the reviewer calls the go-to-market "undifferentiated." The host
+  points to the paragraph where the memo already concedes the mechanic is commodity and stakes
+  its case on distribution — the reviewer rediscovered a stated premise, not a hole. Rejected,
+  with the quote. → the verify step catching a confident miss, so it never reaches you.
+- **Escalated** — the reviewer wants Europe first to cut concentration risk; the memo wants to
+  protect a nine-month runway. Neither is a fact. It comes to you as one question. → routed,
+  not decided.
+
+That mix — most findings verified, some refuted on evidence, a few escalated — is what a run is
+for: an independent model checks the work, the host filters its misses where it can, and the
+genuine judgment calls come to you. Each `show` closes with a running tally across your reviews.
 
 ## Requirements
 
@@ -127,8 +151,10 @@ runs with decisions you haven't answered yet; `prune --older-than N` cleans up o
 (keeping any with open escalations unless `--include-open`). Records contain artifact content —
 they're kept `0600` and never committed.
 
-Cumulative "what it caught across all runs" reporting is **not built yet** (roadmap) — each run
-is inspectable on its own.
+Every `show` closes with a **running recap across your reconciled runs** — findings reviewed,
+accepted, refuted with evidence, and escalated to you — a plain reminder of what independent
+review has surfaced. Deeper longitudinal reporting (trends over time, per-artifact history) is
+still roadmap; each run is fully inspectable on its own.
 
 ## Who builds this
 

@@ -153,6 +153,43 @@ def render(run: dict) -> str:
     return "\n".join(out)
 
 
+def lifetime_recap() -> str:
+    """A short, honest value recap across every reconciled run on disk — printed at the end of
+    a `show` so the operator sees what independent review has surfaced for them. Facts only:
+    counts come from real reconciliation records, and self-evident (no traction claims, no
+    'issues you'd have shipped'). Returns "" when nothing has been reconciled yet."""
+    reviewed = accepted = rejected = resolved = escalated = 0
+    n = 0
+    for r in lib.list_runs():
+        items = (lib.load_run(r["run_id"]).get("reconciliation_result") or {}).get("items") or []
+        if not items:
+            continue
+        n += 1
+        for it in items:
+            reviewed += 1
+            st = it.get("state")
+            if st == "accepted":
+                accepted += 1
+            elif st == "rejected":
+                rejected += 1
+            elif st == "resolved":
+                resolved += 1
+            elif st == "deadlocked":
+                escalated += 1
+    if n == 0:
+        return ""
+    yours = resolved + escalated
+    rev_word = "review" if n == 1 else "reviews"
+    lines = [
+        "━" * 78,
+        f"📈 Your Impasse record — {n} {rev_word} reconciled",
+        f"   {reviewed} findings reviewed · {accepted} accepted · "
+        f"{rejected} refuted with evidence · {yours} escalated to you",
+        "   Each raised by an independent reviewer and ruled on by the host before it reached you.",
+    ]
+    return "\n".join(lines)
+
+
 def _open_escalations(rec: dict) -> list:
     """Items still deadlocked — an escalation the operator hasn't resolved yet. Once the
     operator decides, the host re-saves the reconciliation with that item moved to
@@ -244,6 +281,9 @@ def _main(argv=None) -> int:
         return 0
     if args.cmd == "show":
         print(render(lib.load_run(args.run_id)))
+        recap = lifetime_recap()
+        if recap:
+            print(recap)
         return 0
     if args.cmd == "save-reconciliation":
         try:
