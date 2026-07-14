@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "reconciliation_id": "rc-invalid-rejected-no-evidence",
+  "review_id": "rev-code-001",
+  "artifact_revision": {
+    "algorithm": "sha256",
+    "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "outcome": "converged",
+  "started_at": "2026-07-13T18:00:00Z",
+  "completed_at": "2026-07-13T18:01:34Z",
+  "rounds_used": 1,
+  "producer": {
+    "backend": "codex-cli",
+    "model": "gpt-5.x-codex"
+  },
+  "items": [
+    {
+      "finding_id": "F002",
+      "state": "rejected",
+      "host_position": "The gateway client enforces a 10s timeout and raises on failure; a nightly reconciliation job re-checks any row whose gateway state is unconfirmed. The reviewer only saw the diff, not the client construction.",
+      "reviewer_position": "No timeout or exception handling is visible at the refund call site."
+    }
+  ]
+}

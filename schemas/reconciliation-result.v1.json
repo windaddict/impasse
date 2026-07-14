@@ -69,7 +69,11 @@
       },
       "allOf": [
         { "if": { "properties": { "state": { "const": "deadlocked" } }, "required": ["state"] },
-          "then": { "required": ["escalation"] } }
+          "then": { "required": ["escalation"] } },
+        { "if": { "properties": { "state": { "const": "rejected" } }, "required": ["state"] },
+          "then": { "required": ["verification"],
+                    "properties": { "verification": { "contains": { "properties": { "result": { "const": "contradicts" } }, "required": ["result"] } } },
+                    "description": "A rejection must clear the same evidence bar demanded of the reviewer: at least one verification that CONTRADICTS the finding. A refutation resting only on host judgment is not a rejection — record it as deadlocked with dispute_kind 'unverified_refutation'." } }
       ]
     },
     "verification": {
@@ -92,8 +96,8 @@
       "description": "Why this item reached the operator. dispute_kind (WHAT kind of disagreement) and stop_reason (WHY the loop stopped) are independent dimensions.",
       "properties": {
         "dispute_kind": {
-          "enum": ["evidence_conflict", "evidence_gap", "assumption_difference", "interpretation_difference", "value_or_priority_tradeoff", "policy_or_authority_required"],
-          "description": "value_or_priority_tradeoff and policy_or_authority_required are judgment calls, not evidence disputes — not every disagreement should be 'settled'."
+          "enum": ["evidence_conflict", "evidence_gap", "assumption_difference", "interpretation_difference", "value_or_priority_tradeoff", "policy_or_authority_required", "unverified_refutation"],
+          "description": "value_or_priority_tradeoff and policy_or_authority_required are judgment calls, not evidence disputes — not every disagreement should be 'settled'. unverified_refutation = the host wanted to reject the finding but could only offer judgment, not evidence that contradicts it; a rejection without contradicting evidence is not a rejection, it is this deadlock."
         },
         "stop_reason": {
           "enum": ["no_new_information", "round_limit", "budget_limit", "verification_unavailable", "operator_authority_required"]

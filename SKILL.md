@@ -58,12 +58,17 @@ Per-finding, not one global loop. Detail + the state machine: `docs/protocol.md`
 3. **Verify — examine before trusting.** For each finding, the host checks the evidence
    against the *actual* artifact/facts (read the lines, run the test, retrieve the source).
    The reviewer is frequently useful and sometimes confidently wrong.
-4. **Reconcile.** Disposition each finding: **accepted** (host agrees), **rejected** (host
-   refuted it, *with evidence*), **resolved** (addressed — *and* the state an escalated deadlock
-   moves to once the operator answers it, with their decision as the `resolution`), or
-   **deadlocked**. Optionally give the reviewer **one rebuttal round** on a contested finding:
-   re-invoke `review` with the contested finding + your rejection reason appended to the
-   instruction, asking it to substantiate or withdraw. Stop when neither side brings new evidence.
+4. **Reconcile.** Disposition each finding: **accepted** (host agrees), **rejected**, **resolved**
+   (addressed — *and* the state an escalated deadlock moves to once the operator answers it, with
+   their decision as the `resolution`), or **deadlocked**.
+   **A rejection must clear the same evidence bar you demand of the reviewer** — at least one
+   verification that *contradicts* the finding (a cited artifact location, a test you ran, a
+   standard). A refutation resting only on your *judgment* ("I don't think this matters," "that
+   tradeoff is fine") is **not a rejection** — the host doesn't overrule the independent reviewer on
+   judgment. Either give the reviewer **one rebuttal round** (re-invoke `review` with the contested
+   finding + your reason, asking it to substantiate or withdraw; stop when neither side brings new
+   evidence), or escalate it as a **deadlock** with `dispute_kind: unverified_refutation`. The
+   schema enforces this: a `rejected` item without contradicting verification is invalid.
 5. **Report, then escalate.** Report the verified findings — what both models agree is real,
    after verification — for the operator to act on. Escalate *only* the deadlock — an evidence
    conflict neither can win, or a value/priority call that is the operator's to make — as a
@@ -73,7 +78,8 @@ Per-finding, not one global loop. Detail + the state machine: `docs/protocol.md`
 **Not everything should be settled.** Strategy and writing often turn on preferences, not
 falsifiable claims. Escalate those as judgment calls (`value_or_priority_tradeoff`,
 `policy_or_authority_required`) — don't let the models "resolve" a decision that is the
-operator's to make.
+operator's to make. And don't let the *host* settle by fiat: an evidence-less refutation is an
+`unverified_refutation` deadlock, not a rejection.
 
 ## Running it (Claude Code host adapter)
 

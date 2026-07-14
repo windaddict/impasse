@@ -9,15 +9,25 @@ models, and escalates only the genuine disagreement.** You get the problems wort
 the one call that's actually yours.
 
 ```mermaid
-flowchart LR
-    A["Your artifact<br/>decision · essay · research · data · code"] --> R["Reviewer<br/>cross-provider AI · read-only"]
-    R -->|"anchored findings"| V{"Host verifies<br/>each finding vs.<br/>the real artifact"}
-    V -->|"refuted"| X["dropped<br/>a confident miss"]
+flowchart TB
+    A["Your artifact<br/>decision · essay · research · data · code"] --> R["🔎 Reviewer<br/>cross-provider AI · read-only"]
+    R -->|"anchored findings"| V{"⚖️ Host verifies<br/>each finding vs. the real artifact"}
     V -->|"verified"| F["actionable<br/>no human needed"]
-    V -->|"value / priority call"| Q(["one crisp question<br/>→ you decide"])
+    V -->|"refuted with evidence"| X["dropped<br/>a confident miss"]
+    V -->|"host disagrees,<br/>but has no evidence"| RB{"🔎 one rebuttal round<br/>reviewer substantiates<br/>or withdraws"}
+    V -->|"value / priority call"| Q(["❓ one question<br/>→ you decide"])
+    RB -->|"withdrawn / evidence found"| X
+    RB -->|"neither side can win"| Q
+    style R fill:#6366f1,color:#fff
+    style RB fill:#6366f1,color:#fff
+    style V fill:#0ea5e9,color:#fff
     style Q fill:#f97316,color:#fff
     style X fill:#e5e7eb,color:#111
 ```
+
+The reviewer (indigo) proposes; the host (blue) verifies. A refutation only *drops* a finding when
+the host has contradicting evidence — a host disagreement with no evidence isn't a rejection, so it
+goes back to the reviewer for one round, then to you if neither side can win.
 
 **Status: pre-release.** The open implementation of the pattern from the essay
 [*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).

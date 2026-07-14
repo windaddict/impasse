@@ -16,6 +16,13 @@ prepared
   → resolved | deadlocked
 ```
 
+**A rejection needs evidence, or it isn't a rejection.** `rejected` requires at least one
+verification that *contradicts* the finding — the schema enforces this. A refutation resting only
+on host judgment ("I don't think this matters," "that tradeoff is fine") is a disagreement the
+host doesn't get to settle alone: give the reviewer one rebuttal round, or escalate it as a
+deadlock with `dispute_kind: unverified_refutation`. This is what stops the host from having the
+last word over the independent reviewer.
+
 The overall run ends in `converged`, `deadlocked`, `incomplete` (a bound was hit), or
 `failed` (backend/timeout/consent/invalid-response). **A failure is never reported as
 success.**
@@ -45,13 +52,15 @@ A finding reaches the operator when it deadlocks. Two independent dimensions are
 
 - **`dispute_kind`** — *what kind* of disagreement: `evidence_conflict`, `evidence_gap`,
   `assumption_difference`, `interpretation_difference`, `value_or_priority_tradeoff`,
-  `policy_or_authority_required`.
+  `policy_or_authority_required`, `unverified_refutation` (the host wanted to reject but had only
+  judgment, not contradicting evidence).
 - **`stop_reason`** — *why the loop stopped*: `no_new_information`, `round_limit`,
   `budget_limit`, `verification_unavailable`, `operator_authority_required`.
 
 **Not every disagreement should be settled.** `value_or_priority_tradeoff` and
 `policy_or_authority_required` are judgment calls that belong to the operator — the models
-must not "resolve" them. Each deadlock carries a crisp `operator_question`.
+must not "resolve" them. And the host must not settle by fiat: an evidence-less refutation is an
+`unverified_refutation` deadlock, not a rejection. Each deadlock carries a crisp `operator_question`.
 
 ## Honest claim
 
