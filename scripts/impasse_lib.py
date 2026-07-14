@@ -211,6 +211,104 @@ def get_backend(name: str = "codex") -> Backend:
     raise ValueError(f"unknown backend '{name}' (supported: codex, claude)")
 
 
+# --- Environment-aware review-mode policy ---------------------------------------------------
+#
+# Independence tiers, strongest to weakest:
+#   cross_provider — a different-provider reviewer (Codex, a subprocess). Real independence.
+#   same_provider  — a Claude reviewer in a FRESH process (`claude -p`). Breadth; shared blind spots.
+#   self_review    — the HOST model reviews in its OWN context (no separate reviewer can run).
+#                    Near-zero independence. Permitted ONLY where no subprocess reviewer exists —
+#                    the claude.ai chat sandbox or Claude Cowork — and NEVER for code.
+INDEPENDENCE_TIERS = ("cross_provider", "same_provider", "self_review")
+
+# Surfaces that cannot spawn a reviewer subprocess, so self-review is the only fallback.
+SELF_REVIEW_ENVIRONMENTS = ("chat_sandbox", "cowork")
+
+_ENV_LABELS = {
+    "claude_code": "Claude Code",
+    "chat_sandbox": "the Claude chat sandbox",
+    "cowork": "Claude Cowork",
+    "unknown": "an unknown environment",
+}
+
+CLAUDE_CODE_RECOMMENDATION = (
+    "Claude Code is the best environment for Impasse: only there can it run a cross-provider "
+    "reviewer (Codex) for real independence. Other surfaces can self-review at best."
+)
+
+
+def detect_environment() -> str:
+    """Best-effort detection of the runtime surface. `IMPASSE_ENV` overrides (authoritative).
+    Returns 'claude_code' | 'chat_sandbox' | 'cowork' | 'unknown'. Auto-detection keys off
+    documented env markers; when unsure it returns 'unknown', which does NOT permit self-review
+    (fail safe — never silently degrade to self-review when we can't confirm the sandbox)."""
+    forced = os.environ.get("IMPASSE_ENV")
+    if forced in _ENV_LABELS:
+        return forced
+    if os.environ.get("CLAUDECODE") == "1" or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude_code"
+    if os.environ.get("CLAUDE_COWORK") or os.environ.get("CLAUDE_SURFACE") == "cowork":
+        return "cowork"
+    if os.environ.get("CLAUDE_CHAT_SANDBOX") or os.environ.get("CLAUDE_SURFACE") in ("chat", "sandbox"):
+        return "chat_sandbox"
+    return "unknown"
+
+
+def self_review_allowed(environment: str) -> bool:
+    """Self-review is permitted ONLY on surfaces that can't run a reviewer subprocess — the chat
+    sandbox or Cowork. Never in Claude Code (run a real backend), never in an unknown env."""
+    return environment in SELF_REVIEW_ENVIRONMENTS
+
+
+def self_review_notice(environment: str) -> str:
+    env = _ENV_LABELS.get(environment, environment)
+    return (
+        f"⚠ SELF-REVIEW ({env}): no separate reviewer can run here, so the SAME assistant helping "
+        "you is checking its own work in its own context. This is NOT an independent second opinion "
+        "— it shares that assistant's blind spots and prior reasoning, so agreement is almost no "
+        "evidence. It can still catch arithmetic slips, unsupported claims, and internal "
+        f"contradictions. {CLAUDE_CODE_RECOMMENDATION}"
+    )
+
+
+def review_mode(kind: str, *, environment: str | None = None,
+                codex_available: bool = False, claude_available: bool = False) -> dict:
+    """The single policy entry point: pick the strongest HONEST review mode for this environment
+    and the available backends, and carry the mandatory disclosure. Capability-first, env-gated.
+
+    Returns {mode, tier, allowed, notice, recommendation, reason}, where
+    mode ∈ {'codex','claude','self_review','refuse'}:
+      - prefer a subprocess backend wherever it resolves (codex > claude), on ANY surface;
+      - if none resolves: self-review is allowed ONLY in the chat sandbox or Cowork, and NEVER for
+        code (its verification needs to run tests, impossible there); otherwise refuse.
+    """
+    env = environment or detect_environment()
+    at_best = env == "claude_code"
+    rec = None if at_best else CLAUDE_CODE_RECOMMENDATION
+    if codex_available:
+        return {"mode": "codex", "tier": "cross_provider", "allowed": True,
+                "notice": None, "recommendation": rec,
+                "reason": "cross-provider reviewer (Codex) available"}
+    if claude_available:
+        return {"mode": "claude", "tier": "same_provider", "allowed": True,
+                "notice": None,  # review() itself emits the same_provider independence_notice
+                "recommendation": rec,
+                "reason": "same-provider fresh-process reviewer (claude -p) available"}
+    # No subprocess reviewer available on this surface.
+    if kind == "code":
+        return {"mode": "refuse", "tier": None, "allowed": False, "notice": None,
+                "recommendation": CLAUDE_CODE_RECOMMENDATION,
+                "reason": "code review needs a runnable reviewer and executable verification, "
+                          "which no non-Claude-Code surface provides"}
+    if self_review_allowed(env):
+        return {"mode": "self_review", "tier": "self_review", "allowed": True,
+                "notice": self_review_notice(env), "recommendation": CLAUDE_CODE_RECOMMENDATION,
+                "reason": f"no reviewer subprocess in {_ENV_LABELS.get(env, env)}; self-review permitted"}
+    return {"mode": "refuse", "tier": None, "allowed": False, "notice": None,
+            "recommendation": CLAUDE_CODE_RECOMMENDATION,
+            "reason": f"no reviewer subprocess and self-review not permitted in {_ENV_LABELS.get(env, env)}"}
+
+
 def sha256_prefixed(data: bytes) -> str:
     """'sha256:<hex>' — the form used by evidence digests in the schemas."""
     return "sha256:" + hashlib.sha256(data).hexdigest()

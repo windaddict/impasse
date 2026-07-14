@@ -496,7 +496,25 @@ def _main(argv=None) -> int:
     rv.add_argument("--wall", type=float, default=180.0)
     rv.add_argument("--idle", type=float, default=60.0)
     rv.add_argument("--no-record", action="store_true", help="don't persist the run record")
+    md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
+    md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
+    md.add_argument("--environment", default=None, help="override auto-detection (else IMPASSE_ENV / auto)")
     args = ap.parse_args(argv)
+
+    if args.cmd == "mode":
+        def _avail(resolve):
+            try:                       # a bad *_BIN override raises; treat as unavailable, don't crash
+                return bool(resolve())
+            except OSError:
+                return False
+        decision = lib.review_mode(
+            args.kind, environment=args.environment,
+            codex_available=_avail(lib.resolve_codex_command),
+            claude_available=_avail(lib.resolve_claude_command),
+        )
+        decision["environment"] = args.environment or lib.detect_environment()
+        print(json.dumps(decision, indent=2))
+        return 0
 
     if args.cmd == "review":
         try:

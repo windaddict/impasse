@@ -297,6 +297,31 @@ def main() -> int:
     check(codex_only.get("independence") == "cross_provider" and codex_only.get("independence_notice") is None, "review(codex): cross-provider, no downgrade notice")
     os.environ.pop("FAKE_CLAUDE_MODE", None)
 
+    # --- environment-aware review-mode policy + self-review tier ---
+    os.environ["IMPASSE_ENV"] = "cowork"
+    check(lib.detect_environment() == "cowork", "detect_environment: IMPASSE_ENV overrides")
+    os.environ.pop("IMPASSE_ENV", None)
+    check(lib.self_review_allowed("chat_sandbox") and lib.self_review_allowed("cowork"), "self_review_allowed: sandbox + cowork")
+    check(not lib.self_review_allowed("claude_code") and not lib.self_review_allowed("unknown"), "self_review_allowed: NOT in Claude Code or unknown")
+    note = lib.self_review_notice("chat_sandbox")
+    check("NOT an independent" in note and "Claude Code is the best" in note, "self_review_notice: discloses non-independence + recommends Claude Code")
+    m = lib.review_mode("decision", environment="claude_code", codex_available=True)
+    check(m["mode"] == "codex" and m["tier"] == "cross_provider" and m["recommendation"] is None, "review_mode: Codex in Claude Code -> cross_provider, no nag")
+    m = lib.review_mode("decision", environment="claude_code", claude_available=True)
+    check(m["mode"] == "claude" and m["tier"] == "same_provider", "review_mode: only Claude available -> same_provider")
+    m = lib.review_mode("decision", environment="chat_sandbox")
+    check(m["mode"] == "self_review" and m["notice"] and m["recommendation"], "review_mode: no backend in sandbox -> self_review + disclosure")
+    m = lib.review_mode("code", environment="chat_sandbox")
+    check(m["mode"] == "refuse" and not m["allowed"], "review_mode: code refused in the sandbox (verification impossible)")
+    m = lib.review_mode("decision", environment="claude_code")
+    check(m["mode"] == "refuse", "review_mode: no backend in Claude Code -> refuse (never self-review here)")
+    m = lib.review_mode("document", environment="cowork")
+    check(m["mode"] == "self_review", "review_mode: Cowork with no backend -> self_review")
+    m = lib.review_mode("decision", environment="unknown")
+    check(m["mode"] == "refuse", "review_mode: unknown surface -> refuse (fail safe)")
+    m = lib.review_mode("decision", environment="cowork", codex_available=True)
+    check(m["mode"] == "codex", "review_mode: capability-first — a backend in Cowork beats self-review")
+
     # --- run records (audit trail) + report ---
     import json as _json
     import impasse_report as report
