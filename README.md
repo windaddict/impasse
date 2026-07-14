@@ -3,16 +3,16 @@
 > **An independent second opinion for any high-stakes call — a decision, an essay, a research
 > claim, a dataset, or code — from a cross-provider AI whose blind spots don't match your own.**
 
-Impasse is **read-only**: the reviewer argues, it never edits your work. And unlike a plain code
-reviewer, it doesn't hand you a list to triage — it **verifies each finding, reconciles the two
-models, and escalates only the genuine disagreement.** You get the problems worth acting on, plus
-the one call that's actually yours.
+The **reviewer is read-only** — it argues, with evidence, but never edits your work; any changes
+are yours to make. And unlike a plain code reviewer, it doesn't hand you a raw list to triage — it
+**verifies each finding, reconciles the two models, and escalates only the genuine disagreement.**
+You get the verified problems to fix, plus the one call that's actually yours.
 
 ```mermaid
 flowchart TB
     A["Your artifact<br/>decision · essay · research · data · code"] --> R["🔎 Reviewer<br/>cross-provider AI · read-only"]
     R -->|"anchored findings"| V{"⚖️ Host verifies<br/>each finding vs. the real artifact"}
-    V -->|"verified"| F["actionable<br/>no human needed"]
+    V -->|"verified"| F["a verified problem<br/>yours to fix"]
     V -->|"refuted with evidence"| X["dropped<br/>a confident miss"]
     V -->|"host disagrees,<br/>but has no evidence"| RB{"🔎 one rebuttal round<br/>reviewer substantiates<br/>or withdraws"}
     V -->|"value / priority call"| Q(["❓ one question<br/>→ you decide"])
@@ -25,9 +25,10 @@ flowchart TB
     style X fill:#e5e7eb,color:#111
 ```
 
-The reviewer (indigo) proposes; the host (blue) verifies. A refutation only *drops* a finding when
-the host has contradicting evidence — a host disagreement with no evidence isn't a rejection, so it
-goes back to the reviewer for one round, then to you if neither side can win.
+The reviewer (indigo) proposes; the host (blue) verifies; **you make any changes** — nothing is
+edited for you. A refutation only *drops* a finding when the host has contradicting evidence — a
+host disagreement with no evidence isn't a rejection, so it goes back to the reviewer for one
+round, then to you if neither side can win.
 
 **Status: pre-release.** The open implementation of the pattern from the essay
 [*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
