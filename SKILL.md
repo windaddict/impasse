@@ -88,6 +88,10 @@ directory, so use absolute paths:
 IMPASSE_ROOT="$HOME/.claude/skills/impasse"   # or the host's skill-root variable, if it has one
 ```
 
+First, **check the mode** — `python3 "$IMPASSE_ROOT/scripts/impasse_run.py" mode --kind <kind>`
+reports the strongest honest reviewer for this surface (Codex → Claude fallback → self-review →
+refuse; see "Environment & fallback"). Then:
+
 1. **Consent (block-by-default).** Sending the artifact means it leaves the machine for a
    third-party provider. The runner blocks until the operator approves the destination and
    sees a payload manifest. If blocked, show the operator the notice + manifest and ask them

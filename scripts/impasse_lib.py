@@ -282,6 +282,7 @@ def review_mode(kind: str, *, environment: str | None = None,
       - if none resolves: self-review is allowed ONLY in the chat sandbox or Cowork, and NEVER for
         code (its verification needs to run tests, impossible there); otherwise refuse.
     """
+    kind = (kind or "").strip().lower()   # normalize so 'Code'/'CODE' can't slip past the code gate
     env = environment or detect_environment()
     at_best = env == "claude_code"
     rec = None if at_best else CLAUDE_CODE_RECOMMENDATION
@@ -326,16 +327,30 @@ def artifact_revision(data: bytes) -> dict:
 # (see .gitignore). `forget_run` deletes one.
 
 def _safe_id(run_id: str) -> str:
-    return (re.sub(r"[^A-Za-z0-9._-]", "_", run_id or "")[:120]) or "unknown"
+    """Map a possibly-UNTRUSTED run/review id (the reviewer supplies review_id) to a single safe
+    directory name. Strip to a conservative charset, then collapse ''/'.'/'..'-style all-dot names
+    to 'unknown' — otherwise a value like '..' would traverse out of runs_dir on save/forget."""
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", run_id or "")[:120]
+    return "unknown" if s.strip(".") == "" else s
 
 
 def runs_dir() -> str:
     return os.path.join(config_dir(), "runs")
 
 
+def _run_dir(run_id: str) -> str:
+    """The record directory for a run, guaranteed to be a direct child of runs_dir() (defense in
+    depth on top of _safe_id: reject anything that isn't a single contained component)."""
+    base = runs_dir()
+    d = os.path.join(base, _safe_id(run_id))
+    if os.path.dirname(os.path.normpath(d)) != os.path.normpath(base):
+        raise ValueError("unsafe run id")
+    return d
+
+
 def save_run_doc(run_id: str, name: str, doc: dict) -> str:
     """Persist one run document (name = 'reviewer-response' | 'reconciliation-result')."""
-    d = os.path.join(runs_dir(), _safe_id(run_id))
+    d = _run_dir(run_id)
     os.makedirs(d, exist_ok=True)
     for path in (runs_dir(), d):
         try:
@@ -379,7 +394,7 @@ def list_runs() -> list:
 
 
 def load_run(run_id: str) -> dict:
-    d = os.path.join(runs_dir(), _safe_id(run_id))
+    d = _run_dir(run_id)
 
     def _load(p):
         try:
@@ -396,8 +411,9 @@ def load_run(run_id: str) -> dict:
 
 
 def forget_run(run_id: str) -> bool:
-    d = os.path.join(runs_dir(), _safe_id(run_id))
-    if os.path.isdir(d):
+    d = _run_dir(run_id)
+    # Don't rmtree THROUGH a symlinked record dir, and report success only if it's actually gone.
+    if os.path.isdir(d) and not os.path.islink(d):
         shutil.rmtree(d, ignore_errors=True)
-        return True
+        return not os.path.exists(d)
     return False

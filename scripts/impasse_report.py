@@ -20,6 +20,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -35,9 +36,19 @@ STATE = {"accepted": "🤝 accepted", "rejected": "❌ rejected", "resolved": "�
 VRESULT = {"supports": "✔ supports", "contradicts": "✗ contradicts", "inconclusive": "~ inconclusive"}
 
 
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _clean(text) -> str:
+    """Strip terminal control/escape chars from UNTRUSTED reviewer text before rendering, so a
+    malicious review can't inject ANSI/cursor sequences into the operator's terminal. Keeps
+    tab and newline; textwrap handles layout."""
+    return _CTRL_RE.sub("", str(text))
+
+
 def _wrap(label: str, text: str, cont: str = "     ") -> str:
     # label on the first line only; continuation lines indented with `cont`.
-    return textwrap.fill(str(text), width=96, initial_indent=label, subsequent_indent=cont)
+    return textwrap.fill(_clean(text), width=96, initial_indent=label, subsequent_indent=cont)
 
 
 def _anchor_desc(anchor: dict) -> str:
@@ -64,10 +75,10 @@ def _anchor_desc(anchor: dict) -> str:
 
 def _render_finding(f: dict, item: dict | None) -> list[str]:
     lines = []
-    sev = SEVERITY.get(f.get("severity"), f.get("severity", "?"))
+    sev = SEVERITY.get(f.get("severity"), _clean(f.get("severity", "?")))
     state = STATE.get((item or {}).get("state"), "🔎 raised (not yet reconciled)")
-    cat = f.get("category", "")
-    lines.append(f"{f.get('id', '?')}  {sev}  {state}" + (f"  · {cat}" if cat else ""))
+    cat = _clean(f.get("category", ""))
+    lines.append(f"{_clean(f.get('id', '?'))}  {sev}  {state}" + (f"  · {cat}" if cat else ""))
     lines.append(_wrap("  🔎 Reviewer: ", f.get("claim", "")))
     for ev in f.get("evidence", []):
         desc = _anchor_desc(ev.get("anchor", {}))
@@ -184,7 +195,7 @@ def lifetime_recap() -> str:
         "━" * 78,
         f"📈 Your Impasse record — {n} {rev_word} reconciled",
         f"   {reviewed} findings reviewed · {accepted} accepted · "
-        f"{rejected} refuted with evidence · {yours} escalated to you",
+        f"{rejected} refuted with evidence · {yours} routed to you for a decision",
         "   Each raised by an independent reviewer and ruled on by the host before it reached you.",
     ]
     return "\n".join(lines)
@@ -292,10 +303,10 @@ def _main(argv=None) -> int:
         except (OSError, json.JSONDecodeError) as e:
             print(f"cannot read reconciliation file: {e}", file=sys.stderr)
             return 2
-        rid = doc.get("review_id")
-        if not isinstance(doc, dict) or not rid:
+        if not isinstance(doc, dict) or not doc.get("review_id"):
             print("reconciliation must be a JSON object with a review_id", file=sys.stderr)
             return 2
+        rid = doc["review_id"]
         path = lib.save_run_doc(rid, "reconciliation-result", doc)
         print(f"saved: {path}")
         return 0

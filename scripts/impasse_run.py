@@ -179,8 +179,10 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
             except OSError:
                 pass
 
+    t_in = None
     if input_bytes is not None:
-        threading.Thread(target=stdin_writer, daemon=True).start()
+        t_in = threading.Thread(target=stdin_writer, name="impasse-stdin", daemon=True)
+        t_in.start()
 
     termination = "completed"
     while True:
@@ -212,12 +214,20 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
         except subprocess.TimeoutExpired:
             termination = "termination_failed"
 
-    # On a clean completion the process is reaped, so the pipes are closed and the readers
-    # hit EOF promptly — join them reliably so stdout_truncated isn't under-reported. On a
-    # kill/termination path the output is already suspect, so bound the join.
-    join_timeout = None if termination == "completed" else 5
-    t_out.join(timeout=join_timeout)
-    t_err.join(timeout=join_timeout)
+    # Always tear down the process group, even on a clean leader exit: codex exec / claude -p
+    # shouldn't outlive their leader, but a stray descendant that kept a pipe open would block the
+    # reader joins and leak. Idempotent — swallow "group already gone".
+    try:
+        _kill_tree(proc)
+    except OSError:
+        pass
+
+    # Bound EVERY join (both readers + the stdin writer): a descendant holding a pipe open must
+    # never hang the supervisor. A finite bound is harmless on the fast clean path — EOF is prompt
+    # once the group is reaped, so joins return in milliseconds.
+    for t in (t_out, t_err, t_in):
+        if t is not None:
+            t.join(timeout=5)
     if t_out.is_alive() or t_err.is_alive():
         reader_err["v"] = True
     return RunResult(termination, proc.returncode, bytes(out), bytes(err),
@@ -256,13 +266,14 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
 _CLAUDE_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "WebFetch", "WebSearch", "Task"]
 
 
-def build_claude_argv(backend_command, *, instruction: str, effort: str | None = None) -> list[str]:
+def build_claude_argv(backend_command, *, instruction: str) -> list[str]:
     """Assemble a headless read-only `claude -p` review (the same-provider fallback backend).
 
     The artifact is piped on stdin as context (reaches EOF via the supervisor, same as codex);
     the instruction is the prompt. The final message is read from STDOUT — `claude -p` has no
-    `--output-last-message` file. `effort` has no Claude analog and is ignored. Both variadic
-    tool flags must come after the fixed flags; `--disallowed-tools` comes last. Read-only is
+    `--output-last-message` file. (Reasoning effort has no Claude analog, so there is no effort
+    knob here.) The variadic tool flags come after the fixed flags; `--disallowed-tools` comes
+    last. Read-only is
     enforced fail-closed — see the note on `_CLAUDE_DENIED_TOOLS` and docs/backends/claude.md.
     """
     return list(backend_command) + [
@@ -402,7 +413,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             argv = build_codex_argv(be.command, instruction=full_instruction,
                                     output_last_message=out_last, effort=effort)
         elif be.type == "claude-cli":
-            argv = build_claude_argv(be.command, instruction=full_instruction, effort=effort)
+            argv = build_claude_argv(be.command, instruction=full_instruction)
         else:
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
@@ -422,7 +433,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         if out_last is not None:            # codex writes the final message to a file
             try:
                 with open(out_last, "rb") as f:
-                    final = f.read().decode("utf-8", "replace")
+                    final = f.read(_MAX_FINAL + 1).decode("utf-8", "replace")   # bound memory
             except OSError:
                 pass
         else:                               # claude -p prints the final message to stdout
@@ -492,7 +503,8 @@ def _main(argv=None) -> int:
                     help="reviewer backend: codex (cross-provider, default) or claude (same-provider fallback)")
     rv.add_argument("--schema", default=None)
     rv.add_argument("--approve-send", default=None)
-    rv.add_argument("--effort", default=None)
+    rv.add_argument("--effort", default=None, choices=sorted(_ALLOWED_EFFORT),
+                    help="codex reasoning effort (ignored by the claude backend)")
     rv.add_argument("--wall", type=float, default=180.0)
     rv.add_argument("--idle", type=float, default=60.0)
     rv.add_argument("--no-record", action="store_true", help="don't persist the run record")

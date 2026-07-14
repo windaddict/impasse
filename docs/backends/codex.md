@@ -50,3 +50,10 @@ are version observations, not a durable API):
 The destination is `OPENAI_BASE_URL` (default `https://api.openai.com`). Consent is keyed to
 the normalized endpoint, so a custom base URL (Azure, a gateway, localhost) requires its own
 grant. See `docs/security-model.md`.
+
+**Known limitation (consent keying).** Impasse derives the consent destination from
+`OPENAI_BASE_URL`, but the Codex CLI also reads its own `~/.codex/config.toml`, which can point at
+a different provider or base URL. Impasse can't inspect that config, so if you've pointed Codex
+elsewhere there, the destination you approved may not be where data actually goes. Keep `~/.codex`
+consistent with the endpoint you grant (or set `OPENAI_BASE_URL` explicitly). The `claude` backend
+has the analogous limit and additionally *refuses* under `CLAUDE_CODE_USE_BEDROCK/VERTEX`.

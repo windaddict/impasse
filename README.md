@@ -1,19 +1,31 @@
 # Impasse
 
-> An independent second opinion for any high-stakes call — business, strategy, writing,
-> research, or code — from a cross-provider AI whose blind spots don't match your own.
-> The host verifies and reconciles the review under a defined protocol, then hands you the
-> problems worth acting on and the disagreements that need your decision.
+> **An independent second opinion for any high-stakes call — a decision, an essay, a research
+> claim, a dataset, or code — from a cross-provider AI whose blind spots don't match your own.**
 
-**Status: pre-release.** Impasse is the open reimplementation of the workflow described in the
-essay [*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
-The Codex CLI review path, the consent helper, and the schemas are implemented and tested; the
-verify → reconcile → escalate reasoning is **directed by the host skill** (the agent follows the
-protocol below), not enforced by the software — so a review is only as good as the host's
-adherence to the protocol, not a guarantee in code. Running it on its own source caught a real
-bug before release (a schema incompatibility with the Codex CLI's structured-output mode). It
-pins to a fast-moving alpha of the Codex CLI and is maintained on a best-effort basis: expect
-rough edges, and pin versions if you build on it.
+Impasse is **read-only**: the reviewer argues, it never edits your work. And unlike a plain code
+reviewer, it doesn't hand you a list to triage — it **verifies each finding, reconciles the two
+models, and escalates only the genuine disagreement.** You get the problems worth acting on, plus
+the one call that's actually yours.
+
+```mermaid
+flowchart LR
+    A["Your artifact<br/>decision · essay · research · data · code"] --> R["Reviewer<br/>cross-provider AI · read-only"]
+    R -->|"anchored findings"| V{"Host verifies<br/>each finding vs.<br/>the real artifact"}
+    V -->|"refuted"| X["dropped<br/>a confident miss"]
+    V -->|"verified"| F["actionable<br/>no human needed"]
+    V -->|"value / priority call"| Q(["one crisp question<br/>→ you decide"])
+    style Q fill:#f97316,color:#fff
+    style X fill:#e5e7eb,color:#111
+```
+
+**Status: pre-release.** The open implementation of the pattern from the essay
+[*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
+The Codex path, consent gate, and schemas are implemented and tested; verify → reconcile →
+escalate is **directed by the host skill, not enforced in code** — a review is only as good as the
+host's adherence to the protocol (see Guardrails). Dogfooding it on its own source caught a real
+shipping bug before release. It pins to a fast-moving alpha of the Codex CLI and is best-effort —
+expect rough edges.
 
 ## Why
 
@@ -51,6 +63,23 @@ to the single call that needs a human: [`docs/walkthrough-decision.md`](docs/wal
 
 Full protocol: [`docs/protocol.md`](docs/protocol.md).
 
+## What the reviewer checks for
+
+The reviewer **observes and argues — it never edits your artifact; correction is always your
+call.** Every finding must carry *anchored evidence*: a specific location **and** an observation of
+what's wrong there — never a bare "line 40 looks off." What it looks for adapts to the artifact:
+
+- **Decision / strategy** — hidden assumptions, unpriced tradeoffs, and each *materially-affected
+  stakeholder's* view (who executes it, who bears the downside, the customer, the regulator).
+- **Document / essay** — unsupported claims, weak or self-contradicting arguments, structure.
+- **Research** — a citation that doesn't support its claim, overgeneralization, missing counter-evidence.
+- **Code** — correctness, security, edge cases, missing error handling.
+- **Data / other** — whatever the artifact's own structure makes checkable.
+
+Then the host does the half the reviewer can't be trusted to do alone: **verify** each finding
+against the real artifact, **reject** the confident misses with evidence, and **escalate** only the
+judgment call. The reviewer proposes; you decide.
+
 ## What a run surfaces
 
 The output is what *survived* scrutiny — the reviewer's findings, with a disposition on each. On
@@ -81,6 +110,23 @@ genuine judgment calls come to you. Each `show` closes with a running tally acro
   independence — [`docs/backends/claude.md`](docs/backends/claude.md).
 - Python 3 (standard library only — the shipped helpers have no pip dependencies).
 - macOS or Linux. Windows via WSL; native Windows is a [roadmap](docs/windows.md).
+
+### How independent is it?
+
+Independence is a ladder, not a switch — and Impasse always tells you which rung you're on. A
+different provider is the point; the fallbacks trade independence for reach.
+
+```mermaid
+flowchart TB
+    B1["Different provider — Codex<br/>real independence · default"] --> B2["Same provider, fresh process<br/>Claude fallback · breadth, not independence"]
+    B2 --> B3["Self-review<br/>last resort · sandbox/Cowork only · refused for code"]
+    style B1 fill:#16a34a,color:#fff
+    style B2 fill:#eab308,color:#111
+    style B3 fill:#dc2626,color:#fff
+```
+
+Genuine independence needs a Codex login; the weaker rungs run on Claude alone. Detail:
+[`docs/environments.md`](docs/environments.md).
 
 ## Install
 

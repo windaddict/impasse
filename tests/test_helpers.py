@@ -365,7 +365,7 @@ def main() -> int:
     recap = report.lifetime_recap()
     check("2 reviews reconciled" in recap, "recap: counts reconciled runs")
     check("5 findings reviewed" in recap and "2 accepted" in recap, "recap: sums findings + accepted")
-    check("1 refuted with evidence" in recap and "2 escalated to you" in recap, "recap: refuted + (resolved+deadlocked) as yours")
+    check("1 refuted with evidence" in recap and "2 routed to you for a decision" in recap, "recap: refuted + (resolved+deadlocked) routed to you")
     lib.save_run_doc("recap-review-only", "reviewer-response",
                      {"schema_version": "1.0", "review_id": "recap-review-only",
                       "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
@@ -396,6 +396,16 @@ def main() -> int:
     check("old-open" in kept2 and "old-open" not in deleted2, "housekeeping: prune KEEPS old runs with open escalations")
     deleted3, _k = report.prune(1, include_open=True)
     check("old-open" in deleted3, "housekeeping: prune --include-open removes even open runs")
+
+    # --- hardening fixes surfaced by the cross-provider code audit ---
+    check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
+    check("/" not in lib._safe_id("a/b/../../etc") and lib._safe_id("a/b") == "a_b", "safe_id: path separators collapsed")
+    lib.save_run_doc("../evil", "reviewer-response", {"schema_version": "1.0", "review_id": "../evil", "findings": []})
+    escaped = os.path.join(os.path.dirname(lib.runs_dir()), "evil")
+    check(os.path.isdir(os.path.join(lib.runs_dir(), lib._safe_id("../evil"))) and not os.path.exists(escaped), "save_run_doc: a traversal review_id stays inside runs_dir")
+    lib.forget_run("../evil")
+    check(report._clean("a\x1b[31mX\x1b[0m\x07b") == "a[31mX[0mb", "report: strips ANSI/control escapes from untrusted reviewer text")
+    check(lib.review_mode("CODE", environment="chat_sandbox")["mode"] == "refuse", "review_mode: 'CODE' normalized -> still refused in the sandbox")
 
     print()
     if _fails:
