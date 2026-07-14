@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "reconciliation_id": "rc-failed-001",
+  "review_id": "rev-x-001",
+  "outcome": "failed",
+  "items": [],
+  "failure": { "code": "timeout", "message": "backend wall_timeout after 180s", "retryable": true }
+}

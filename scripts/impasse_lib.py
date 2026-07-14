@@ -120,7 +120,11 @@ def normalize_destination(endpoint: str) -> str:
 
 
 def _provider_label(destination_id: str) -> str:
-    return "OpenAI" if "openai.com" in destination_id else destination_id
+    # Exact host suffix, not a substring — 'evil-openai.com.attacker.net' must not read as OpenAI.
+    host = urlsplit(destination_id).hostname or ""
+    if host == "api.openai.com" or host.endswith(".openai.com") or host == "openai.com":
+        return "OpenAI"
+    return destination_id
 
 
 def get_backend(name: str = "codex") -> Backend:

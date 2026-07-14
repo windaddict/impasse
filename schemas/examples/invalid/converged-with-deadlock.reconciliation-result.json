@@ -1,0 +1,1 @@
+{ "schema_version": "1.0", "reconciliation_id": "x", "review_id": "r", "outcome": "converged", "items": [ { "finding_id": "F001", "state": "deadlocked", "escalation": { "dispute_kind": "value_or_priority_tradeoff", "stop_reason": "operator_authority_required" } } ] }

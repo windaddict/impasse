@@ -51,23 +51,26 @@ def main() -> int:
     reviewer = Draft202012Validator(reviewer_schema, format_checker=FormatChecker())
     reconcile = Draft202012Validator(reconcile_schema, format_checker=FormatChecker())
 
+    def pick(path):
+        if path.name.endswith(".reviewer-response.json"):
+            return reviewer, "reviewer"
+        if path.name.endswith(".reconciliation-result.json"):
+            return reconcile, "reconciliation"
+        return None, None
+
+    # Positive fixtures: must validate.
     checked = 0
     for path in sorted(EXAMPLES.glob("*.json")) if EXAMPLES.is_dir() else []:
-        if path.name.endswith(".reviewer-response.json"):
-            validator, label = reviewer, "reviewer"
-        elif path.name.endswith(".reconciliation-result.json"):
-            validator, label = reconcile, "reconciliation"
-        else:
+        validator, label = pick(path)
+        if validator is None:
             failures.append(f"{path.name}: unrecognized example suffix")
             continue
-
         doc = load(path)
         errs = sorted(validator.iter_errors(doc), key=lambda e: list(e.path))
         if errs:
             for e in errs:
                 failures.append(f"{path.name}: {'/'.join(map(str, e.path)) or '<root>'}: {e.message}")
             continue
-
         # Invariant JSON Schema can't express: unique finding ids in a reviewer example.
         if label == "reviewer":
             ids = [f["id"] for f in doc.get("findings", [])]
@@ -75,19 +78,37 @@ def main() -> int:
             if dupes:
                 failures.append(f"{path.name}: duplicate finding ids {sorted(dupes)}")
                 continue
-
         checked += 1
         print(f"  valid ({label}): {path.name}")
 
+    # Negative fixtures: each MUST be rejected — this is what proves the enforced invariants
+    # (approve => 0 findings, converged => no deadlocked item, deadlocked item => escalation,
+    # failed => failure, evidence needs a non-empty observation) actually bite. Without these,
+    # a schema edit that deletes an `allOf` clause would pass CI.
+    invalid_dir = EXAMPLES / "invalid"
+    rejected = 0
+    for path in sorted(invalid_dir.glob("*.json")) if invalid_dir.is_dir() else []:
+        validator, label = pick(path)
+        if validator is None:
+            failures.append(f"invalid/{path.name}: unrecognized example suffix")
+            continue
+        if validator.is_valid(load(path)):
+            failures.append(f"invalid/{path.name}: expected REJECTION but the document validated")
+            continue
+        rejected += 1
+        print(f"  correctly rejected: invalid/{path.name}")
+
     if not EXAMPLES.is_dir() or checked == 0:
         failures.append("no example fixtures found under schemas/examples/")
+    if rejected == 0:
+        failures.append("no negative fixtures found under schemas/examples/invalid/")
 
     if failures:
         print("\nFAILURES:")
         for f in failures:
             print(f"  - {f}")
         return 1
-    print(f"\nAll schemas + {checked} examples valid.")
+    print(f"\nAll schemas valid · {checked} positive examples · {rejected} negative fixtures correctly rejected.")
     return 0
 
 

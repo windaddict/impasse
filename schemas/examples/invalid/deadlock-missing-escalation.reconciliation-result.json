@@ -1,0 +1,1 @@
+{ "schema_version": "1.0", "reconciliation_id": "x", "review_id": "r", "outcome": "deadlocked", "items": [ { "finding_id": "F001", "state": "deadlocked" } ] }

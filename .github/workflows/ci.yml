@@ -13,9 +13,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: install dev dependency
-        run: pip install jsonschema
-      - name: validate schemas + examples
+      - name: install dev dependencies
+        run: pip install jsonschema ruff
+      - name: lint
+        run: ruff check scripts/ tests/
+      - name: validate schemas + examples (positive + negative fixtures)
         run: python tests/validate_schemas.py
       - name: helper tests (stdlib only)
         run: python tests/test_helpers.py

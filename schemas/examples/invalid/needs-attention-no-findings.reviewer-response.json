@@ -1,0 +1,1 @@
+{ "schema_version": "1.0", "review_id": "r", "artifact": { "kind": "code", "revision": { "algorithm": "sha256", "value": "x" } }, "assessment": "needs_attention", "summary": "s", "findings": [] }

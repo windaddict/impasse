@@ -47,7 +47,8 @@ def _load() -> dict:
     p = consent_path()
     if os.path.isfile(p) and not os.path.islink(p):
         try:
-            data = json.loads(open(p, encoding="utf-8").read())
+            with open(p, encoding="utf-8") as fh:
+                data = json.loads(fh.read())
             if (isinstance(data, dict) and data.get("version") == CONSENT_VERSION
                     and isinstance(data.get("grants"), list)):
                 return data
@@ -167,26 +168,45 @@ def check(backend: "lib.Backend", manifest: dict | None = None,
 def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="impasse_consent")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    g = sub.add_parser("grant"); g.add_argument("destination"); g.add_argument("--endpoint", default=""); g.add_argument("--backend-type", default=""); g.add_argument("--provider", default="")
-    r = sub.add_parser("revoke"); r.add_argument("destination")
+    g = sub.add_parser("grant")
+    g.add_argument("destination")
+    g.add_argument("--endpoint", default="")
+    g.add_argument("--backend-type", default="")
+    g.add_argument("--provider", default="")
+    r = sub.add_parser("revoke")
+    r.add_argument("destination")
     sub.add_parser("list")
-    c = sub.add_parser("check"); c.add_argument("destination"); c.add_argument("--endpoint", default=""); c.add_argument("--backend-type", default="codex-cli"); c.add_argument("--provider", default="openai"); c.add_argument("--approve-send", default=None)
+    c = sub.add_parser("check")
+    c.add_argument("destination")
+    c.add_argument("--endpoint", default="")
+    c.add_argument("--backend-type", default="codex-cli")
+    c.add_argument("--provider", default="openai")
+    c.add_argument("--approve-send", default=None)
     args = ap.parse_args(argv)
 
-    if args.cmd == "grant":
-        grant(args.destination, args.backend_type, args.endpoint, args.provider)
-        print(f"granted: {args.destination}")
-        return 0
-    if args.cmd == "revoke":
-        print("revoked" if revoke(args.destination) else "no grant found")
-        return 0
     if args.cmd == "list":
         for gr in _load()["grants"]:
             print(f"  {gr['destination_id']}  ({gr.get('endpoint', '')})  granted {gr.get('granted_at', '')}")
         return 0
+
+    # grant / revoke / check key on the NORMALIZED destination, matching the runtime check —
+    # otherwise a grant for "https://API.OpenAI.com/v1" would never match "https://api.openai.com".
+    try:
+        dest = lib.normalize_destination(args.destination)
+    except ValueError as e:
+        print(f"invalid destination (expected an https URL): {e}", file=sys.stderr)
+        return 2
+
+    if args.cmd == "grant":
+        grant(dest, args.backend_type, args.endpoint or dest, args.provider)
+        print(f"granted: {dest}")
+        return 0
+    if args.cmd == "revoke":
+        print("revoked" if revoke(dest) else "no grant found")
+        return 0
     if args.cmd == "check":
         be = lib.Backend(name="codex", type=args.backend_type, provider=args.provider,
-                         destination_id=args.destination, endpoint=args.endpoint or "(unknown)", command=[])
+                         destination_id=dest, endpoint=args.endpoint or dest, command=[])
         ok, msg = check(be, approve_send=args.approve_send)
         print(msg)
         return 0 if ok else 3

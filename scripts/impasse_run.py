@@ -30,6 +30,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -129,8 +130,10 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
     except (OSError, ValueError) as e:
         return RunResult("spawn_error", None, b"", str(e).encode(), False, False, False, 0.0)
 
-    out = bytearray(); err = bytearray()
-    out_trunc = {"v": False}; err_trunc = {"v": False}
+    out = bytearray()
+    err = bytearray()
+    out_trunc = {"v": False}
+    err_trunc = {"v": False}
     reader_err = {"v": False}
     last = [time.monotonic()]
     lock = threading.Lock()
@@ -161,7 +164,8 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
 
     t_out = threading.Thread(target=reader, args=(proc.stdout, out, out_trunc), daemon=True)
     t_err = threading.Thread(target=reader, args=(proc.stderr, err, err_trunc), daemon=True)
-    t_out.start(); t_err.start()
+    t_out.start()
+    t_err.start()
 
     # Write stdin on a thread so a backend that stops reading can't block the supervisor.
     def stdin_writer():
@@ -184,11 +188,13 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
             break
         now = time.monotonic()
         if now - start >= wall_timeout:
-            termination = "wall_timeout"; break
+            termination = "wall_timeout"
+            break
         with lock:
             idle = now - last[0]
         if idle >= idle_timeout:
-            termination = "idle_timeout"; break
+            termination = "idle_timeout"
+            break
         time.sleep(0.2)
 
     if termination != "completed":
@@ -206,7 +212,12 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
         except subprocess.TimeoutExpired:
             termination = "termination_failed"
 
-    t_out.join(timeout=2); t_err.join(timeout=2)
+    # On a clean completion the process is reaped, so the pipes are closed and the readers
+    # hit EOF promptly — join them reliably so stdout_truncated isn't under-reported. On a
+    # kill/termination path the output is already suspect, so bound the join.
+    join_timeout = None if termination == "completed" else 5
+    t_out.join(timeout=join_timeout)
+    t_err.join(timeout=join_timeout)
     if t_out.is_alive() or t_err.is_alive():
         reader_err["v"] = True
     return RunResult(termination, proc.returncode, bytes(out), bytes(err),
@@ -255,9 +266,9 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
         return _fail("consent_denied", notice, kind, notice, manifest)
 
     scratch = tempfile.mkdtemp(prefix="impasse-run-", dir=lib.ensure_config_dir())
-    out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
-    os.close(out_fd)
     try:
+        out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
+        os.close(out_fd)
         argv = build_codex_argv(backend.command, instruction=instruction,
                                 output_last_message=out_last, schema_path=schema_path, effort=effort)
         result = supervise(argv, input_bytes=artifact_bytes,
@@ -294,28 +305,21 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
             "ok": True, "kind": kind, "termination": result.termination,
             "duration_s": round(result.duration_s, 2),
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
-            "stdout_truncated": result.stdout_truncated,
             "notice": notice, "manifest": manifest,
         }
     finally:
-        try:
-            os.remove(out_last)
-        except OSError:
-            pass
-        try:
-            os.rmdir(scratch)
-        except OSError:
-            pass
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _read_limited(path: str, limit: int, *, binary: bool) -> bytes | str:
-    size = os.path.getsize(path)
-    if size > limit:
-        raise ValueError(f"{path} is {size} bytes (limit {limit})")
+    # Read limit+1 and reject if longer — no getsize()/read() TOCTOU.
     mode = "rb" if binary else "r"
     kwargs = {} if binary else {"encoding": "utf-8"}
     with open(path, mode, **kwargs) as f:
-        return f.read()
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path} exceeds {limit} bytes")
+    return data
 
 
 def _main(argv=None) -> int:

@@ -39,6 +39,8 @@ content = {
     "notjson": "this is not json at all",
     "noshape": '{"hello":"world"}',
 }.get(mode, "")
+import time
+time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
 if outp and mode != "nowrite":
     open(outp, "w").write(content)
 print('{"type":"turn.completed"}')
@@ -60,10 +62,25 @@ def main() -> int:
     check(lib.artifact_revision(b"hello")["value"] and len(lib.artifact_revision(b"hello")["value"]) == 64, "artifact_revision")
     check(lib.normalize_destination("https://api.openai.com/v1") == "https://api.openai.com", "normalize_destination strips path")
     try:
-        lib.normalize_destination("https://user:pass@host/x"); creds_ok = False
+        lib.normalize_destination("https://user:pass@host/x")
+        creds_ok = False
     except ValueError:
         creds_ok = True
     check(creds_ok, "normalize_destination rejects embedded credentials")
+    try:
+        lib.normalize_destination("ftp://h")
+        scheme_ok = False
+    except ValueError:
+        scheme_ok = True
+    check(scheme_ok, "normalize_destination rejects non-http(s) scheme")
+    check(lib.normalize_destination("https://H:8443/x") == "https://h:8443", "normalize preserves port, lowercases host")
+    check(lib._provider_label("https://evil-openai.com.attacker.net") != "OpenAI", "provider_label not fooled by substring host")
+    try:
+        lib.get_backend("gemini")
+        unknown_ok = False
+    except ValueError:
+        unknown_ok = True
+    check(unknown_ok, "get_backend rejects an unknown backend")
 
     D1 = "https://api.openai.com"
     D2 = "https://azure.example.com"
@@ -85,11 +102,35 @@ def main() -> int:
     m = consent.manifest_for_bytes(b"x" * 4000)
     check(m["total_bytes"] == 4000 and m["digest"].startswith("sha256:"), "manifest_for_bytes has size + digest")
 
+    # consent integrity: a corrupt/wrong-version/symlinked consent file must fall back to BLOCK.
+    consent.grant(D1, "codex-cli", D1, "OpenAI")
+    with open(consent.consent_path(), "w") as fh:
+        fh.write('{"version":2,"grants":[{"destination_id":"' + D1 + '","notice_version":"1"}]}')
+    check(consent.check(be1)[0] is False, "consent: wrong-version file falls back to block")
+    with open(consent.consent_path(), "w") as fh:
+        fh.write("not json at all")
+    check(consent.check(be1)[0] is False, "consent: malformed file falls back to block")
+    with open(consent.consent_path(), "w") as fh:
+        fh.write('{"version":1,"grants":[{"destination_id":"' + D1 + '","notice_version":"0"}]}')
+    check(consent.has_grant(D1) is False, "consent: stale notice_version grant does not approve")
+    os.remove(consent.consent_path())
+    os.symlink(os.path.join(tmp, "nonexistent-target"), consent.consent_path())
+    try:
+        consent.grant(D1, "codex-cli", D1, "OpenAI")
+        symlink_ok = False
+    except OSError:
+        symlink_ok = True
+    check(symlink_ok, "consent: _save refuses to write through a symlink")
+    os.remove(consent.consent_path())
+
     # --- supervisor ---
     r = run.supervise(["bash", "-c", "printf hi"], wall_timeout=10, idle_timeout=5)
     check(r.termination == "completed" and r.exit_code == 0 and r.stdout == b"hi", "supervise: completed + stdout")
     r = run.supervise(["cat"], input_bytes=b"piped-eof", wall_timeout=10, idle_timeout=5)
     check(r.termination == "completed" and r.stdout == b"piped-eof", "supervise: stdin delivered + EOF")
+
+    r = run.supervise(["/definitely/not/a/real/binary/xyz"], wall_timeout=5, idle_timeout=5)
+    check(r.termination == "spawn_error" and r.exit_code is None, "supervise: spawn_error on a bad binary")
 
     try:
         run.supervise(["true"], wall_timeout=0)
@@ -112,6 +153,8 @@ def main() -> int:
         t0 = time.monotonic()
         r = run.supervise(["bash", "-c", "sleep 60"], input_bytes=b"x" * 300000, wall_timeout=100, idle_timeout=2)
         check(r.termination == "idle_timeout" and time.monotonic() - t0 < 15, "supervise: large stdin to a non-reader still times out")
+        r = run.supervise(["bash", "-c", "yes | head -c 5000"], max_output_bytes=1000, wall_timeout=10, idle_timeout=5)
+        check(r.stdout_truncated is True and len(r.stdout) == 1000, "supervise: output truncated at max_output_bytes")
 
     # --- review() end-to-end via a fake codex backend ---
     fake = os.path.join(tmp, "fake-codex")
@@ -122,7 +165,8 @@ def main() -> int:
     os.environ.pop("OPENAI_BASE_URL", None)  # default destination https://api.openai.com
 
     # consent still enforced first:
-    os.environ["FAKE_MODE"] = "valid"; os.environ["FAKE_EXIT"] = "0"
+    os.environ["FAKE_MODE"] = "valid"
+    os.environ["FAKE_EXIT"] = "0"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", approve_send=None)
     check(res["ok"] is False and res["failure"]["code"] == "consent_denied", "review: blocked without consent")
 
@@ -138,9 +182,22 @@ def main() -> int:
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] is False and res["failure"]["code"] == "invalid_response", "review: wrong-shape JSON -> invalid_response")
 
-    os.environ["FAKE_MODE"] = "valid"; os.environ["FAKE_EXIT"] = "3"
+    os.environ["FAKE_MODE"] = "valid"
+    os.environ["FAKE_EXIT"] = "3"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] is False and res["failure"]["code"] == "backend_error", "review: nonzero exit -> backend_error")
+
+    os.environ["FAKE_MODE"] = "nowrite"
+    os.environ["FAKE_EXIT"] = "0"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
+    check(res["ok"] is False and res["failure"]["code"] == "invalid_response", "review: no final message -> invalid_response")
+
+    if os.name == "posix":
+        os.environ["FAKE_MODE"] = "valid"
+        os.environ["FAKE_SLEEP"] = "5"
+        res = run.review(kind="code", instruction="review", artifact_bytes=b"code", wall_timeout=1, idle_timeout=100)
+        check(res["ok"] is False and res["failure"]["code"] == "timeout", "review: backend exceeding wall -> timeout")
+        os.environ.pop("FAKE_SLEEP", None)
 
     try:
         run.review(kind="code", instruction="x", artifact_bytes=b"a", effort="minimal")

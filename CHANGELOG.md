@@ -22,3 +22,18 @@ All notable changes to Impasse are documented here. This project adheres to
     timeouts, POSIX process-group termination with bounded reap, size-capped capture,
     and JSON/shape classification of reviewer output (never reports failure as success).
     Reliable process-group kill is POSIX-only; Windows is a roadmap.
+
+### Pre-publish hardening (five-reviewer pass: Codex prose + security/bug/coverage agents)
+- Docs: reframed the core promise so it matches read-only behavior (you get the verified
+  findings *and* the escalated deadlocks, not "only" the deadlock); marked reconciliation as
+  host-directed (not script-enforced); absolute skill-root paths; accurate OpenAI-plugin
+  comparison; softened the independence claim; a concrete escalation example.
+- Code: `review()` output-file creation moved inside the cleanup scope and uses
+  `shutil.rmtree`; reliable reader-drain on clean completion (dropped a misleading
+  `stdout_truncated` from the `review()` result); `_read_limited` reads `limit+1` (no TOCTOU);
+  consent CLI normalizes destinations to match runtime keys; `_provider_label` uses an exact
+  host suffix; `with open()` for the consent read.
+- Tests: negative schema fixtures under `schemas/examples/invalid/` (the enforced invariants
+  are now proven to *reject*); positive `approve`/`failed` fixtures; consent-integrity tests
+  (malformed/wrong-version/symlink → block; notice-version drift); supervisor spawn-error +
+  truncation; `review()` timeout + no-final classification; ruff lint in CI.

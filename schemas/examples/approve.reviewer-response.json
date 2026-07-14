@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "review_id": "rev-approve-001",
+  "artifact": { "kind": "document", "revision": { "algorithm": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" } },
+  "scope": { "requested": ["clarity", "unsupported claims"] },
+  "assessment": "approve",
+  "summary": "No material findings under the requested scope.",
+  "findings": []
+}

@@ -1,19 +1,21 @@
 # Impasse
 
 > An independent second opinion for any high-stakes call — business, strategy, writing,
-> research, or code — from a rival AI whose blind spots don't match your own.
-> **Only the disagreement they can't settle reaches you.**
+> research, or code — from a cross-provider AI whose blind spots don't match your own.
+> It verifies and reconciles the review, then hands you the problems worth acting on and
+> the disagreements that need your decision.
 
-**Status: pre-release.** The schemas, the stdlib helpers, and the skill are in place and
-tested; the README and docs describe the intended shape. Expect rough edges.
+**Status: pre-release.** The Codex CLI review path, the consent helper, and the schemas are
+implemented and tested; verification, reconciliation, and escalation are currently directed by
+the host skill rather than enforced end to end. Expect rough edges.
 
 ## Why
 
 The value of a second AI isn't a smarter answer — it's *independence*. A reviewer trained by a
-different provider fails in different places, so where the two models **can't agree** is
-exactly the spot that still needs a human. Impasse runs that rival review, reconciles the two
-models, and surfaces only the residue: the evidence-backed deadlock, or the genuine judgment
-call. Agreement is evidence, not proof.
+different provider may fail in different places, so a disagreement is a useful signal for where
+a human should look. Impasse runs that cross-provider review, **verifies each finding**,
+reconciles the two models, and reports the verified problems plus the disagreements that need
+your judgment — not a raw list to triage. Agreement is evidence, not proof.
 
 It is **domain-general** — the same protocol reviews:
 
@@ -30,8 +32,13 @@ It is **domain-general** — the same protocol reviews:
    evidence).
 2. **Verify** — the host checks each finding against the actual artifact before trusting it.
 3. **Reconcile** — accept / reject (with evidence) / resolve each finding; one rebuttal round.
-4. **Escalate only the deadlock** — what the two models can't settle (an evidence conflict, or
-   a value/priority judgment that's yours to make) is put to you as a crisp question.
+4. **Report + escalate** — you get the verified findings to act on, and *only* the deadlock —
+   an evidence conflict, or a value/priority judgment that's yours to make — comes to you as a
+   crisp question:
+
+   > **Question for you:** The reviewer argues that entering Europe first reduces concentration
+   > risk; the memo argues it delays break-even by nine months. Which matters more here —
+   > runway, or geographic diversification?
 
 Full protocol: [`docs/protocol.md`](docs/protocol.md).
 
@@ -51,7 +58,7 @@ Impasse is a Claude Code skill — the repository *is* the skill directory:
 git clone https://github.com/windaddict/impasse ~/.claude/skills/impasse
 ```
 
-Then ask Claude Code for a second opinion on an artifact, or invoke `/impasse`.
+Then ask Claude Code to use Impasse — for example, "Use Impasse to review this decision memo."
 
 ## Data boundary & consent
 
@@ -60,7 +67,7 @@ default** until you approve the destination, and shows a payload manifest so you
 is sent, not just *where*:
 
 ```bash
-python3 scripts/impasse_consent.py grant https://api.openai.com --endpoint https://api.openai.com --backend-type codex-cli
+python3 scripts/impasse_consent.py grant https://api.openai.com --backend-type codex-cli
 ```
 
 Consent is keyed to the normalized endpoint (a custom `OPENAI_BASE_URL` needs its own grant),
@@ -87,10 +94,11 @@ model.
 ## Related work
 
 OpenAI ships an official [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc)
-that runs Codex as a **code** reviewer and returns findings for a human to triage. Impasse is a
-different layer: **domain-general** (not just code) and it **reconciles** the two models,
-escalating only what they can't settle. It uses the Codex CLI as one backend; the protocol is
-backend-neutral.
+with read-only and adversarial **code** review, an optional review gate, and delegated Codex
+tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
+(decisions, documents, research, data, and code) that verifies each finding and reconciles the
+two models, escalating only what they can't settle rather than returning the review to triage.
+It uses the Codex CLI as its reference backend; the protocol is backend-neutral.
 
 ## Repository layout
 
