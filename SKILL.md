@@ -103,8 +103,10 @@ IMPASSE_ROOT="$HOME/.claude/skills/impasse"   # or the host's skill-root variabl
    runtime. Don't rely on fields the runner didn't check without validating them yourself.
 5. **Verify, reconcile, and escalate** per the protocol. In Claude Code, put each deadlock's
    `operator_question` to the operator with `AskUserQuestion`; batch multiple deadlocks.
-6. **Record and report.** The runner already persisted the reviewer's findings (a run record).
-   Save your reconciliation the same way, then show the operator the report:
+6. **Record and report.** The runner already persisted the reviewer's findings (a run record) —
+   its result includes `record_notice` (where it saved, `0600`, and how to skip/delete).
+   **Surface that to the operator** so they know the reviewed content is on disk. Save your
+   reconciliation the same way, then show the operator the report:
    ```bash
    python3 "$IMPASSE_ROOT/scripts/impasse_report.py" save-reconciliation <reconciliation.json>
    python3 "$IMPASSE_ROOT/scripts/impasse_report.py" show <review_id>

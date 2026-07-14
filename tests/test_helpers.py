@@ -214,8 +214,10 @@ def main() -> int:
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] and res.get("recorded") is True, "run record: review persists a record by default")
     check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
+    check(res.get("record_path") and "Recorded locally" in (res.get("record_notice") or ""), "run record: result surfaces where it was saved")
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
     check(res.get("recorded") is False, "run record: --no-record skips persistence")
+    check(res.get("record_notice") == "Not recorded (--no-record).", "run record: --no-record notice surfaced")
 
     drid = _json.load(open("schemas/examples/decision.reviewer-response.json"))["review_id"]
     lib.save_run_doc(drid, "reviewer-response", _json.load(open("schemas/examples/decision.reviewer-response.json")))

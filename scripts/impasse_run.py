@@ -303,17 +303,27 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
 
         run_id = parsed.get("review_id")
         recorded = False
+        record_path = None
+        # Persistence is a data boundary too: surface where the reviewed content lands locally.
+        record_notice = "Not recorded (--no-record)." if no_record else None
         if run_id and not no_record:
             try:
-                lib.save_run_doc(run_id, "reviewer-response", parsed)
+                p = lib.save_run_doc(run_id, "reviewer-response", parsed)
                 recorded = True
+                record_path = os.path.dirname(p)
+                record_notice = (
+                    f"Recorded locally at {record_path} (0600) — this holds the reviewed content. "
+                    f"Re-run with --no-record to skip; `impasse_report.py forget {run_id}` to delete; "
+                    f"`impasse_report.py prune --older-than N` to clean up old records."
+                )
             except OSError:
                 pass
         return {
             "ok": True, "kind": kind, "termination": result.termination,
             "duration_s": round(result.duration_s, 2),
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
-            "run_id": run_id, "recorded": recorded,
+            "run_id": run_id, "recorded": recorded, "record_path": record_path,
+            "record_notice": record_notice,
             "notice": notice, "manifest": manifest,
         }
     finally:
