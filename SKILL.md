@@ -14,12 +14,15 @@ research, or code — from a cross-provider AI whose blind spots don't match you
 
 The value is not a smarter answer. It is *independence*: a reviewer trained by a different
 provider may fail in different places, so a disagreement is a useful signal for where a
-human should look — though agreement is not proof. Impasse runs the review, **verifies each
-finding**, reconciles the two models, and hands you the reconciled result: the verified
-problems to act on, and the disagreements that need your judgment — not a raw list to triage.
+human should look — though agreement is not proof. Impasse runs the review; the **host** then
+verifies each finding, reconciles the two models, and hands you the reconciled result: the
+verified problems to act on, and the disagreements that need your judgment — not a raw list to
+triage. (Verify/reconcile/escalate are directed by this skill — see the banner above.)
 
-This is **read-only.** The reviewer observes and argues; it does not edit the artifact
-(delegated editing is a separate, experimental, opt-in capability — `docs/delegate-mode.md`).
+This is **read-only on the artifact.** The reviewer observes and argues; it never edits the
+artifact under review. It *does* write local run records to disk (see Housekeeping and
+`docs/security-model.md`). Delegated editing of the artifact is a separate, experimental,
+opt-in capability — `docs/delegate-mode.md`.
 
 ## Roles (backend-neutral vocabulary)
 
@@ -42,18 +45,22 @@ This is **read-only.** The reviewer observes and argues; it does not edit the ar
 Per-finding, not one global loop. Detail + the state machine: `docs/protocol.md`.
 
 1. **Prepare.** Identify the artifact and its `kind`. The runner reports a digest of the exact
-   bytes sent (in the consent manifest); use it as the artifact revision so findings can't
-   later be reconciled against changed content.
+   bytes sent (in the consent manifest); the **host sets `artifact.revision` in the
+   reviewer-response from that digest** (the reviewer can't know it), so findings can't later be
+   reconciled against changed content.
 2. **Review.** The reviewer returns structured **observations** — findings, each with
    *anchored evidence* (a location in the artifact **plus** an observation; a bare location
-   is not evidence) — validated against `schemas/reviewer-response.v1.json`.
+   is not evidence) — shaped by `schemas/reviewer-response.v1.json`. The runner shape-checks the
+   JSON; **full schema validation is the host's job (step 4) / CI**, not the runtime path.
 3. **Verify — examine before trusting.** For each finding, the host checks the evidence
    against the *actual* artifact/facts (read the lines, run the test, retrieve the source).
    The reviewer is frequently useful and sometimes confidently wrong.
 4. **Reconcile.** Disposition each finding: **accepted** (host agrees), **rejected** (host
-   refuted it, *with evidence*), **resolved** (addressed), or **deadlocked**. Give the
-   reviewer at most **one rebuttal round** on contested findings; stop when neither side
-   brings new evidence.
+   refuted it, *with evidence*), **resolved** (addressed — *and* the state an escalated deadlock
+   moves to once the operator answers it, with their decision as the `resolution`), or
+   **deadlocked**. Optionally give the reviewer **one rebuttal round** on a contested finding:
+   re-invoke `review` with the contested finding + your rejection reason appended to the
+   instruction, asking it to substantiate or withdraw. Stop when neither side brings new evidence.
 5. **Report, then escalate.** Report the verified findings — what both models agree is real,
    after verification — for the operator to act on. Escalate *only* the deadlock — an evidence
    conflict neither can win, or a value/priority call that is the operator's to make — as a
@@ -120,9 +127,10 @@ IMPASSE_ROOT="$HOME/.claude/skills/impasse"   # or the host's skill-root variabl
 > You are an independent reviewer giving a rigorous second opinion on the artifact provided
 > on stdin. Be blunt and specific; do not flatter or soften. Your job is to find what is
 > wrong, unsupported, risky, or wrongly assumed — and to say what would change your mind.
-> **Every finding must carry evidence:** a concrete anchor into the artifact (or an external
-> source) *and* an observation of what there supports the claim. A bare location is not
-> evidence. Rank findings by impact, not by your confidence (report confidence separately).
+> **Every finding must carry evidence:** a concrete anchor *into the artifact* **and** an
+> observation of what there supports the claim (optionally *also* an external-source citation —
+> which supplements the anchor, it never replaces it). A bare location is not evidence. Rank
+> findings by impact, not by your confidence (report confidence separately).
 > If you cannot evaluate something, say so in `limitations` rather than guessing. Return
 > ONLY a JSON object conforming to the reviewer-response schema.
 
