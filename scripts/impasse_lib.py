@@ -8,9 +8,12 @@ POSIX (macOS/Linux) is the supported runtime; Windows is a documented roadmap.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -155,3 +158,87 @@ def sha256_prefixed(data: bytes) -> str:
 def artifact_revision(data: bytes) -> dict:
     """The schema's artifact.revision object for the exact bytes reviewed."""
     return {"algorithm": "sha256", "value": hashlib.sha256(data).hexdigest()}
+
+
+# --- Run records (the audit trail) -------------------------------------------------
+# A run is persisted under config_dir()/runs/<run_id>/ as reviewer-response.json and
+# reconciliation-result.json, keyed by the review_id that links them. These files
+# contain artifact content and are sensitive — 0600 in a 0700 dir, and never committed
+# (see .gitignore). `forget_run` deletes one.
+
+def _safe_id(run_id: str) -> str:
+    return (re.sub(r"[^A-Za-z0-9._-]", "_", run_id or "")[:120]) or "unknown"
+
+
+def runs_dir() -> str:
+    return os.path.join(config_dir(), "runs")
+
+
+def save_run_doc(run_id: str, name: str, doc: dict) -> str:
+    """Persist one run document (name = 'reviewer-response' | 'reconciliation-result')."""
+    d = os.path.join(runs_dir(), _safe_id(run_id))
+    os.makedirs(d, exist_ok=True)
+    for path in (runs_dir(), d):
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+    target = os.path.join(d, f"{name}.json")
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{name}-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return target
+
+
+def list_runs() -> list:
+    d = runs_dir()
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for name in os.listdir(d):
+        rd = os.path.join(d, name)
+        if not os.path.isdir(rd):
+            continue
+        out.append({
+            "run_id": name,
+            "has_review": os.path.isfile(os.path.join(rd, "reviewer-response.json")),
+            "has_reconciliation": os.path.isfile(os.path.join(rd, "reconciliation-result.json")),
+            "mtime": os.path.getmtime(rd),
+        })
+    return sorted(out, key=lambda r: r["mtime"], reverse=True)
+
+
+def load_run(run_id: str) -> dict:
+    d = os.path.join(runs_dir(), _safe_id(run_id))
+
+    def _load(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    return {
+        "run_id": _safe_id(run_id),
+        "reviewer_response": _load(os.path.join(d, "reviewer-response.json")),
+        "reconciliation_result": _load(os.path.join(d, "reconciliation-result.json")),
+    }
+
+
+def forget_run(run_id: str) -> bool:
+    d = os.path.join(runs_dir(), _safe_id(run_id))
+    if os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True)
+        return True
+    return False

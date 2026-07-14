@@ -206,6 +206,27 @@ def main() -> int:
         bad_eff = True
     check(bad_eff, "review: rejects disallowed effort ('minimal')")
 
+    # --- run records (audit trail) + report ---
+    import json as _json
+    import impasse_report as report
+    os.environ["FAKE_MODE"] = "valid"
+    os.environ["FAKE_EXIT"] = "0"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
+    check(res["ok"] and res.get("recorded") is True, "run record: review persists a record by default")
+    check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res.get("recorded") is False, "run record: --no-record skips persistence")
+
+    drid = _json.load(open("schemas/examples/decision.reviewer-response.json"))["review_id"]
+    lib.save_run_doc(drid, "reviewer-response", _json.load(open("schemas/examples/decision.reviewer-response.json")))
+    lib.save_run_doc(drid, "reconciliation-result", _json.load(open("schemas/examples/decision.reconciliation-result.json")))
+    out = report.render(lib.load_run(drid))
+    check("Decisions:" in out and "escalated to you" in out, "report: renders the decisions tally")
+    check("reviewer ▶" in out and "you      ◀" in out, "report: shows the reviewer/host back-and-forth")
+    check("Question for you" in out and "decision(s) need you" in out, "report: shows the escalated question")
+    check(any(r["run_id"] == drid for r in lib.list_runs()), "run record: listed by list_runs")
+    check(lib.forget_run(drid) is True and lib.load_run(drid)["reviewer_response"] is None, "run record: forget deletes it")
+
     print()
     if _fails:
         print(f"{len(_fails)} FAILURES: " + "; ".join(_fails))

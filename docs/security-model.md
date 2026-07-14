@@ -35,8 +35,13 @@ under that provider's terms and retention.
   paths, or the instruction.
 - Reasoning-effort values are allowlisted before being passed to the backend.
 - The reviewer runs read-only by default. Wall + idle timeouts and POSIX process-group
-  termination bound it; run artifacts (`*.txt`/`*.jsonl`/`*.err`) may contain artifact content
-  and are `.gitignore`d — treat them as sensitive and clean them up.
+  termination bound it; transient run artifacts (`*.txt`/`*.jsonl`/`*.err`) may contain artifact
+  content and are `.gitignore`d — treat them as sensitive and clean them up.
+- **Run records (the audit trail) contain artifact content.** Each run's reviewer-response and
+  reconciliation-result are persisted under `config_dir()/runs/<id>/` (`0600` files, `0700`
+  dir), never committed. This is deliberate — a governance tool should keep receipts — but it
+  means the review's content lives on disk. Use `impasse_report.py forget <id>` (or `--no-record`
+  on the run) to remove/skip a record, and be mindful when the artifact is sensitive.
 
 ## Independence is limited, not guaranteed
 

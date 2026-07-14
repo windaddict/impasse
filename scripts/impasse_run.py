@@ -253,7 +253,7 @@ def _fail(code, message, kind, notice, manifest, termination=None) -> dict:
 def review(*, kind: str, instruction: str, artifact_bytes: bytes,
            schema_path: str | None = None, approve_send: str | None = None,
            effort: str | None = None, wall_timeout: float = 180.0,
-           idle_timeout: float = 60.0) -> dict:
+           idle_timeout: float = 60.0, no_record: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema."""
     if effort is not None and effort not in _ALLOWED_EFFORT:
@@ -301,10 +301,19 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes,
         if not isinstance(parsed, dict) or "schema_version" not in parsed or not (("findings" in parsed) or ("items" in parsed)):
             return _fail("invalid_response", "final message JSON is missing expected top-level fields", kind, notice, manifest)
 
+        run_id = parsed.get("review_id")
+        recorded = False
+        if run_id and not no_record:
+            try:
+                lib.save_run_doc(run_id, "reviewer-response", parsed)
+                recorded = True
+            except OSError:
+                pass
         return {
             "ok": True, "kind": kind, "termination": result.termination,
             "duration_s": round(result.duration_s, 2),
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
+            "run_id": run_id, "recorded": recorded,
             "notice": notice, "manifest": manifest,
         }
     finally:
@@ -334,6 +343,7 @@ def _main(argv=None) -> int:
     rv.add_argument("--effort", default=None)
     rv.add_argument("--wall", type=float, default=180.0)
     rv.add_argument("--idle", type=float, default=60.0)
+    rv.add_argument("--no-record", action="store_true", help="don't persist the run record")
     args = ap.parse_args(argv)
 
     if args.cmd == "review":
@@ -346,7 +356,7 @@ def _main(argv=None) -> int:
             return 1
         result = review(kind=args.kind, instruction=instruction, artifact_bytes=artifact_bytes,
                         schema_path=args.schema, approve_send=args.approve_send, effort=args.effort,
-                        wall_timeout=args.wall, idle_timeout=args.idle)
+                        wall_timeout=args.wall, idle_timeout=args.idle, no_record=args.no_record)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
     return 2

@@ -47,3 +47,15 @@ All notable changes to Impasse are documented here. This project adheres to
   code), reconciling the shipped decision fixtures; aligned `decision.reconciliation-result.json`
   with the reviewer fixture so the two tell one story.
 - Qualified "backend-neutral" → "backend-neutral by design; one backend (Codex CLI) today".
+
+### Run records + reports (the audit trail)
+- Runs are now **persisted** under `config_dir()/runs/<id>/` (reviewer-response + reconciliation,
+  `0600`/`0700`, gitignored). The runner auto-records the reviewer's findings (`--no-record` to
+  skip); the host saves the reconciliation via `impasse_report.py save-reconciliation`.
+- New `scripts/impasse_report.py`: `list` / `show <id>` / `save-reconciliation <file>` /
+  `forget <id>`. `show` renders a scannable report — the **reviewer↔host back-and-forth** per
+  finding, the **decision** made, a **tally** (raised/resolved/accepted/rejected/escalated), the
+  verification, and the **escalated questions** — with emojis for context.
+- `impasse_lib`: `runs_dir` / `save_run_doc` (atomic) / `list_runs` / `load_run` / `forget_run`.
+- Closes the "governance tool with no audit trail" gap the ship-review flagged. Cumulative
+  cross-run "what it caught" reporting remains a documented roadmap item (not built).

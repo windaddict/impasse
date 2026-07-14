@@ -70,3 +70,7 @@ Independence found it; evidence made it legible; but the decision is, correctly,
 This is what "domain-general" means in practice: the same protocol that finds an off-by-a-cent
 bug in code finds an unpriced assumption and a buried priority tradeoff in a strategy memo — and
 routes only the part that needs judgment to the person accountable for it.
+
+This whole trace is a **run record**, and `scripts/impasse_report.py show <review_id>` renders it
+as the report above: the reviewer↔host back-and-forth on each finding, the decision made, a
+tally, and the one question that reached the human.
