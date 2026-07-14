@@ -15,5 +15,7 @@ jobs:
           python-version: "3.12"
       - name: install dev dependency
         run: pip install jsonschema
-      - name: validate
+      - name: validate schemas + examples
         run: python tests/validate_schemas.py
+      - name: helper tests (stdlib only)
+        run: python tests/test_helpers.py
