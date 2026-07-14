@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "reconciliation_id": "rc-decision-001",
+  "review_id": "rev-decision-001",
+  "artifact_revision": { "algorithm": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+  "outcome": "deadlocked",
+  "started_at": "2026-07-13T19:10:00Z",
+  "completed_at": "2026-07-13T19:12:05Z",
+  "rounds_used": 1,
+  "producer": { "backend": "codex-cli", "model": "gpt-5.x-codex" },
+  "items": [
+    {
+      "finding_id": "F001",
+      "state": "accepted",
+      "host_position": "Agreed — the memo omits vendor lock-in as an unaddressed risk of the buy option.",
+      "reviewer_position": "The buy option's assumptions omit the switching cost and vendor dependency.",
+      "verification": [
+        { "method": "artifact_inspection", "result": "supports", "detail": "The decision record's /options/1/assumptions list contains no lock-in or exit-cost entry." }
+      ],
+      "resolution": "Added a lock-in risk and a contractual exit clause to the buy option before recommending."
+    },
+    {
+      "finding_id": "F002",
+      "state": "deadlocked",
+      "host_position": "Prioritizing speed-to-market over long-term flexibility is the deliberate bet for this cycle.",
+      "reviewer_position": "The memo under-prices the flexibility it gives up; a slower in-house build preserves optionality worth more over three years.",
+      "escalation": {
+        "dispute_kind": "value_or_priority_tradeoff",
+        "stop_reason": "operator_authority_required",
+        "host_position": "Speed-to-market is the priority this cycle; we accept reduced flexibility.",
+        "reviewer_position": "Optionality has material long-term value the memo does not quantify.",
+        "operator_question": "Is near-term speed-to-market worth the reduced long-term flexibility here, or should we preserve optionality by building in-house?"
+      }
+    }
+  ]
+}

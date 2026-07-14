@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/windaddict/impasse/main/schemas/reviewer-response.v1.json",
+  "title": "Impasse Reviewer Response",
+  "description": "The independent reviewer's response to ONE review pass over an artifact. The reviewer emits OBSERVATIONS only — it never records reconciliation states (accepted/rejected/deadlocked); those belong to reconciliation-result. Domain-general: an essay, a strategy memo, a dataset, and a code change use the same shape, differing only in how each finding's evidence is anchored. Note: JSON Schema cannot enforce every invariant (line_end >= line_start, unique finding ids, format assertions unless the validator enables them, line_start being inside the file); the runner/CI enforces those. Configure the validator to ASSERT formats.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "review_id", "artifact", "assessment", "summary", "findings"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "review_id": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend"],
+      "description": "Provenance of this review. 'backend' is the Impasse backend (e.g. codex-cli); 'model' the reviewer model when known.",
+      "properties": {
+        "backend": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "request_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "revision"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": ["code", "document", "decision", "research", "data", "other"],
+          "description": "Set by an explicit operator flag; auto-detection is only a hint."
+        },
+        "revision": { "$ref": "#/$defs/revision" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the review did and did not cover — makes 'approve' mean 'no material findings under THIS scope', not 'the artifact is correct'.",
+      "properties": {
+        "requested": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "excluded": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "assumptions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "assessment": {
+      "enum": ["approve", "needs_attention", "unable_to_assess"],
+      "description": "approve = no material findings under the stated scope. unable_to_assess = the reviewer could not evaluate (missing context / unsupported artifact)."
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "limitations": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "extensions": { "type": "object", "description": "Reserved namespace for non-breaking additions while additionalProperties stays false elsewhere." }
+  },
+  "allOf": [
+    { "if": { "properties": { "assessment": { "const": "approve" } }, "required": ["assessment"] },
+      "then": { "properties": { "findings": { "maxItems": 0 } } } },
+    { "if": { "properties": { "assessment": { "const": "needs_attention" } }, "required": ["assessment"] },
+      "then": { "properties": { "findings": { "minItems": 1 } } } },
+    { "if": { "properties": { "assessment": { "const": "unable_to_assess" } }, "required": ["assessment"] },
+      "then": { "required": ["limitations"], "properties": { "findings": { "maxItems": 0 } } } }
+  ],
+  "$defs": {
+    "findingId": { "type": "string", "pattern": "^F[0-9]{3,}$", "description": "Stable within a single review (e.g. F001). Uniqueness is enforced by the runner/CI, not the schema." },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "value"],
+      "description": "Immutable identity of the exact bytes reviewed, so findings can't be reconciled against changed content.",
+      "properties": {
+        "algorithm": { "enum": ["sha256", "git", "other"] },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "severity", "claim", "evidence", "recommendation", "confidence"],
+      "properties": {
+        "id": { "$ref": "#/$defs/findingId" },
+        "severity": {
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "Defined by IMPACT, not by reviewer confidence (which is a separate field)."
+        },
+        "category": { "type": "string", "minLength": 1, "description": "Free-text grouping (open, not a global enum): 'correctness', 'security', 'unsupported claim', etc." },
+        "claim": { "type": "string", "minLength": 1, "description": "A falsifiable statement of the problem." },
+        "impact": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "recommendation": { "type": "string", "minLength": 1 },
+        "confidence": { "enum": ["high", "medium", "low"] }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchor", "observation", "grounding"],
+      "description": "An anchor (WHERE) paired with an observation (WHAT supports the claim). A bare location cannot be evidence. 'external_source' optionally cites outside material (a finding often needs both: 'the artifact says X here, but source Y says otherwise').",
+      "properties": {
+        "anchor": { "$ref": "#/$defs/anchor" },
+        "observation": { "type": "string", "minLength": 1 },
+        "grounding": {
+          "enum": ["artifact_observed", "source_retrieved", "caller_provided", "inferred", "not_verified"],
+          "description": "How the EVIDENCE (not the finding's conclusion) was grounded. 'inferred' = a reasoning step not directly confirmed."
+        },
+        "external_source": { "$ref": "#/$defs/externalSource" }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "description": "A location INSIDE the reviewed artifact. Discriminated by 'type' — this union delivers domain-generality.",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": ["type", "path"],
+          "properties": {
+            "type": { "const": "file_range" },
+            "path": { "type": "string", "minLength": 1 },
+            "line_start": { "type": "integer", "minimum": 1 },
+            "line_end": { "type": "integer", "minimum": 1 },
+            "symbol": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type"],
+          "anyOf": [ { "required": ["quote"] }, { "required": ["digest"] } ],
+          "properties": {
+            "type": { "const": "text_quote" },
+            "quote": { "type": "string", "minLength": 1, "description": "Omit for sensitive material and supply a digest instead." },
+            "digest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+            "section": { "type": "string", "minLength": 1 },
+            "occurrence": { "type": "integer", "minimum": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type", "heading"],
+          "properties": {
+            "type": { "const": "section" },
+            "heading": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type", "pointer"],
+          "description": "A path into a structured artifact (JSON/YAML/config/API) — decisions, criteria, and data fields anchor here.",
+          "properties": {
+            "type": { "const": "structured_path" },
+            "pointer": { "type": "string", "minLength": 1, "description": "RFC 6901 JSON Pointer or an explicitly-identified equivalent." },
+            "format": { "enum": ["json_pointer", "xpath", "yaml_path", "field_path"] },
+            "label": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": ["type", "locator"],
+          "properties": {
+            "type": { "const": "generic" },
+            "locator": { "type": "string", "minLength": 1 },
+            "excerpt": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "externalSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "anyOf": [ { "required": ["uri"] }, { "required": ["title"] }, { "required": ["digest"] } ],
+      "description": "A citation to material OUTSIDE the reviewed artifact. A bare 'source' is not evidence — it must carry a uri, title, or digest.",
+      "properties": {
+        "type": { "const": "external_source" },
+        "uri": { "type": "string", "format": "uri" },
+        "title": { "type": "string", "minLength": 1 },
+        "author": { "type": "string", "minLength": 1 },
+        "published_at": { "type": "string", "minLength": 1, "description": "ISO date or date-time." },
+        "accessed_at": { "type": "string", "format": "date-time" },
+        "quote": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" }
+      }
+    }
+  }
+}

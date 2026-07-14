@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0",
+  "review_id": "rev-2026-decision-build-vs-buy-payments-0007",
+  "created_at": "2026-07-13T15:42:10Z",
+  "producer": {
+    "backend": "codex-cli",
+    "model": "gpt-5.x-codex",
+    "request_id": "req-9f2c17ad-payments-dr"
+  },
+  "artifact": {
+    "id": "adr-2026-014-payments-orchestration",
+    "kind": "decision",
+    "revision": {
+      "algorithm": "sha256",
+      "value": "3b1f9a0c7d24e58b6f0a1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f607"
+    }
+  },
+  "scope": {
+    "requested": [
+      "Evaluate the recommended option in the build-vs-buy payments-orchestration decision record",
+      "Surface hidden assumptions and unaddressed risks in the option analysis",
+      "Check whether stated decision criteria are weighed consistently across options"
+    ],
+    "excluded": [
+      "Legal and regulatory compliance review (PCI-DSS scope) — deferred to counsel",
+      "Vendor contract terms and pricing negotiation"
+    ],
+    "assumptions": [
+      "The decision record's cited cost and volume figures are the operator's current best estimates, not audited actuals"
+    ]
+  },
+  "assessment": "needs_attention",
+  "summary": "The build-vs-buy memo recommends building an in-house payments-orchestration layer, but the recommendation rests on a load-bearing assumption about migration cost that is asserted without support, and the memo's own weighted-criteria scoring under-weights time-to-market relative to the strategic urgency stated in the framing. Both should be resolved before the decision is ratified.",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "high",
+      "category": "unaddressed risk",
+      "claim": "The 'Build' option's assumption that existing gateway integrations can be migrated in a single quarter with no dual-run period is stated as fact but has no supporting evidence and no fallback if migration slips, exposing the decision to a schedule risk that could invert the cost comparison.",
+      "impact": "If migration requires a dual-run of the old and new systems (the industry norm for payments cutover), the build path carries several months of duplicated processing cost and engineering attention that the current cost model omits entirely, materially weakening the case for Build over Buy.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "structured_path",
+            "pointer": "/options/1/assumptions/0",
+            "format": "json_pointer",
+            "label": "options[1] (\"Build in-house\") → assumptions[0]: single-quarter cutover, no dual-run"
+          },
+          "observation": "The assumption reads 'Existing gateway integrations migrate within Q3 with a hard cutover; no dual-run window is budgeted.' No basis, prior migration data, or contingency is attached, and no corresponding entry appears in the option's risk list.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "structured_path",
+            "pointer": "/options/1/risks",
+            "format": "json_pointer",
+            "label": "options[1] (\"Build in-house\") → risks[]"
+          },
+          "observation": "The risks array for the Build option lists staffing and maintenance risks but contains no entry for migration slippage or cutover failure, so the schedule assumption in assumptions[0] is load-bearing yet unhedged elsewhere in the record.",
+          "grounding": "inferred"
+        }
+      ],
+      "recommendation": "Add a migration-risk entry to options[1] with an explicit dual-run contingency, and re-run the cost comparison under both a clean-cutover and a one-quarter dual-run scenario. Ratify Build only if it still wins under the dual-run case.",
+      "confidence": "high"
+    },
+    {
+      "id": "F002",
+      "severity": "medium",
+      "category": "value tradeoff",
+      "claim": "The decision framing calls time-to-market the primary strategic driver, but the weighted-criteria table assigns time-to-market a lower weight than cost, so the memo's scoring silently trades away the priority it declares most important.",
+      "impact": "Because the recommendation is derived from the weighted score, the mismatch between the stated priority and the applied weights means the 'winning' option may not be the one that best serves the strategic goal the memo itself names, and readers ratifying the decision will not see that the tradeoff was made.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "section",
+            "heading": "Decision Criteria and Weights",
+            "path": "adr-2026-014-payments-orchestration.md"
+          },
+          "observation": "The weights table sets cost at 0.40 and time-to-market at 0.20, while the 'Strategic Context' section one page earlier states 'speed to launch is the single most important factor this year.' The weighting inverts that stated priority without acknowledging the tradeoff.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Reconcile the weights with the stated strategic priority — either raise the time-to-market weight to match the framing or add an explicit note justifying why cost is weighted higher despite the declared urgency — then re-score both options.",
+      "confidence": "medium"
+    }
+  ]
+}

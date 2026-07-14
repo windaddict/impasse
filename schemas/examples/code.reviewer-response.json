@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0",
+  "review_id": "rev-2026-07-13-payments-hotfix-001",
+  "created_at": "2026-07-13T15:42:08Z",
+  "producer": {
+    "backend": "codex-cli",
+    "model": "gpt-5.x-codex",
+    "request_id": "req_9f3c2a17b4"
+  },
+  "artifact": {
+    "id": "PR-482",
+    "kind": "code",
+    "revision": {
+      "algorithm": "sha256",
+      "value": "3b1f9a4c7e2d6084b5c1af09e3d27a516c8b4f0d9271e6a3c5b8f24d1e0a7c93"
+    }
+  },
+  "scope": {
+    "requested": [
+      "Review the diff in payments/refund.py for correctness and error handling."
+    ],
+    "assumptions": [
+      "Decimal money handling is expected; the codebase uses decimal.Decimal for currency amounts elsewhere."
+    ]
+  },
+  "assessment": "needs_attention",
+  "summary": "Two issues in the refund handler: a rounding bug that computes refund amounts with float arithmetic (can over- or under-refund by fractions of a cent), and an unhandled gateway-timeout path that leaves refunds in an ambiguous state with no retry or logging.",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "high",
+      "category": "correctness",
+      "claim": "process_refund multiplies a float unit_price by quantity and rounds the result, so refund totals drift from the Decimal amounts stored at checkout, producing off-by-a-cent over- or under-refunds.",
+      "impact": "Refund amounts can disagree with the originally charged Decimal totals, causing reconciliation mismatches and, at scale, real monetary discrepancies against the payment ledger.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "payments/refund.py",
+            "line_start": 42,
+            "line_end": 48,
+            "symbol": "process_refund"
+          },
+          "observation": "unit_price is read as float(line['unit_price']) and multiplied by qty, then round(total, 2) is returned; the rest of the codebase represents money as decimal.Decimal, so this reintroduces binary-float rounding error at the refund boundary.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Compute the refund total with decimal.Decimal throughout (e.g. Decimal(str(unit_price)) * Decimal(qty)) and quantize to the currency's minor unit with ROUND_HALF_EVEN, matching how the original charge total was computed.",
+      "confidence": "high"
+    },
+    {
+      "id": "F002",
+      "severity": "medium",
+      "category": "error handling",
+      "claim": "The gateway.refund(...) call is not wrapped for the timeout/connection-error path, so a network timeout raises an uncaught exception after the local refund row is already marked 'refunded', leaving the record inconsistent with the gateway and with no retry or log entry.",
+      "impact": "On a gateway timeout the customer may not be refunded while the local record claims they were, and the failure is silent — no log, no retry, no compensating action — making the discrepancy hard to detect or recover.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "payments/refund.py",
+            "line_start": 55,
+            "line_end": 63,
+            "symbol": "process_refund"
+          },
+          "observation": "refund_row.status is set to 'refunded' and committed before gateway.refund(...) is called, and the gateway call has no try/except; a GatewayTimeout propagates uncaught, leaving the committed 'refunded' row with no corresponding gateway confirmation.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Call the gateway before committing the terminal 'refunded' status, wrap it in try/except for the timeout/connection-error case, log the failure with the refund id, and either mark the row 'refund_pending' for retry or roll back so state stays consistent with the gateway.",
+      "confidence": "high"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "review_id": "rev-2026-07-13-hidden-costs-remote-onboarding",
+  "created_at": "2026-07-13T14:22:05Z",
+  "producer": {
+    "backend": "codex-cli",
+    "model": "gpt-5.x-codex",
+    "request_id": "req-8f2c1a4e-onboarding-essay"
+  },
+  "artifact": {
+    "id": "essays/the-hidden-cost-of-remote-onboarding.md",
+    "kind": "document",
+    "revision": {
+      "algorithm": "sha256",
+      "value": "3b1f9d7c0a5e264881f4c2a90e7db35461ac8f02d9e17b4c6a2f5083be91cd47"
+    }
+  },
+  "scope": {
+    "requested": [
+      "factual accuracy of quantitative claims",
+      "internal argument consistency"
+    ],
+    "excluded": [
+      "line-level grammar and style copyediting"
+    ]
+  },
+  "assessment": "needs_attention",
+  "summary": "The essay makes a compelling case that remote onboarding erodes early productivity, but one headline statistic is stated as established fact without a cited source, and the closing section undercuts the piece's central claim by conceding that most of the measured slowdown may be temporary. Both issues weaken an otherwise well-structured argument and should be resolved before publication.",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "high",
+      "category": "unsupported claim",
+      "claim": "The essay presents the figure that remote hires reach full productivity '40% slower' than in-office hires as an established, sourced fact, but no citation, dataset, or methodology is given anywhere in the piece.",
+      "impact": "A specific, quantified claim in the opening lends the whole argument its authority. Stated without attribution, it reads as invented precision and exposes the essay to easy rebuttal, undermining reader trust in the surrounding analysis.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "text_quote",
+            "quote": "remote hires reach full productivity 40% slower than their in-office peers",
+            "section": "The Onboarding Gap",
+            "occurrence": 1
+          },
+          "observation": "The sentence asserts a precise percentage as settled fact. No footnote, inline citation, linked study, or description of how the figure was derived appears in this paragraph or elsewhere in the document.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Attribute the 40% figure to a named source with a linkable reference, or soften it to a qualitative claim (e.g., 'noticeably slower') until a defensible source is available. If the number comes from the author's own data, state the sample size and method.",
+      "confidence": "high"
+    },
+    {
+      "id": "F002",
+      "severity": "medium",
+      "category": "internal inconsistency",
+      "claim": "The concluding section contradicts the essay's central thesis: after arguing that remote onboarding causes a durable productivity loss, it concedes that the gap 'mostly closes within the first quarter,' which reframes the problem as short-lived and self-correcting.",
+      "impact": "The self-contradiction leaves the reader unsure what the essay is actually claiming. If the effect is largely temporary, the urgency built up in earlier sections is unearned, and the recommended interventions look disproportionate to a transient issue.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "section",
+            "heading": "What Leaders Should Do"
+          },
+          "observation": "This closing section states the productivity gap 'mostly closes within the first quarter,' directly at odds with the earlier framing of remote onboarding as a lasting drag on performance. The paragraph does not reconcile the two positions or explain why interventions are warranted for a self-correcting gap.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "text_quote",
+            "quote": "the damage compounds long after the first month",
+            "section": "The Onboarding Gap",
+            "occurrence": 1
+          },
+          "observation": "The opening argument explicitly claims the harm compounds well beyond the early weeks, which cannot both be true and consistent with the later 'mostly closes within the first quarter' concession.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Reconcile the two positions: either drop the 'mostly closes within the first quarter' concession, or revise the opening to frame the cost as a recoverable early dip and scale the recommended interventions accordingly. Pick one consistent claim about the effect's durability and carry it through.",
+      "confidence": "medium"
+    }
+  ]
+}

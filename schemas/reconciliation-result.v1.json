@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/windaddict/impasse/main/schemas/reconciliation-result.v1.json",
+  "title": "Impasse Reconciliation Result",
+  "description": "The outcome of reconciling the findings of ONE reviewer-response against the host's position and verification. Reconciliation STATES live here (they do not exist at review time). A deadlocked item carries its escalation INLINE — there is no separate deadlocks array to drift out of sync. The escalations are the whole point: the disagreements that reach a human. JSON Schema can't cross-check that item finding_ids are unique or match the review's findings — the runner/CI enforces that.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "reconciliation_id", "review_id", "outcome", "items"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "reconciliation_id": { "type": "string", "minLength": 1 },
+    "review_id": { "type": "string", "minLength": 1, "description": "The single reviewer-response this reconciles. v1 reconciles exactly one review." },
+    "artifact_revision": { "$ref": "#/$defs/revision", "description": "Echoes the reviewed revision, so a reconciliation can't be applied to changed content." },
+    "outcome": {
+      "enum": ["converged", "deadlocked", "incomplete", "failed"],
+      "description": "converged = every finding resolved without the operator. deadlocked = at least one item escalated. incomplete = a round/budget cap stopped it. failed = backend/timeout/consent/invalid-response error (NEVER report failure as converged)."
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "rounds_used": { "type": "integer", "minimum": 0 },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend"],
+      "properties": {
+        "backend": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 }
+      }
+    },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } },
+    "failure": { "$ref": "#/$defs/failure" },
+    "limitations": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "extensions": { "type": "object" }
+  },
+  "allOf": [
+    { "if": { "properties": { "outcome": { "const": "converged" } }, "required": ["outcome"] },
+      "then": { "properties": { "items": { "not": { "contains": { "type": "object", "properties": { "state": { "const": "deadlocked" } }, "required": ["state"] } } } } } },
+    { "if": { "properties": { "outcome": { "const": "deadlocked" } }, "required": ["outcome"] },
+      "then": { "properties": { "items": { "contains": { "type": "object", "properties": { "state": { "const": "deadlocked" } }, "required": ["state"] } } } } },
+    { "if": { "properties": { "outcome": { "const": "failed" } }, "required": ["outcome"] },
+      "then": { "required": ["failure"] } }
+  ],
+  "$defs": {
+    "findingId": { "type": "string", "pattern": "^F[0-9]{3,}$" },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": { "enum": ["sha256", "git", "other"] },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finding_id", "state"],
+      "properties": {
+        "finding_id": { "$ref": "#/$defs/findingId" },
+        "state": {
+          "enum": ["accepted", "rejected", "resolved", "deadlocked", "withdrawn"],
+          "description": "accepted = host agrees it's real. rejected = host refuted it with evidence. resolved = addressed/fixed. deadlocked = escalated (see 'escalation'). withdrawn = reviewer retracted it. Stores final state only, not history."
+        },
+        "host_position": { "type": "string", "minLength": 1 },
+        "reviewer_position": { "type": "string", "minLength": 1 },
+        "verification": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/verification" } },
+        "resolution": { "type": "string", "minLength": 1 },
+        "escalation": { "$ref": "#/$defs/escalation" }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "deadlocked" } }, "required": ["state"] },
+          "then": { "required": ["escalation"] } }
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "result"],
+      "properties": {
+        "method": {
+          "enum": ["artifact_inspection", "command", "source_retrieval", "operator_confirmation", "model_inference"],
+          "description": "'model_inference' is the weakest — another model opinion, not a verification."
+        },
+        "result": { "enum": ["supports", "contradicts", "inconclusive"] },
+        "detail": { "type": "string", "minLength": 1 }
+      }
+    },
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dispute_kind", "stop_reason"],
+      "description": "Why this item reached the operator. dispute_kind (WHAT kind of disagreement) and stop_reason (WHY the loop stopped) are independent dimensions.",
+      "properties": {
+        "dispute_kind": {
+          "enum": ["evidence_conflict", "evidence_gap", "assumption_difference", "interpretation_difference", "value_or_priority_tradeoff", "policy_or_authority_required"],
+          "description": "value_or_priority_tradeoff and policy_or_authority_required are judgment calls, not evidence disputes — not every disagreement should be 'settled'."
+        },
+        "stop_reason": {
+          "enum": ["no_new_information", "round_limit", "budget_limit", "verification_unavailable", "operator_authority_required"]
+        },
+        "host_position": { "type": "string", "minLength": 1 },
+        "reviewer_position": { "type": "string", "minLength": 1 },
+        "operator_question": { "type": "string", "minLength": 1, "description": "A crisp question the host puts to the operator to break the deadlock." }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "enum": ["backend_error", "timeout", "consent_denied", "invalid_response", "artifact_unavailable", "cancelled"] },
+        "message": { "type": "string", "minLength": 1 },
+        "retryable": { "type": "boolean" },
+        "backend_request_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

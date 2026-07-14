@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Impasse run artifacts (audit logs, structured output, stderr — may contain sensitive data)
+*.jsonl
+*.err
+/runs/
+/.impasse-runs/
+
+# OS
+.DS_Store
+
+# Local config / consent should never be committed
+consent.json
+/.impasse/

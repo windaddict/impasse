@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "reconciliation_id": "rc-code-001",
+  "review_id": "rev-code-001",
+  "artifact_revision": { "algorithm": "sha256", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+  "outcome": "converged",
+  "started_at": "2026-07-13T18:00:00Z",
+  "completed_at": "2026-07-13T18:01:34Z",
+  "rounds_used": 1,
+  "producer": { "backend": "codex-cli", "model": "gpt-5.x-codex" },
+  "items": [
+    {
+      "finding_id": "F001",
+      "state": "resolved",
+      "host_position": "Confirmed: refund totals used float arithmetic and drifted by a cent against the stored charge total. Reproduced with a failing unit test.",
+      "reviewer_position": "process_refund computes totals with float instead of Decimal, causing off-by-a-cent mismatches.",
+      "verification": [
+        { "method": "command", "result": "supports", "detail": "Added a regression test that refunds $19.99 x 3 and asserts the stored total; it failed before the fix and passes after." }
+      ],
+      "resolution": "Switched the refund math to Decimal and rounded once at the boundary."
+    },
+    {
+      "finding_id": "F002",
+      "state": "rejected",
+      "host_position": "The gateway client enforces a 10s timeout and raises on failure; a nightly reconciliation job re-checks any row whose gateway state is unconfirmed. The reviewer only saw the diff, not the client construction.",
+      "reviewer_position": "No timeout or exception handling is visible at the refund call site.",
+      "verification": [
+        { "method": "artifact_inspection", "result": "contradicts", "detail": "Timeout and error handling are set in GatewayClient.__init__ at config/gateway.py:14, outside the reviewed diff's window." }
+      ]
+    }
+  ]
+}

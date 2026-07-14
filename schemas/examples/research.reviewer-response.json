@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0",
+  "review_id": "rev-research-2026-07-13-carbon-capture-lit-review",
+  "created_at": "2026-07-13T15:42:00Z",
+  "producer": {
+    "backend": "codex-cli",
+    "model": "gpt-5.x-codex",
+    "request_id": "req_9f3c2a71-be04-4d8e-9a12-7c1f0ab6e5d2"
+  },
+  "artifact": {
+    "id": "lit-review/direct-air-capture-cost-trajectory.md",
+    "kind": "research",
+    "revision": {
+      "algorithm": "sha256",
+      "value": "3f9a7c1e28b46d05fa9271c0e5b8d43a6f01c2e7b9d84a31f5c60e2d7a1b4c98"
+    }
+  },
+  "scope": {
+    "requested": [
+      "Verify that each cited source supports the claim it is attached to",
+      "Flag claims that generalize beyond the cited evidence"
+    ],
+    "excluded": [
+      "Statistical re-analysis of underlying datasets",
+      "Assessment of prose style or formatting"
+    ],
+    "assumptions": [
+      "The cited sources reflect the versions available at the URLs on the accessed date"
+    ]
+  },
+  "assessment": "needs_attention",
+  "summary": "Two citation-integrity problems in the direct-air-capture cost write-up: one source is attached to a claim it does not support, and one claim overgeneralizes a single-plant pilot result into an industry-wide trend.",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "high",
+      "category": "unsupported claim",
+      "claim": "The write-up cites Halvorsen (2025) to support the statement that direct-air-capture costs have already fallen below $200 per tonne, but that source reports a projected future cost, not an achieved one, and gives a different figure.",
+      "impact": "Readers may conclude that sub-$200/tonne capture is a demonstrated present-day reality, overstating the technology's current maturity and misinforming downstream policy or investment reasoning.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "text_quote",
+            "quote": "Recent operational data confirm that capture costs have already dropped below $200 per tonne of CO2 [Halvorsen 2025].",
+            "section": "3. Cost Trajectory",
+            "occurrence": 1
+          },
+          "observation": "The write-up presents the sub-$200/tonne figure as an achieved, operationally confirmed cost and attributes it directly to Halvorsen (2025).",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "text_quote",
+            "quote": "capture costs have already dropped below $200 per tonne",
+            "section": "3. Cost Trajectory"
+          },
+          "observation": "The cited source frames $220/tonne as a modeled projection for 2032 contingent on scale-up, not a cost that has already been reached; it never states that costs have dropped below $200/tonne.",
+          "grounding": "source_retrieved",
+          "external_source": {
+            "type": "external_source",
+            "uri": "https://example.org/reports/halvorsen-2025-dac-cost-outlook.pdf",
+            "title": "Direct Air Capture Cost Outlook to 2035",
+            "author": "L. Halvorsen",
+            "published_at": "2025-11-02",
+            "accessed_at": "2026-07-13T15:30:00Z",
+            "quote": "Under an aggressive deployment scenario, our model projects a levelized capture cost of approximately $220 per tonne of CO2 by 2032; today's operating plants remain well above this figure."
+          }
+        }
+      ],
+      "recommendation": "Correct the claim to state a projected (not achieved) cost, use the source's actual figure of ~$220/tonne for 2032, and attach the conditional scale-up caveat. If a sub-$200/tonne achieved figure is intended, cite a source that actually reports it.",
+      "confidence": "high"
+    },
+    {
+      "id": "F002",
+      "severity": "medium",
+      "category": "overgeneralization",
+      "claim": "The write-up generalizes a single-plant pilot's 12-month uptime result into a claim that the direct-air-capture industry as a whole achieves this reliability, which the cited study does not support.",
+      "impact": "Presenting one pilot's result as industry-wide reliability inflates confidence in the sector's operational maturity and could distort risk assessments that rely on the review.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "text_quote",
+            "quote": "Across the industry, DAC facilities now sustain roughly 95% uptime over a full year of operation [Okafor et al. 2026].",
+            "section": "4. Operational Reliability",
+            "occurrence": 1
+          },
+          "observation": "The write-up attributes an industry-wide 95% annual uptime figure to Okafor et al. (2026), extending the scope from a specific facility to the entire sector.",
+          "grounding": "source_retrieved",
+          "external_source": {
+            "type": "external_source",
+            "uri": "https://example.org/journals/okafor-2026-mesa-verde-pilot.html",
+            "title": "Twelve-Month Operating Performance of the Mesa Verde DAC Pilot",
+            "author": "A. Okafor, R. Devlin, S. Park",
+            "published_at": "2026-03-18",
+            "accessed_at": "2026-07-13T15:34:00Z",
+            "quote": "We report a 94.6% availability over twelve months at the Mesa Verde pilot and caution that these results are specific to this single installation and should not be extrapolated to other facilities or the sector at large."
+          }
+        }
+      ],
+      "recommendation": "Rewrite the sentence to attribute the ~95% uptime to the specific Mesa Verde pilot rather than the industry, and preserve the study authors' explicit warning against extrapolation.",
+      "confidence": "high"
+    }
+  ]
+}
