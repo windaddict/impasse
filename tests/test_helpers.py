@@ -227,6 +227,28 @@ def main() -> int:
     check(any(r["run_id"] == drid for r in lib.list_runs()), "run record: listed by list_runs")
     check(lib.forget_run(drid) is True and lib.load_run(drid)["reviewer_response"] is None, "run record: forget deletes it")
 
+    # --- housekeeping: open-escalation detection + prune ---
+    open_rec = {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "open-run",
+                "outcome": "deadlocked", "items": [{"finding_id": "F001", "state": "deadlocked",
+                "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                               "stop_reason": "operator_authority_required", "operator_question": "pick one?"}}]}
+    lib.save_run_doc("open-run", "reconciliation-result", open_rec)
+    check(any(r["run_id"] == "open-run" for r in report.open_runs()), "housekeeping: open_runs detects an unresolved escalation")
+    resolved_rec = {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "open-run",
+                    "outcome": "converged", "items": [{"finding_id": "F001", "state": "resolved", "resolution": "decided"}]}
+    lib.save_run_doc("open-run", "reconciliation-result", resolved_rec)
+    check(not any(r["run_id"] == "open-run" for r in report.open_runs()), "housekeeping: resolving clears the open flag")
+    old = time.time() - 3 * 86400
+    os.utime(os.path.join(lib.runs_dir(), "open-run"), (old, old))
+    deleted, _kept = report.prune(1)
+    check("open-run" in deleted, "housekeeping: prune deletes an old resolved record")
+    lib.save_run_doc("old-open", "reconciliation-result", open_rec)
+    os.utime(os.path.join(lib.runs_dir(), "old-open"), (old, old))
+    deleted2, kept2 = report.prune(1)
+    check("old-open" in kept2 and "old-open" not in deleted2, "housekeeping: prune KEEPS old runs with open escalations")
+    deleted3, _k = report.prune(1, include_open=True)
+    check("old-open" in deleted3, "housekeeping: prune --include-open removes even open runs")
+
     print()
     if _fails:
         print(f"{len(_fails)} FAILURES: " + "; ".join(_fails))

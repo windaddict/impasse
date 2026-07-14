@@ -128,6 +128,20 @@ Adapt the emphasis to the `kind` (correctness/security for code; unsupported cla
 argument structure for a document; hidden assumptions and value tradeoffs for a decision;
 citation fidelity and overgeneralization for research).
 
+## Housekeeping — offer proactively
+
+Runs accumulate as records that hold artifact content, and some carry decisions the operator
+never answered. When you use Impasse, it's good practice to:
+
+- **Surface unresolved decisions.** `impasse_report.py open` lists runs with escalations the
+  operator hasn't resolved. Offer to walk them through it. When they decide, set that item's
+  `state` to `resolved` (their choice as the `resolution`) and re-save the reconciliation
+  (`save-reconciliation`) so it no longer shows as open.
+- **Offer cleanup.** Records are sensitive. Offer to prune old ones —
+  `impasse_report.py prune --older-than 30` (keeps runs with open escalations unless
+  `--include-open`), or `forget <id>` for a specific run. `list` shows what's on disk and which
+  runs are still open.
+
 ## Guardrails
 
 - **Read-only.** The review path never edits the artifact. Delegated editing is separate,

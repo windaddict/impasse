@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import impasse_lib as lib  # noqa: E402
@@ -152,6 +153,43 @@ def render(run: dict) -> str:
     return "\n".join(out)
 
 
+def _open_escalations(rec: dict) -> list:
+    """Items still deadlocked — an escalation the operator hasn't resolved yet. Once the
+    operator decides, the host re-saves the reconciliation with that item moved to
+    'resolved', so it stops showing as open."""
+    return [it for it in (rec.get("items") or []) if it.get("state") == "deadlocked"]
+
+
+def open_runs() -> list:
+    """Past runs that still have unresolved escalations, newest first."""
+    result = []
+    for r in lib.list_runs():
+        rec = lib.load_run(r["run_id"]).get("reconciliation_result") or {}
+        opens = _open_escalations(rec)
+        if opens:
+            result.append({"run_id": r["run_id"], "open": opens})
+    return result
+
+
+def prune(older_than_days: int, include_open: bool = False) -> tuple:
+    """Delete records older than N days. By default, runs with unresolved escalations are
+    KEPT (a pending decision shouldn't be silently discarded) unless include_open=True.
+    Returns (deleted_ids, kept_open_ids)."""
+    cutoff = time.time() - older_than_days * 86400
+    deleted, kept_open = [], []
+    for r in lib.list_runs():
+        if r["mtime"] >= cutoff:
+            continue
+        if not include_open:
+            rec = lib.load_run(r["run_id"]).get("reconciliation_result") or {}
+            if _open_escalations(rec):
+                kept_open.append(r["run_id"])
+                continue
+        if lib.forget_run(r["run_id"]):
+            deleted.append(r["run_id"])
+    return deleted, kept_open
+
+
 def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="impasse_report")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -162,6 +200,10 @@ def _main(argv=None) -> int:
     sr.add_argument("path")
     fg = sub.add_parser("forget")
     fg.add_argument("run_id")
+    sub.add_parser("open")
+    pr = sub.add_parser("prune")
+    pr.add_argument("--older-than", type=int, required=True, metavar="DAYS", help="delete records older than N days")
+    pr.add_argument("--include-open", action="store_true", help="also delete runs with unresolved escalations")
     args = ap.parse_args(argv)
 
     if args.cmd == "list":
@@ -172,7 +214,33 @@ def _main(argv=None) -> int:
         for r in runs:
             ts = datetime.datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M")
             flags = ("R" if r["has_review"] else "-") + ("C" if r["has_reconciliation"] else "-")
-            print(f"  {ts}  [{flags}]  {r['run_id']}")
+            rec = lib.load_run(r["run_id"]).get("reconciliation_result") or {}
+            opens = len(_open_escalations(rec))
+            mark = f"  ⚖️ {opens} open" if opens else ""
+            print(f"  {ts}  [{flags}]  {r['run_id']}{mark}")
+        return 0
+    if args.cmd == "open":
+        runs = open_runs()
+        if not runs:
+            print("✅ No unresolved escalations across recorded runs.")
+            return 0
+        total = sum(len(r["open"]) for r in runs)
+        print(f"⚖️  {total} unresolved decision(s) across {len(runs)} run(s):")
+        for r in runs:
+            print(f"\n  {r['run_id']}")
+            for it in r["open"]:
+                esc = it.get("escalation") or {}
+                q = esc.get("operator_question") or "(no question recorded)"
+                print(_wrap(f"    • {it.get('finding_id')}: ", q, "      "))
+        return 0
+    if args.cmd == "prune":
+        deleted, kept = prune(args.older_than, include_open=args.include_open)
+        for rid in deleted:
+            print(f"  forgot {rid}")
+        msg = f"pruned {len(deleted)} record(s) older than {args.older_than}d"
+        if kept:
+            msg += f"; kept {len(kept)} with open escalations (use --include-open to remove)"
+        print(msg)
         return 0
     if args.cmd == "show":
         print(render(lib.load_run(args.run_id)))

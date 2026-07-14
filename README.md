@@ -122,8 +122,10 @@ Every run is recorded — the reviewer's findings, and (once you save it) the re
 under your config dir, and `scripts/impasse_report.py show <review_id>` renders it: the
 **reviewer↔host back-and-forth** on each finding, the **decision** made, a **tally** (raised /
 resolved / accepted / rejected / escalated), and the questions escalated to you. `list` shows
-past runs; `forget` deletes one. Records contain artifact content — they're kept `0600` and
-never committed.
+past runs (flagging which still have open escalations); `forget` deletes one. `open` surfaces
+runs with decisions you haven't answered yet; `prune --older-than N` cleans up old records
+(keeping any with open escalations unless `--include-open`). Records contain artifact content —
+they're kept `0600` and never committed.
 
 Cumulative "what it caught across all runs" reporting is **not built yet** (roadmap) — each run
 is inspectable on its own.

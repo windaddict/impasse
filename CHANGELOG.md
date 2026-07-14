@@ -59,3 +59,7 @@ All notable changes to Impasse are documented here. This project adheres to
 - `impasse_lib`: `runs_dir` / `save_run_doc` (atomic) / `list_runs` / `load_run` / `forget_run`.
 - Closes the "governance tool with no audit trail" gap the ship-review flagged. Cumulative
   cross-run "what it caught" reporting remains a documented roadmap item (not built).
+- Housekeeping: `impasse_report.py open` (runs with unresolved escalations + their questions),
+  `prune --older-than N` (keeps runs with open escalations unless `--include-open`), and an
+  open-count marker on `list`. SKILL guidance to proactively surface unanswered decisions and
+  offer to clean up sensitive records.
