@@ -206,6 +206,14 @@ def main() -> int:
         bad_eff = True
     check(bad_eff, "review: rejects disallowed effort ('minimal')")
 
+    # --- reviewer stance is runner-enforced (anti-self-preference), not left to the host ---
+    fi = run.compose_full_instruction("EVALUATE THE MEMO", schema_text='{"type":"object"}')
+    check("no stake" in fi and "prompt injection" in fi, "compose: prepends the invariant no-stake / prompt-injection stance")
+    check("believe you produced it" in fi, "compose: hardens against self-preference even if the reviewer thinks it authored the artifact")
+    check(fi.index("no stake") < fi.index("EVALUATE THE MEMO"), "compose: stance precedes the host's task lens")
+    check("JSON Schema" in fi and fi.index("EVALUATE THE MEMO") < fi.index("JSON Schema"), "compose: schema appended after the host instruction")
+    check(run.compose_full_instruction("X").endswith("X"), "compose: no schema block when schema omitted")
+
     # --- run records (audit trail) + report ---
     import json as _json
     import impasse_report as report
