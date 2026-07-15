@@ -176,11 +176,39 @@ structured_path | generic`) plus an optional external-source citation — see th
 
 ## Disclaimer
 
-Impasse is provided under the MIT License, **"AS IS", without warranty of any kind**. Its
-outputs may be inaccurate and are **not legal, financial, medical, tax, or other professional
-advice**. Verify important conclusions; you remain responsible for your decisions. A second
-model is not an independent source of truth — see the independence caveat in the security
-model.
+Impasse is provided under the MIT License, **"AS IS", without warranty of any kind** — including no
+warranty of merchantability, fitness for a particular purpose, or non-infringement. Its outputs
+(and the reviewer's) may be wrong and are **not legal, financial, medical, tax, or other
+professional advice**, nor a substitute for professional or human judgment. Verify important
+conclusions; **you remain responsible for every decision and every change you make.** A second
+model is not an independent source of truth — see the independence caveat in the security model.
+
+To the maximum extent permitted by law, the authors are not liable for any damages arising from use
+of the software, and are **not responsible for the third-party AI providers** (OpenAI, Anthropic) —
+their availability, output, pricing, or handling of the data you choose to send them. Impasse is
+**pre-release**: interfaces, storage formats, and behavior may change without notice.
+
+## Acceptable use
+
+These are reminders of your responsibilities under the law and the providers' terms — not
+additional conditions Impasse places on the MIT license:
+
+- **Don't send** secrets, credentials, personal or regulated data, or anyone else's confidential
+  information without authorization — the tool doesn't scan for them, and a send leaves your machine
+  for a third-party provider.
+- **Comply with the backends' own terms** — the [OpenAI Usage Policies](https://openai.com/policies/usage-policies/)
+  and the [Anthropic Usage Policy](https://www.anthropic.com/policies/usage-policy), and each
+  provider's privacy and data-handling terms, govern what you send; you are responsible for your API
+  keys, provider accounts, and any usage costs.
+- **Don't rely on it for unlawful, harmful, or high-stakes automated decisions** without human
+  review. Impasse routes the judgment calls to a human by design — keep it that way.
+- **Export/sanctions:** you are responsible for complying with applicable export-control and
+  sanctions laws, and with your providers' geographic restrictions.
+
+Impasse stores **run records locally** (the config dir's `runs/`) — they hold whatever you sent, so
+treat the local store as sensitive. Impasse itself sends your artifact only to the provider you
+invoke. Delete Impasse's local records with `impasse_report.py forget <id>` or `prune` — this
+removes only Impasse's local copies, not anything already sent to a provider.
 
 ## Related work
 
@@ -230,5 +258,7 @@ group of executives. If that's the problem you're facing, start there.
 
 ## License & trademarks
 
-MIT — see [`LICENSE`](LICENSE). Claude, Claude Code, Codex, OpenAI, and Anthropic are
-trademarks of their respective owners; **Impasse is not affiliated with or endorsed by them.**
+MIT — see [`LICENSE`](LICENSE). Claude, Claude Code, Codex, OpenAI, and Anthropic are trademarks of
+their respective owners, used here only for identification and comparison (nominative fair use).
+Impasse is independent and is **not affiliated with, sponsored by, or endorsed by** them. See
+[`NOTICE`](NOTICE).

@@ -1,0 +1,16 @@
+Impasse
+Copyright (c) 2026 Moving Average Inc.
+
+Licensed under the MIT License. See the LICENSE file for terms.
+
+Trademarks: "OpenAI," "Codex," "Claude," "Claude Code," and "Anthropic," and other product
+and company names, are trademarks of their respective owners. They are used here only for
+identification and comparison (nominative fair use). This project is independent and is not
+affiliated with, sponsored by, or endorsed by OpenAI, Anthropic, or any other provider.
+
+Third-party services: Impasse is a client for third-party AI services (OpenAI Codex, Anthropic
+Claude). It does not control those services and is not responsible for their availability,
+output, pricing, data handling, or changes to their terms. Your use of each provider is
+governed by your own agreement with that provider — see the OpenAI Usage Policies
+(https://openai.com/policies/usage-policies/) and the Anthropic Usage Policy
+(https://www.anthropic.com/policies/usage-policy).

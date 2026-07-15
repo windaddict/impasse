@@ -25,3 +25,14 @@ python tests/test_helpers.py
 
 Both must pass (CI runs them). Please describe what you changed and why, and note any schema
 or security-model implications.
+
+## Contributor terms
+
+By submitting a contribution (a pull request, patch, or otherwise), you agree it is licensed
+under the same [MIT License](LICENSE) that covers this project ("inbound = outbound"), and you
+certify you wrote it or otherwise have the right to submit it under that license. You keep your
+copyright.
+
+**Sign your work (optional but appreciated).** You may certify the above with a
+[Developer Certificate of Origin](https://developercertificate.org/) sign-off — add a
+`Signed-off-by` line via `git commit -s`. It isn't required for this pre-release project.
