@@ -17,4 +17,5 @@ venv/
 
 # Local config / consent should never be committed
 consent.json
+settings.json
 /.impasse/

@@ -348,6 +348,53 @@ def _run_dir(run_id: str) -> str:
     return d
 
 
+# --- Persisted settings (a small config store, e.g. the operator's default reviewer model) ------
+
+def _settings_path() -> str:
+    return os.path.join(config_dir(), "settings.json")
+
+
+def load_settings() -> dict:
+    try:
+        with open(_settings_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def get_default_model(backend: str) -> str | None:
+    """The persisted default reviewer model for a backend, or None. Lower precedence than a
+    per-run --model and than IMPASSE_{CODEX,CLAUDE}_MODEL — see impasse_run.review()."""
+    return (load_settings().get("default_model") or {}).get(backend) or None
+
+
+def set_default_model(backend: str, model: str | None) -> None:
+    """Persist (model set) or clear (model None) the default reviewer model for a backend.
+    Atomic write, 0600 — same discipline as the consent store."""
+    s = load_settings()
+    dm = dict(s.get("default_model") or {})
+    if model:
+        dm[backend] = model
+    else:
+        dm.pop(backend, None)
+    s["default_model"] = dm
+    ensure_config_dir()
+    path = _settings_path()
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(s, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def save_run_doc(run_id: str, name: str, doc: dict) -> str:
     """Persist one run document (name = 'reviewer-response' | 'reconciliation-result')."""
     d = _run_dir(run_id)

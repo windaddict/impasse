@@ -72,7 +72,13 @@ has the analogous concern and *refuses* under `CLAUDE_CODE_USE_BEDROCK/VERTEX`.)
 
 The runner omits `-m` by default, so Codex uses its built-in default — and because
 `--ignore-user-config` is on, a model pinned in `~/.codex/config.toml` is ignored, so pass it
-explicitly if you want a specific one. Choose per-run with `--model <name>`, or persist a default in
-`IMPASSE_CODEX_MODEL` (the per-run flag wins). The `claude` backend mirrors this with `--model` /
-`IMPASSE_CLAUDE_MODEL` — pinning a reviewer model *different* from the host's climbs a rung on the
-independence ladder.
+explicitly if you want a specific one. Precedence: `--model <name>` (per run) > `IMPASSE_CODEX_MODEL`
+env > a persisted default (`impasse_run.py set-model --backend codex <name>`, stored `0600` in
+`settings.json`) > the backend default. The `claude` backend mirrors this (`IMPASSE_CLAUDE_MODEL`,
+`set-model --backend claude`) — pinning a reviewer model *different* from the host's climbs a rung
+on the independence ladder.
+
+**No enumerable model list.** Codex has no `models` subcommand, and the valid set is
+account-dependent (ChatGPT-account tier vs API key); an unsupported `-m` value fails only at call
+time with a `400 … model is not supported`. So an interactive picker can offer a *curated*
+candidate list plus a free-text "other" — it can't authoritatively enumerate.

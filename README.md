@@ -177,10 +177,12 @@ git clone https://github.com/windaddict/impasse ~/.claude/skills/impasse
 
 Then ask Claude Code to use Impasse — for example, "Use Impasse to review this decision memo."
 
-**Choosing the reviewer model:** by default the backend's own default model is used. Pick one per
-run with `--model <name>`, or persist a default in `IMPASSE_CODEX_MODEL` (or `IMPASSE_CLAUDE_MODEL`
-for the fallback) — the per-run flag wins. Pinning a reviewer model *different* from the host's
-also climbs a rung on the independence ladder.
+**Choosing the reviewer model:** by default the backend's own default is used. Ask Claude Code to
+pick one and it presents the options (Codex can't enumerate models, so it's a curated list plus a
+free-text "other" — availability depends on your account). Or set it directly: `--model <name>` per
+run, `scripts/impasse_run.py set-model --backend codex <name>` to persist, or the
+`IMPASSE_CODEX_MODEL` / `IMPASSE_CLAUDE_MODEL` env var. Precedence: flag > env > persisted > default.
+Pinning a model *different* from the host's also climbs a rung on the independence ladder.
 
 ## Data boundary & consent
 

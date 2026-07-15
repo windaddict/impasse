@@ -387,9 +387,10 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     except (FileNotFoundError, ValueError) as e:
         return _fail("backend_error", str(e), kind, str(e), manifest)
 
-    # Per-run --model overrides a persisted default (IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL);
-    # falling through to the backend's own default when neither is set.
-    model = model or os.environ.get(f"IMPASSE_{be.name.upper()}_MODEL") or None
+    # Model precedence: per-run --model > IMPASSE_{CODEX,CLAUDE}_MODEL env > persisted default
+    # (settings.json via `set-model`) > the backend's own default.
+    model = (model or os.environ.get(f"IMPASSE_{be.name.upper()}_MODEL")
+             or lib.get_default_model(be.name))
 
     independence_notice = None
     if be.independence == "same_provider":
@@ -528,7 +529,22 @@ def _main(argv=None) -> int:
     md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
     md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     md.add_argument("--environment", default=None, help="override auto-detection (else IMPASSE_ENV / auto)")
+    sm = sub.add_parser("set-model", help="persist (or show/clear) the default reviewer model for a backend")
+    sm.add_argument("--backend", default="codex", choices=["codex", "claude"])
+    sm.add_argument("model", nargs="?", default=None, help="model name to persist; omit to show the current default")
+    sm.add_argument("--clear", action="store_true", help="clear the persisted default for this backend")
     args = ap.parse_args(argv)
+
+    if args.cmd == "set-model":
+        if args.clear:
+            lib.set_default_model(args.backend, None)
+            print(f"cleared persisted default model for {args.backend}")
+        elif args.model:
+            lib.set_default_model(args.backend, args.model)
+            print(f"persisted default model for {args.backend}: {args.model}")
+        else:
+            print(f"default model for {args.backend}: {lib.get_default_model(args.backend) or '(backend default)'}")
+        return 0
 
     if args.cmd == "mode":
         def _avail(resolve):

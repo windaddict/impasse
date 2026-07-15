@@ -121,9 +121,16 @@ refuse; see "Environment & fallback"). Then:
    Never treat a failure as a passing review. `--backend` defaults to `codex` (cross-provider,
    recommended); `--backend claude` is the same-provider fallback for users without Codex — it
    returns an `independence_notice` you **must** surface, and its consent is keyed to
-   `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately). **Model:** pick the
-   reviewer model with `--model <name>`, or persist a default in `IMPASSE_CODEX_MODEL` /
-   `IMPASSE_CLAUDE_MODEL` (the per-run flag wins); omit for the backend's default.
+   `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately).
+
+   **Model.** Precedence: `--model <name>` (this run) > `IMPASSE_{CODEX,CLAUDE}_MODEL` env >
+   persisted default (`impasse_run.py set-model --backend codex <name>`) > the backend's default.
+   **To let the operator pick interactively** (they ask to choose/change the model, or you offer):
+   the runner can't prompt, so present it yourself with `AskUserQuestion`. Codex has **no
+   model-list command**, so offer a short *curated* candidate list **plus an "other" free-text
+   choice** (availability is account-dependent; a bad model fails with a clear 400). Ask whether to
+   use it **just this run** or **persist** it — for this run pass `--model`; to persist, run
+   `impasse_run.py set-model --backend <b> <model>` (clear with `--clear`).
 4. **Treat `response` as partially validated.** The runner confirms it's JSON with the required
    top-level fields; full schema validation runs in CI (`tests/validate_schemas.py`), not at
    runtime. Don't rely on fields the runner didn't check without validating them yourself.
