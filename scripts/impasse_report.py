@@ -167,21 +167,36 @@ def render(run: dict) -> str:
 def render_findings(response: dict) -> str:
     """Compact, UNVERIFIED render of a reviewer-response's findings — for --raw mode (no
     verify/reconcile/escalate). Untrusted text is sanitized exactly like the full report."""
-    fs = (response or {}).get("findings") or []
+    response = response if isinstance(response, dict) else {}
+    # Untrusted input: `findings` may be absent, null, or (malformed) a non-list. Coerce to a
+    # list so a truthy non-list (e.g. a stray string) can't crash the render loop below.
+    fs = response.get("findings")
+    fs = fs if isinstance(fs, list) else []
+    assessment = response.get("assessment")
     out = [f"🔎 Raw reviewer findings — {len(fs)} · UNVERIFIED (no verify/reconcile/escalate; "
            "the reviewer is sometimes confidently wrong — check before acting)"]
-    if (response or {}).get("assessment"):
-        out.append(f"   assessment: {_clean(response['assessment'])}")
+    if assessment:
+        out.append(f"   assessment: {_clean(assessment)}")
     for f in fs:
+        if not isinstance(f, dict):
+            continue
         sev = SEVERITY.get(f.get("severity"), _clean(f.get("severity", "?")))
         cat = _clean(f.get("category", ""))
         out.append("─" * 78)
         out.append(f"{_clean(f.get('id', '?'))}  {sev}" + (f"  · {cat}" if cat else ""))
         out.append(_wrap("  ", f.get("claim", "")))
         for ev in (f.get("evidence") or [])[:2]:
+            if not isinstance(ev, dict):
+                continue
             out.append(_wrap("  📌 ", f"{_anchor_desc(ev.get('anchor', {}))} — {ev.get('observation', '')}"))
     if not fs:
-        out.append("  (no findings — the reviewer approved)")
+        # Only claim approval when the assessment affirmatively says so. Empty findings paired
+        # with a non-approving assessment is malformed reviewer output, not a pass — don't
+        # mislabel it "approved".
+        if assessment in (None, "", "approve"):
+            out.append("  (no findings — the reviewer approved)")
+        else:
+            out.append(f"  (no individual findings, but assessment is '{_clean(assessment)}' — not an approval)")
     return "\n".join(out)
 
 
@@ -335,7 +350,12 @@ def _main(argv=None) -> int:
             print(f"cannot read findings file: {e}", file=sys.stderr)
             return 2
         resp = doc.get("response") if isinstance(doc, dict) and isinstance(doc.get("response"), dict) else doc
-        print(render_findings(resp if isinstance(resp, dict) else {}))
+        if not (isinstance(resp, dict) and "findings" in resp):
+            print("not a reviewer-response (no 'findings' field) — is this the right file? "
+                  "Expected a reviewer-response JSON, or a review-result wrapping one under 'response'.",
+                  file=sys.stderr)
+            return 2
+        print(render_findings(resp))
         return 0
     if args.cmd == "save-reconciliation":
         try:

@@ -13,8 +13,8 @@ shape for *independence*, but it under-serves two things on high-stakes **decisi
    "find what's wrong" critic misses "you never considered what the ops team, the customer, or
    the regulator would say."
 2. **Generative alternatives.** The critic finds flaws; it doesn't propose a *better option from
-   an adjacent domain*. (This is the old `codex-second-opinion` "brainstorm mode," which Impasse
-   dropped to stay tight.)
+   an adjacent domain*. (This is the `codex-collaborator` skill's "brainstorm mode," which Impasse
+   deliberately excludes to stay tight — a reviewer judges, it doesn't ideate.)
 
 Panel mode fans out multiple agents to cover both — **as an explicit opt-in mode beside the core,
 never replacing the single-reviewer default.**

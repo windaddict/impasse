@@ -403,6 +403,18 @@ def main() -> int:
     check(resr.get("record_notice") == "Not recorded (raw mode).", "raw: notice says raw mode")
     check("UNVERIFIED" in report.render_findings(resr["response"]), "raw: render_findings labels output UNVERIFIED")
     check("\x1b" not in report.render_findings({"findings": [{"id": "F\x1b[31m", "severity": "high", "claim": "c"}]}), "raw: render_findings sanitizes untrusted text")
+    # F001: a truthy non-list `findings` (malformed reviewer output) must not crash the render.
+    for bad in ("looks fine", 5, {"a": 1}, ["x", "y"]):
+        try:
+            report.render_findings({"findings": bad})
+            _ok = True
+        except Exception:
+            _ok = False
+        check(_ok, f"raw: render_findings tolerates non-list/non-dict findings ({type(bad).__name__})")
+    # F002: empty findings + a non-approving assessment must NOT be labeled "approved".
+    _r = report.render_findings({"assessment": "needs_attention", "findings": []})
+    check("approved" not in _r and "not an approval" in _r, "raw: empty findings + needs_attention is not called approved")
+    check("approved" in report.render_findings({"assessment": "approve", "findings": []}), "raw: genuine approve still reads as approved")
     os.environ["IMPASSE_CODEX_MODEL"] = "persisted-x"
     rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
     check(rm.get("model") == "persisted-x", "review: persisted IMPASSE_CODEX_MODEL resolved into the run")
