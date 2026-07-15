@@ -64,8 +64,8 @@ It is **domain-general** — the same protocol reviews:
 2. **Verify** — the host checks each finding against the actual artifact before trusting it.
 3. **Reconcile** — accept / reject (with evidence) / resolve each finding; one rebuttal round.
 4. **Report + escalate** — you get the verified findings to act on, and *only* the deadlock —
-   an evidence conflict, or a value/priority judgment that's yours to make — comes to you as a
-   crisp question:
+   an evidence conflict, a value/priority judgment that's yours to make, or a host objection it
+   couldn't back with evidence — comes to you as a crisp question:
 
    > **Question for you:** The reviewer argues that entering Europe first reduces concentration
    > risk; the memo argues it delays break-even by nine months. Which matters more here —
@@ -91,7 +91,7 @@ what's wrong there — never a bare "line 40 looks off." What it looks for adapt
 
 Then the host does the half the reviewer can't be trusted to do alone: **verify** each finding
 against the real artifact, **reject** the confident misses with evidence, and **escalate** only the
-judgment call. The reviewer proposes; you decide.
+judgment call. The reviewer proposes, the host verifies and fixes, and you decide the rest.
 
 ## What a run surfaces
 
@@ -189,8 +189,8 @@ with read-only and adversarial **code** review, an optional review gate, and del
 tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
 (decisions, documents, research, data, and code) that verifies each finding and reconciles the
 two models, escalating only what they can't settle rather than returning the review to triage.
-It uses the Codex CLI as its **one backend today**; the protocol is backend-neutral by design,
-but no second backend is wired up yet.
+It uses the Codex CLI as its cross-provider reviewer, with a same-provider Claude fallback
+(`claude -p`) for users without Codex — breadth, not independence; the protocol is backend-neutral.
 
 ## Repository layout
 

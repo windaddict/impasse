@@ -21,8 +21,8 @@ supervisor degrades to process-level kill; Windows is a documented roadmap.
 
 CLI:
   impasse_run.py review --kind code --instruction-file I.txt --artifact-file A.md \\
-      [--schema schemas/reviewer-response.v1.json] [--approve-send DEST] \\
-      [--effort low] [--wall 180] [--idle 60]
+      [--schema schemas/reviewer-response.v1.json] [--backend codex|claude] [--model NAME] \\
+      [--approve-send DEST] [--effort low] [--wall 180] [--idle 60]
 """
 from __future__ import annotations
 

@@ -19,7 +19,8 @@ Each step down is disclosed: the runner emits an `independence_notice` for `same
 ## Environments
 
 - **Claude Code** — full shell. Resolves and runs a backend (Codex by default; Claude fallback if
-  Codex is absent). The only surface that yields genuine independence. Self-review is **refused
+  Codex is absent). Today the only surface that runs a reviewer subprocess, hence the only one that
+yields genuine independence. Self-review is **refused
   here** — degrading to the host's own context would throw away the independence you actually have.
 - **Claude chat sandbox** (claude.ai Skills) — a code container with no CLI installs and no
   reliable way to spawn a fresh isolated reviewer. No subprocess backend runs. Self-review is

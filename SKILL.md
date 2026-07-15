@@ -19,10 +19,11 @@ verifies each finding, reconciles the two models, and hands you the reconciled r
 verified problems to act on, and the disagreements that need your judgment — not a raw list to
 triage. (Verify/reconcile/escalate are directed by this skill — see the banner above.)
 
-This is **read-only on the artifact.** The reviewer observes and argues; it never edits the
-artifact under review. It *does* write local run records to disk (see Housekeeping and
-`docs/security-model.md`). Delegated editing of the artifact is a separate, experimental,
-opt-in capability — `docs/delegate-mode.md`.
+The **reviewer is read-only on the artifact** — it observes and argues; it never edits the
+artifact under review. Fixes are applied by the host, or by you — never by the reviewer; the
+critic never holds the pen. (Impasse does write local run records to disk — see Housekeeping and
+`docs/security-model.md`.) Delegated editing — letting the *reviewer* touch the artifact — is a
+separate, experimental, opt-in capability (`docs/delegate-mode.md`).
 
 ## Roles (backend-neutral vocabulary)
 
@@ -113,7 +114,7 @@ refuse; see "Environment & fallback"). Then:
      --kind <code|document|decision|research|data|other> \
      --instruction-file <instr.txt> --artifact-file <artifact> \
      --schema "$IMPASSE_ROOT/schemas/reviewer-response.v1.json" \
-     [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort low|medium|high] [--wall 180] [--idle 60]
+     [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 180] [--idle 60]
    ```
    It returns JSON: on success, `response` is the reviewer's **untrusted** structured output;
    on failure, a `failure` with a code (`consent_denied|timeout|backend_error|invalid_response`).
@@ -193,7 +194,8 @@ other surfaces the tool degrades along the ladder. Pick the strongest honest mod
 env-gated:
 
 - **Claude Code** — resolve and run a backend: Codex (cross-provider, default) or the Claude
-  fallback. The only surface that yields genuine independence.
+  fallback. Today, the only surface that runs a reviewer subprocess — so the only one that yields
+  genuine independence.
 - **Claude chat sandbox / Claude Cowork** — no reviewer subprocess can run. When `review_mode`
   returns `self_review`, the host may perform the review **itself, in a fresh reasoning pass** —
   but it MUST: (a) prepend `self_review_notice` verbatim (it states plainly this is *not* an
@@ -209,9 +211,10 @@ host's own context there throws away the independence you actually have. Detail:
 
 ## Guardrails
 
-- **Read-only on the artifact.** The review path never edits the artifact under review (it
-  does write local run records to disk — see Housekeeping). Delegated editing is separate,
-  experimental, and opt-in (`docs/delegate-mode.md`).
+- **Read-only on the artifact.** The review path never edits the artifact under review — the
+  host applies any verified fixes separately; the reviewer never holds the pen (it does write
+  local run records to disk — see Housekeeping). Delegated editing (letting the *reviewer* edit)
+  is separate, experimental, and opt-in (`docs/delegate-mode.md`).
 - **Independence is limited, not guaranteed.** Two models can share training data and
   correlated blind spots; a different provider *reduces* correlation, it doesn't eliminate it.
   Treat Impasse as a second opinion, not an adjudication oracle. Agreement is evidence, not
@@ -243,5 +246,5 @@ with read-only and adversarial **code** review, an optional review gate, and del
 tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
 (decisions, documents, research, data, and code) that **verifies each finding and reconciles
 the two models**, escalating only what they can't settle rather than returning the review to
-triage. It uses the Codex CLI as its **one backend today**; the protocol is backend-neutral by
-design, but no second backend is wired up yet.
+triage. It uses the Codex CLI as its cross-provider reviewer, with a same-provider Claude fallback
+(`claude -p`) for users without Codex — breadth, not independence; the protocol is backend-neutral.
