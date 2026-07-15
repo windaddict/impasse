@@ -48,12 +48,13 @@ def _load() -> dict:
     if os.path.isfile(p) and not os.path.islink(p):
         try:
             with open(p, encoding="utf-8") as fh:
-                data = json.loads(fh.read())
+                data = json.loads(fh.read(4_000_000))
             if (isinstance(data, dict) and data.get("version") == CONSENT_VERSION
                     and isinstance(data.get("grants"), list)):
+                data["grants"] = [g for g in data["grants"] if isinstance(g, dict)]  # drop malformed entries
                 return data
-        except (OSError, json.JSONDecodeError):
-            pass  # unreadable / malformed / wrong version -> treat as empty (blocks, which is safe)
+        except (OSError, ValueError):   # unreadable / malformed / bad-utf8 -> empty store (blocks, which is safe)
+            pass
     return {"version": CONSENT_VERSION, "grants": []}
 
 
@@ -70,6 +71,7 @@ def _save(state: dict) -> None:
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)  # not a secret, but tampering matters
         os.replace(tmp, p)    # atomic; a crash can't leave a half-written consent file
+        lib.fsync_dir(d)      # make the rename durable
     finally:
         if os.path.exists(tmp):
             try:

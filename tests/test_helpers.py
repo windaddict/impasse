@@ -496,13 +496,32 @@ def main() -> int:
 
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
-    check("/" not in lib._safe_id("a/b/../../etc") and lib._safe_id("a/b") == "a_b", "safe_id: path separators collapsed")
+    check("/" not in lib._safe_id("a/b/../../etc"), "safe_id: path separators collapsed")
+    check(lib._safe_id("a/b").startswith("a_b-") and lib._safe_id("a/b") != lib._safe_id("a?b"), "safe_id: lossy ids get a disambiguating hash (injective, no collision)")
+    check(lib._safe_id(12345) == "12345" and lib._safe_id(None) == "unknown", "safe_id: a non-string id is coerced, not crashed")
     lib.save_run_doc("../evil", "reviewer-response", {"schema_version": "1.0", "review_id": "../evil", "findings": []})
     escaped = os.path.join(os.path.dirname(lib.runs_dir()), "evil")
     check(os.path.isdir(os.path.join(lib.runs_dir(), lib._safe_id("../evil"))) and not os.path.exists(escaped), "save_run_doc: a traversal review_id stays inside runs_dir")
     lib.forget_run("../evil")
     check(report._clean("a\x1b[31mX\x1b[0m\x07b") == "a[31mX[0mb", "report: strips ANSI/control escapes from untrusted reviewer text")
     check(lib.review_mode("CODE", environment="chat_sandbox")["mode"] == "refuse", "review_mode: 'CODE' normalized -> still refused in the sandbox")
+
+    # --- full-codebase-review fixes ---
+    prune_guarded = False
+    try:
+        report.prune(0)
+    except ValueError:
+        prune_guarded = True
+    check(prune_guarded, "prune: rejects --older-than < 1 (won't silently delete everything)")
+    with open(consent.consent_path(), "w") as _cf:
+        _cf.write('{"version":1,"grants":["not-a-dict",{"destination_id":"' + D1 + '","notice_version":"1"}]}')
+    check(consent.check(be1)[0] is True, "consent: a non-dict grant entry is ignored, valid grant still honored (no crash)")
+    consent.revoke(D1)
+    lib.save_run_doc("hdrtest", "reviewer-response", {"schema_version": "1.0", "review_id": "r\x1b[31mX",
+                     "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                     "assessment": "approve", "summary": "s", "findings": []})
+    check("\x1b" not in report.render(lib.load_run("hdrtest")), "report: terminal escapes in an untrusted review_id are stripped from the header")
+    lib.forget_run("hdrtest")
 
     print()
     if _fails:

@@ -22,7 +22,7 @@ supervisor degrades to process-level kill; Windows is a documented roadmap.
 CLI:
   impasse_run.py review --kind code --instruction-file I.txt --artifact-file A.md \\
       [--schema schemas/reviewer-response.v1.json] [--backend codex|claude] [--model NAME] \\
-      [--approve-send DEST] [--effort low] [--wall 180] [--idle 60]
+      [--approve-send DEST] [--effort low] [--wall 300] [--idle 300]
 """
 from __future__ import annotations
 
@@ -460,8 +460,8 @@ def _fail(code, message, kind, notice, manifest, termination=None, retryable=Non
 
 def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "codex",
            schema_path: str | None = None, approve_send: str | None = None,
-           effort: str | None = None, model: str | None = None, wall_timeout: float = 180.0,
-           idle_timeout: float = 60.0, no_record: bool = False) -> dict:
+           effort: str | None = None, model: str | None = None, wall_timeout: float = 300.0,
+           idle_timeout: float = 300.0, no_record: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
     `backend` selects the reviewer: 'codex' (cross-provider, default) or 'claude' (same-provider
@@ -506,8 +506,9 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             try:
                 with open(schema_path, encoding="utf-8") as f:
                     schema_text = f.read()
-            except OSError:
-                schema_text = None
+            except OSError as e:
+                # explicitly requested but unreadable -> fail loudly, don't silently drop the schema
+                return _f("backend_error", f"schema file unreadable: {schema_path} ({e})")
         full_instruction = compose_full_instruction(instruction, schema_text)
 
         out_last = None
@@ -522,11 +523,15 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
         result = None
+        deadline = time.monotonic() + wall_timeout   # ONE wall-clock budget for the whole review
         for attempt in range(_MAX_TRANSIENT_RETRIES + 1):   # attempt 0, then up to N retries
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _f("timeout", f"backend wall_timeout after {wall_timeout:.0f}s")
             if out_last is not None:
                 open(out_last, "w").close()   # truncate — never read a prior attempt's stale content
             result = supervise(argv, input_bytes=artifact_bytes,
-                               wall_timeout=wall_timeout, idle_timeout=idle_timeout)
+                               wall_timeout=remaining, idle_timeout=min(idle_timeout, remaining))
             if result.termination == "spawn_error":
                 return _f("backend_error", result.stderr.decode("utf-8", "replace")[-800:])
             if result.termination in ("wall_timeout", "idle_timeout", "termination_failed"):
@@ -537,8 +542,10 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                                              parse_jsonl=(be.type == "codex-cli"))
                 # Auto-retry ONLY a transient outage; a rate/usage cap or auth failure won't clear
                 # in seconds, so surface it (with a retryable hint) for the host to offer recovery.
-                if err["code"] == "service_unavailable" and attempt < _MAX_TRANSIENT_RETRIES:
-                    time.sleep(min(2 ** (attempt + 1), 10))
+                backoff = min(2 ** (attempt + 1), 10)
+                if (err["code"] == "service_unavailable" and attempt < _MAX_TRANSIENT_RETRIES
+                        and deadline - time.monotonic() > backoff):
+                    time.sleep(backoff)
                     continue
                 return _f(err["code"], err["message"], retryable=err["retryable"])
             break   # exit 0 — proceed to read the final message
@@ -621,8 +628,11 @@ def _main(argv=None) -> int:
                     help="codex reasoning effort (ignored by the claude backend)")
     rv.add_argument("--model", default=None,
                     help="reviewer model (else IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL, else the backend default)")
-    rv.add_argument("--wall", type=float, default=180.0)
-    rv.add_argument("--idle", type=float, default=60.0)
+    rv.add_argument("--wall", type=float, default=300.0,
+                    help="total wall-clock cap (s). The real bound — scale UP for high effort / large artifacts.")
+    rv.add_argument("--idle", type=float, default=300.0,
+                    help="no-output cap (s). The reviewer waits SILENTLY on server-side reasoning, so a silent "
+                         "gap is not a hang; keep this ≈ --wall (it can't distinguish a hang from a long API wait).")
     rv.add_argument("--no-record", action="store_true", help="don't persist the run record")
     md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
     md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])

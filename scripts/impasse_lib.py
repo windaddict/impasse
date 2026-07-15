@@ -326,12 +326,19 @@ def artifact_revision(data: bytes) -> dict:
 # contain artifact content and are sensitive — 0600 in a 0700 dir, and never committed
 # (see .gitignore). `forget_run` deletes one.
 
-def _safe_id(run_id: str) -> str:
+def _safe_id(run_id) -> str:
     """Map a possibly-UNTRUSTED run/review id (the reviewer supplies review_id) to a single safe
-    directory name. Strip to a conservative charset, then collapse ''/'.'/'..'-style all-dot names
-    to 'unknown' — otherwise a value like '..' would traverse out of runs_dir on save/forget."""
-    s = re.sub(r"[^A-Za-z0-9._-]", "_", run_id or "")[:120]
-    return "unknown" if s.strip(".") == "" else s
+    directory name. Coerce to str (a non-string id must not crash), strip to a conservative charset,
+    collapse ''/'.'/'..'-style all-dot names to 'unknown' (else '..' traverses out of runs_dir), and
+    when sanitization or truncation CHANGED the id, append a hash of the original so distinct hostile
+    ids can't collide onto the same record directory."""
+    orig = "" if run_id is None else str(run_id)
+    s = re.sub(r"[^A-Za-z0-9._-]", "_", orig)[:120]
+    if s.strip(".") == "":
+        return "unknown"
+    if s != orig:   # lossy transform -> disambiguate to keep the mapping injective
+        s = f"{s[:104]}-{hashlib.sha256(orig.encode('utf-8', 'replace')).hexdigest()[:12]}"
+    return s
 
 
 def runs_dir() -> str:
@@ -354,12 +361,15 @@ def _settings_path() -> str:
     return os.path.join(config_dir(), "settings.json")
 
 
+_MAX_STORE_BYTES = 4_000_000   # cap on a persisted JSON store read into memory
+
+
 def load_settings() -> dict:
     try:
         with open(_settings_path(), encoding="utf-8") as f:
-            d = json.load(f)
+            d = json.loads(f.read(_MAX_STORE_BYTES))
         return d if isinstance(d, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):   # ValueError covers json.JSONDecodeError and UnicodeDecodeError
         return {}
 
 
@@ -399,12 +409,26 @@ def set_default_model(backend: str, model: str | None) -> None:
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
+        fsync_dir(os.path.dirname(path))
     finally:
         if os.path.exists(tmp):
             try:
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+def fsync_dir(path: str) -> None:
+    """fsync a directory so a preceding os.replace into it is durable across a crash. Best-effort:
+    not every platform/filesystem supports it (Windows raises), so failures are swallowed."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def save_run_doc(run_id: str, name: str, doc: dict) -> str:
@@ -425,6 +449,7 @@ def save_run_doc(run_id: str, name: str, doc: dict) -> str:
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, target)
+        fsync_dir(d)
     finally:
         if os.path.exists(tmp):
             try:
@@ -458,8 +483,8 @@ def load_run(run_id: str) -> dict:
     def _load(p):
         try:
             with open(p, encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError):
+                return json.loads(f.read(_MAX_STORE_BYTES))
+        except (OSError, ValueError):   # JSONDecodeError + UnicodeDecodeError are ValueError subclasses
             return None
 
     return {

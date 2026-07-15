@@ -114,7 +114,7 @@ refuse; see "Environment & fallback"). Then:
      --kind <code|document|decision|research|data|other> \
      --instruction-file <instr.txt> --artifact-file <artifact> \
      --schema "$IMPASSE_ROOT/schemas/reviewer-response.v1.json" \
-     [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 180] [--idle 60]
+     [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 300] [--idle 300]
    ```
    It returns JSON: on success, `response` is the reviewer's **untrusted** structured output;
    on failure, a `failure` with a `code`
@@ -128,6 +128,12 @@ refuse; see "Environment & fallback"). Then:
    recommended); `--backend claude` is the same-provider fallback for users without Codex — it
    returns an `independence_notice` you **must** surface, and its consent is keyed to
    `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately).
+
+   **Timeouts.** The reviewer reasons **silently server-side** and streams nothing for minutes — a
+   quiet gap is *not* a hang, and `--idle` can't tell the two apart, so keep `--idle ≈ --wall` and
+   treat `--wall` as the real bound. **Scale `--wall` by effort/size:** low/medium ≈ 300s; **high
+   effort or a large artifact ≈ 600s+** (high-effort runs routinely take 5–10 min with no output).
+   A `timeout` failure usually means the wall was too short for the effort, not that the run hung.
 
    **Model.** Precedence: `--model <name>` (this run) > `IMPASSE_{CODEX,CLAUDE}_MODEL` env >
    persisted default (`impasse_run.py set-model --backend codex <name>`) > the backend's default.

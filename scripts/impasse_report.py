@@ -91,7 +91,7 @@ def _render_finding(f: dict, item: dict | None) -> list[str]:
     if item:
         vers = item.get("verification") or []
         if vers:
-            checks = " · ".join(f"{v.get('method')} {VRESULT.get(v.get('result'), v.get('result'))}" for v in vers)
+            checks = " · ".join(f"{_clean(v.get('method'))} {VRESULT.get(v.get('result'), _clean(v.get('result')))}" for v in vers)
             lines.append(f"  🧪 Verified: {checks}")
             for v in vers:
                 if v.get("detail"):
@@ -107,7 +107,7 @@ def _render_finding(f: dict, item: dict | None) -> list[str]:
             lines.append(_wrap("  ✅ Resolution: ", item["resolution"]))
         esc = item.get("escalation")
         if esc:
-            lines.append(f"  ⚖️ Deadlock: {esc.get('dispute_kind')} (stopped: {esc.get('stop_reason')})")
+            lines.append(f"  ⚖️ Deadlock: {_clean(esc.get('dispute_kind'))} (stopped: {_clean(esc.get('stop_reason'))})")
             if esc.get("operator_question"):
                 lines.append("  ❓ Question for you:")
                 lines.append(_wrap("     ", esc["operator_question"]))
@@ -118,12 +118,12 @@ def render(run: dict) -> str:
     rev = run.get("reviewer_response") or {}
     rec = run.get("reconciliation_result") or {}
     if not rev and not rec:
-        return f"No records for run '{run.get('run_id')}'."
+        return f"No records for run '{_clean(run.get('run_id'))}'."
 
     art = rev.get("artifact") or {}
     prod = rev.get("producer") or rec.get("producer") or {}
-    review_id = rev.get("review_id") or rec.get("review_id") or run.get("run_id")
-    backend = f"{prod.get('backend', '?')}/{prod.get('model', '?')}" if prod else "?"
+    review_id = _clean(rev.get("review_id") or rec.get("review_id") or run.get("run_id"))
+    backend = f"{_clean(prod.get('backend', '?'))}/{_clean(prod.get('model', '?'))}" if prod else "?"
 
     findings = rev.get("findings") or []
     items = {it.get("finding_id"): it for it in (rec.get("items") or [])}
@@ -131,9 +131,9 @@ def render(run: dict) -> str:
     out = ["⚖️  Impasse run report"]
     out.append(f"    review: {review_id}")
     if art:
-        out.append(f"    artifact: {art.get('id', '(inline)')} ({art.get('kind', '?')}) · reviewed {rev.get('created_at', '?')} · backend {backend}")
+        out.append(f"    artifact: {_clean(art.get('id', '(inline)'))} ({_clean(art.get('kind', '?'))}) · reviewed {_clean(rev.get('created_at', '?'))} · backend {backend}")
     if rec.get("outcome"):
-        out.append(f"    outcome: {OUTCOME.get(rec['outcome'], rec['outcome'])}")
+        out.append(f"    outcome: {OUTCOME.get(rec['outcome'], _clean(rec['outcome']))}")
 
     # tally
     n = len(findings) if findings else len(items)
@@ -225,6 +225,8 @@ def prune(older_than_days: int, include_open: bool = False) -> tuple:
     """Delete records older than N days. By default, runs with unresolved escalations are
     KEPT (a pending decision shouldn't be silently discarded) unless include_open=True.
     Returns (deleted_ids, kept_open_ids)."""
+    if older_than_days < 1:
+        raise ValueError("prune requires --older-than >= 1 (a 0/negative age would delete everything)")
     cutoff = time.time() - older_than_days * 86400
     deleted, kept_open = [], []
     for r in lib.list_runs():
@@ -284,7 +286,11 @@ def _main(argv=None) -> int:
                 print(_wrap(f"    • {it.get('finding_id')}: ", q, "      "))
         return 0
     if args.cmd == "prune":
-        deleted, kept = prune(args.older_than, include_open=args.include_open)
+        try:
+            deleted, kept = prune(args.older_than, include_open=args.include_open)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 2
         for rid in deleted:
             print(f"  forgot {rid}")
         msg = f"pruned {len(deleted)} record(s) older than {args.older_than}d"
