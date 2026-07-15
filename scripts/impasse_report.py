@@ -164,6 +164,27 @@ def render(run: dict) -> str:
     return "\n".join(out)
 
 
+def render_findings(response: dict) -> str:
+    """Compact, UNVERIFIED render of a reviewer-response's findings — for --raw mode (no
+    verify/reconcile/escalate). Untrusted text is sanitized exactly like the full report."""
+    fs = (response or {}).get("findings") or []
+    out = [f"🔎 Raw reviewer findings — {len(fs)} · UNVERIFIED (no verify/reconcile/escalate; "
+           "the reviewer is sometimes confidently wrong — check before acting)"]
+    if (response or {}).get("assessment"):
+        out.append(f"   assessment: {_clean(response['assessment'])}")
+    for f in fs:
+        sev = SEVERITY.get(f.get("severity"), _clean(f.get("severity", "?")))
+        cat = _clean(f.get("category", ""))
+        out.append("─" * 78)
+        out.append(f"{_clean(f.get('id', '?'))}  {sev}" + (f"  · {cat}" if cat else ""))
+        out.append(_wrap("  ", f.get("claim", "")))
+        for ev in (f.get("evidence") or [])[:2]:
+            out.append(_wrap("  📌 ", f"{_anchor_desc(ev.get('anchor', {}))} — {ev.get('observation', '')}"))
+    if not fs:
+        out.append("  (no findings — the reviewer approved)")
+    return "\n".join(out)
+
+
 def lifetime_recap() -> str:
     """A short, honest value recap across every reconciled run on disk — printed at the end of
     a `show` so the operator sees what independent review has surfaced for them. Facts only:
@@ -248,6 +269,8 @@ def _main(argv=None) -> int:
     sub.add_parser("list")
     s = sub.add_parser("show")
     s.add_argument("run_id")
+    fnd = sub.add_parser("findings", help="render a reviewer-response's raw findings (a review's --raw output)")
+    fnd.add_argument("path", help="a reviewer-response JSON file, or a review result JSON (uses its .response)")
     sr = sub.add_parser("save-reconciliation")
     sr.add_argument("path")
     fg = sub.add_parser("forget")
@@ -303,6 +326,16 @@ def _main(argv=None) -> int:
         recap = lifetime_recap()
         if recap:
             print(recap)
+        return 0
+    if args.cmd == "findings":
+        try:
+            with open(args.path, encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"cannot read findings file: {e}", file=sys.stderr)
+            return 2
+        resp = doc.get("response") if isinstance(doc, dict) and isinstance(doc.get("response"), dict) else doc
+        print(render_findings(resp if isinstance(resp, dict) else {}))
         return 0
     if args.cmd == "save-reconciliation":
         try:

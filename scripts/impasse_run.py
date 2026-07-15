@@ -461,7 +461,7 @@ def _fail(code, message, kind, notice, manifest, termination=None, retryable=Non
 def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "codex",
            schema_path: str | None = None, approve_send: str | None = None,
            effort: str | None = None, model: str | None = None, wall_timeout: float = 300.0,
-           idle_timeout: float = 300.0, no_record: bool = False) -> dict:
+           idle_timeout: float = 300.0, no_record: bool = False, raw: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
     `backend` selects the reviewer: 'codex' (cross-provider, default) or 'claude' (same-provider
@@ -575,9 +575,12 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         run_id = parsed.get("review_id")
         recorded = False
         record_path = None
+        # raw mode is a fast throwaway (findings only, no verify/reconcile/escalate) — don't record.
+        skip_record = no_record or raw
         # Persistence is a data boundary too: surface where the reviewed content lands locally.
-        record_notice = "Not recorded (--no-record)." if no_record else None
-        if run_id and not no_record:
+        record_notice = (("Not recorded (raw mode)." if raw else "Not recorded (--no-record).")
+                         if skip_record else None)
+        if run_id and not skip_record:
             try:
                 p = lib.save_run_doc(run_id, "reviewer-response", parsed)
                 recorded = True
@@ -591,7 +594,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 pass
         return {
             "ok": True, "kind": kind, "termination": result.termination,
-            "duration_s": round(result.duration_s, 2),
+            "duration_s": round(result.duration_s, 2), "raw": raw,
             **bmeta,
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
             "run_id": run_id, "recorded": recorded, "record_path": record_path,
@@ -634,6 +637,9 @@ def _main(argv=None) -> int:
                     help="no-output cap (s). The reviewer waits SILENTLY on server-side reasoning, so a silent "
                          "gap is not a hang; keep this ≈ --wall (it can't distinguish a hang from a long API wait).")
     rv.add_argument("--no-record", action="store_true", help="don't persist the run record")
+    rv.add_argument("--raw", action="store_true",
+                    help="fast mode: return the reviewer's UNVERIFIED findings and skip the "
+                         "verify/reconcile/escalate protocol (implies --no-record)")
     md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
     md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     md.add_argument("--environment", default=None, help="override auto-detection (else IMPASSE_ENV / auto)")
@@ -683,7 +689,7 @@ def _main(argv=None) -> int:
         result = review(kind=args.kind, instruction=instruction, artifact_bytes=artifact_bytes,
                         backend=args.backend, schema_path=args.schema, approve_send=args.approve_send,
                         effort=args.effort, model=args.model, wall_timeout=args.wall,
-                        idle_timeout=args.idle, no_record=args.no_record)
+                        idle_timeout=args.idle, no_record=args.no_record, raw=args.raw)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
     return 2

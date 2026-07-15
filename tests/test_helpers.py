@@ -398,6 +398,11 @@ def main() -> int:
     os.environ["FAKE_EXIT"] = "0"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] and res.get("recorded") is True, "run record: review persists a record by default")
+    resr = run.review(kind="code", instruction="review", artifact_bytes=b"code", raw=True)
+    check(resr["ok"] and resr.get("raw") is True and resr.get("recorded") is False, "raw: --raw returns findings, marks raw, does NOT record")
+    check(resr.get("record_notice") == "Not recorded (raw mode).", "raw: notice says raw mode")
+    check("UNVERIFIED" in report.render_findings(resr["response"]), "raw: render_findings labels output UNVERIFIED")
+    check("\x1b" not in report.render_findings({"findings": [{"id": "F\x1b[31m", "severity": "high", "claim": "c"}]}), "raw: render_findings sanitizes untrusted text")
     os.environ["IMPASSE_CODEX_MODEL"] = "persisted-x"
     rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
     check(rm.get("model") == "persisted-x", "review: persisted IMPASSE_CODEX_MODEL resolved into the run")

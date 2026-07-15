@@ -135,6 +135,12 @@ refuse; see "Environment & fallback"). Then:
    effort or a large artifact ≈ 600s+** (high-effort runs routinely take 5–10 min with no output).
    A `timeout` failure usually means the wall was too short for the effort, not that the run hung.
 
+   **Raw mode (`--raw`).** For a fast, low-stakes check on your own workspace, `--raw` returns the
+   reviewer's findings and **skips the whole verify → reconcile → escalate protocol** (and doesn't
+   record). Present them directly (`impasse_report.py findings <result.json>`) — but say plainly they
+   are **UNVERIFIED**: the host hasn't checked them and the reviewer is sometimes confidently wrong.
+   Use the full protocol (verify each finding, reconcile, escalate) for anything that matters.
+
    **Model.** Precedence: `--model <name>` (this run) > `IMPASSE_{CODEX,CLAUDE}_MODEL` env >
    persisted default (`impasse_run.py set-model --backend codex <name>`) > the backend's default.
    **To let the operator pick interactively** (they ask to choose/change the model, or you offer):

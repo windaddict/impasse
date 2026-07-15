@@ -184,6 +184,10 @@ run, `scripts/impasse_run.py set-model --backend codex <name>` to persist, or th
 `IMPASSE_CODEX_MODEL` / `IMPASSE_CLAUDE_MODEL` env var. Precedence: flag > env > persisted > default.
 Pinning a model *different* from the host's also climbs a rung on the independence ladder.
 
+**Fast checks (`--raw`):** for a quick, low-stakes look at your own work, `review --raw` returns the
+reviewer's findings and skips the verify → reconcile → escalate protocol (and doesn't record). The
+findings are **unverified** — the host hasn't checked them — so use the full protocol when it matters.
+
 ## Data boundary & consent
 
 Reviewing an artifact sends its content to a third-party provider. Impasse **blocks by
