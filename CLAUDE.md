@@ -63,3 +63,9 @@ terminal-escape injection, supervisor teardown) — run it before shipping subst
 
 This repo is also vendored as a git submodule in a consuming config repo (`~/.claude`). After
 pushing here, bump that submodule pointer so the installed skill tracks the new commit.
+
+**Two working trees, one remote.** If you keep both a dev clone and an installed submodule checkout
+of this repo, they're separate working trees of the same remote — a session may edit files in both.
+Before pushing, consolidate every edit into one clone so a single commit carries them; push; then in
+the other checkout discard its local copy (`git checkout -- <path>`), `git fetch`, and
+`git checkout <sha>` to the new commit before bumping any submodule pointer.
