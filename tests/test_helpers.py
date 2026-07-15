@@ -379,7 +379,7 @@ def main() -> int:
     recap = report.lifetime_recap()
     check("2 reviews reconciled" in recap, "recap: counts reconciled runs")
     check("5 findings reviewed" in recap and "2 accepted" in recap, "recap: sums findings + accepted")
-    check("1 refuted with evidence" in recap and "2 routed to you for a decision" in recap, "recap: refuted + (resolved+deadlocked) routed to you")
+    check("1 refuted with evidence" in recap and "1 resolved" in recap and "1 escalated to you" in recap, "recap: resolved and escalated counted separately (not conflated)")
     lib.save_run_doc("recap-review-only", "reviewer-response",
                      {"schema_version": "1.0", "review_id": "recap-review-only",
                       "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},

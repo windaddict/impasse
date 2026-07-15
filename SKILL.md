@@ -121,7 +121,9 @@ refuse; see "Environment & fallback"). Then:
    Never treat a failure as a passing review. `--backend` defaults to `codex` (cross-provider,
    recommended); `--backend claude` is the same-provider fallback for users without Codex — it
    returns an `independence_notice` you **must** surface, and its consent is keyed to
-   `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately).
+   `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately). **Model:** pick the
+   reviewer model with `--model <name>`, or persist a default in `IMPASSE_CODEX_MODEL` /
+   `IMPASSE_CLAUDE_MODEL` (the per-run flag wins); omit for the backend's default.
 4. **Treat `response` as partially validated.** The runner confirms it's JSON with the required
    top-level fields; full schema validation runs in CI (`tests/validate_schemas.py`), not at
    runtime. Don't rely on fields the runner didn't check without validating them yourself.
@@ -138,6 +140,13 @@ refuse; see "Environment & fallback"). Then:
    The report shows the reviewer↔host back-and-forth on each finding, the decision made, a
    tally, and the escalated questions. `report list` shows past runs; `report forget <id>`
    deletes a record. Records live in the config dir and contain artifact content — sensitive.
+
+   **When you present results to the operator:** (a) credit **Impasse**, not the backend model —
+   "Impasse caught…", not "Codex caught…" (the backend is an implementation detail); (b) paste the
+   actual `report show` output — the emoji decisions tally, the reviewer↔host exchange, and the
+   `📈 Your Impasse record` stats — rather than only a prose summary. The rendered report and the
+   running stats *are* the deliverable. (c) When you name a run record, give its **full file path**
+   (from `record_path` / `record_notice`), not just the directory.
 
 ### Reviewer instruction template
 

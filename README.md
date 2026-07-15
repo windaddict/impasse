@@ -40,6 +40,32 @@ host's adherence to the protocol (see Guardrails). Dogfooding it on its own sour
 shipping bug before release. It pins to a fast-moving alpha of the Codex CLI and is best-effort —
 expect rough edges.
 
+## Example
+
+Ask Claude Code in plain English:
+
+> Use Impasse to get a second opinion on this build-vs-buy memo before I commit.
+
+It runs a cross-provider reviewer, verifies each finding against your artifact, and hands back a
+report — the problems worth acting on, the one the host threw out, and the single call that's yours:
+
+```text
+📊 Decisions: 4 finding(s) raised → 🤝 2 accepted · ❌ 1 rejected · ⚖️ 1 escalated to you
+──────────────────────────────────────────────────────────────
+F002  🟠 high  ❌ rejected
+  🔎 Reviewer: the go-to-market is undifferentiated.
+  ◀ Host:     the memo already concedes the mechanic is commodity and stakes its case on
+              distribution — a rediscovered premise, not a gap. Rejected, with the quote.
+F004  🟠 high  ⚖️ ESCALATED — needs your decision
+  ❓ Enter Europe first to cut concentration risk, or protect the nine-month runway?
+──────────────────────────────────────────────────────────────
+📈 Your Impasse record — 9 reviews reconciled
+   31 findings reviewed · 18 accepted · 7 refuted with evidence · 2 resolved · 4 escalated to you
+```
+
+*Example output. The reviewer never edits your work; the host applies the fixes it verifies, and
+only the genuine disagreement reaches you. Your record is local to your machine and grows as you use it.*
+
 ## Why
 
 The value of a second AI is *independence*, not a smarter answer. A reviewer trained by a
@@ -150,6 +176,11 @@ git clone https://github.com/windaddict/impasse ~/.claude/skills/impasse
 ```
 
 Then ask Claude Code to use Impasse — for example, "Use Impasse to review this decision memo."
+
+**Choosing the reviewer model:** by default the backend's own default model is used. Pick one per
+run with `--model <name>`, or persist a default in `IMPASSE_CODEX_MODEL` (or `IMPASSE_CLAUDE_MODEL`
+for the fallback) — the per-run flag wins. Pinning a reviewer model *different* from the host's
+also climbs a rung on the independence ladder.
 
 ## Data boundary & consent
 

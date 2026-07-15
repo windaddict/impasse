@@ -475,9 +475,9 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             try:
                 p = lib.save_run_doc(run_id, "reviewer-response", parsed)
                 recorded = True
-                record_path = os.path.dirname(p)
+                record_path = p   # the full file path, not just the directory
                 record_notice = (
-                    f"Recorded locally at {record_path} (0600) — this holds the reviewed content. "
+                    f"Recorded locally at {record_path} (0600) — this file holds the reviewed content. "
                     f"Re-run with --no-record to skip; `impasse_report.py forget {run_id}` to delete; "
                     f"`impasse_report.py prune --older-than N` to clean up old records."
                 )
