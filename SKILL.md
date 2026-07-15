@@ -117,8 +117,14 @@ refuse; see "Environment & fallback"). Then:
      [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 180] [--idle 60]
    ```
    It returns JSON: on success, `response` is the reviewer's **untrusted** structured output;
-   on failure, a `failure` with a code (`consent_denied|timeout|backend_error|invalid_response`).
-   Never treat a failure as a passing review. `--backend` defaults to `codex` (cross-provider,
+   on failure, a `failure` with a `code`
+   (`consent_denied|timeout|backend_error|rate_limited|service_unavailable|auth_error|invalid_response`),
+   the real provider message, and (for backend errors) a `retryable` hint. Never treat a failure as
+   a passing review. **On a limit or outage** — the runner auto-retries a transient
+   `service_unavailable`, but surfaces `rate_limited` / `auth_error` for you to handle: tell the
+   operator the real cause and **offer** recovery — wait and retry, switch model (`--model`), or run
+   the same-provider `--backend claude` fallback *with its independence disclosure*. Never silently
+   downgrade to the fallback. `--backend` defaults to `codex` (cross-provider,
    recommended); `--backend claude` is the same-provider fallback for users without Codex — it
    returns an `independence_notice` you **must** surface, and its consent is keyed to
    `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately).

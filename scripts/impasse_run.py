@@ -362,9 +362,97 @@ def compose_full_instruction(instruction: str, schema_text: str | None = None) -
     return full
 
 
-def _fail(code, message, kind, notice, manifest, termination=None) -> dict:
+_MAX_TRANSIENT_RETRIES = 2   # extra attempts on a transient backend outage (service_unavailable)
+
+
+def _unwrap_error(raw):
+    """A codex error payload may be a dict, a JSON string, or plain text — return (status, message).
+    Folds an error type/code (e.g. 'rate_limit_exceeded') into the message so keyword classification
+    can see it even when the numeric HTTP status isn't present."""
+    def _from_dict(d):
+        err = d.get("error") if isinstance(d.get("error"), dict) else {}
+        msg = err.get("message") or d.get("message")
+        extra = err.get("code") or err.get("type") or d.get("code")
+        if extra and isinstance(extra, str) and msg:
+            msg = f"{msg} [{extra}]"
+        return d.get("status"), msg
+    if isinstance(raw, dict):
+        return _from_dict(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("{"):
+            try:
+                d = json.loads(s)
+                if isinstance(d, dict):
+                    return _from_dict(d)
+            except json.JSONDecodeError:
+                pass
+        return None, raw
+    return None, None
+
+
+def _classify_backend_error(status, message, trusted):
+    """Map an API error (HTTP status + message) to (failure_code, retryable). A transient outage is
+    worth retrying; a rate/usage cap or auth failure is not. `trusted` = the signal came from a real
+    HTTP status or a structured backend error EVENT (not stderr noise): only a trusted signal may
+    yield a RETRYABLE code, so a benign message that merely contains 'unavailable'/'rate limit'
+    can't trigger pointless retries."""
+    m = (message or "").lower()
+    if trusted and (status == 429 or any(k in m for k in ("rate limit", "rate_limit", "usage limit", "quota", "too many requests"))):
+        return "rate_limited", True     # retryable only after a wait — surfaced, not auto-retried
+    if trusted and ((isinstance(status, int) and 500 <= status < 600) or any(
+            k in m for k in ("overloaded", "unavailable", "temporarily", "connection reset",
+                             "connection error", "bad gateway", "gateway timeout"))):
+        return "service_unavailable", True
+    if status in (401, 403) or any(k in m for k in ("unauthorized", "forbidden", "authentication",
+                                                    "not logged in", "please log in", "api key")):
+        return "auth_error", False
+    return "backend_error", False
+
+
+def _extract_backend_error(stdout: bytes, stderr: bytes, parse_jsonl: bool = True) -> dict:
+    """Recover the REAL error (the runner otherwise sees only a bare exit code + noisy stderr) and
+    classify it. `parse_jsonl` scans the codex `--json` event stream; the Claude backend's stdout is
+    plain text, so it's False there and only stderr is used. A stderr-only signal is UNTRUSTED — it
+    can label a failure but never trigger a retry. Returns {code, message, retryable}."""
+    status, message, trusted = None, None, False
+    if parse_jsonl:
+        for line in stdout.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ev, dict):
+                continue
+            raw = None
+            if ev.get("type") == "error":
+                raw = ev.get("message")
+            elif ev.get("type") == "turn.failed" and isinstance(ev.get("error"), dict):
+                raw = ev["error"].get("message")
+            if raw is None:
+                continue
+            s, msg = _unwrap_error(raw)
+            if s is not None:
+                status = s
+            if msg:
+                message, trusted = msg, True   # sourced from a structured error event
+    if not message:
+        message = stderr.decode("utf-8", "replace").strip()[-300:] or "backend error (no detail)"
+    trusted = trusted or (status is not None)
+    code, retryable = _classify_backend_error(status, message, trusted)
+    return {"code": code, "retryable": retryable,
+            "message": message + (f" (HTTP {status})" if status else "")}
+
+
+def _fail(code, message, kind, notice, manifest, termination=None, retryable=None) -> dict:
+    failure = {"code": code, "message": message}
+    if retryable is not None:
+        failure["retryable"] = retryable
     r = {"ok": False, "outcome": "failed", "kind": kind,
-         "failure": {"code": code, "message": message}, "notice": notice, "manifest": manifest}
+         "failure": failure, "notice": notice, "manifest": manifest}
     if termination:
         r["termination"] = termination
     return r
@@ -433,17 +521,27 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         else:
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
-        result = supervise(argv, input_bytes=artifact_bytes,
-                           wall_timeout=wall_timeout, idle_timeout=idle_timeout)
-
-        if result.termination == "spawn_error":
-            return _f("backend_error", result.stderr.decode("utf-8", "replace")[-800:])
-        if result.termination in ("wall_timeout", "idle_timeout", "termination_failed"):
-            return _f("timeout", f"backend {result.termination} after {result.duration_s:.0f}s",
-                      termination=result.termination)
-        if result.exit_code != 0:
-            return _f("backend_error",
-                      f"exit={result.exit_code}; stderr: {result.stderr.decode('utf-8', 'replace')[-800:]}")
+        result = None
+        for attempt in range(_MAX_TRANSIENT_RETRIES + 1):   # attempt 0, then up to N retries
+            if out_last is not None:
+                open(out_last, "w").close()   # truncate — never read a prior attempt's stale content
+            result = supervise(argv, input_bytes=artifact_bytes,
+                               wall_timeout=wall_timeout, idle_timeout=idle_timeout)
+            if result.termination == "spawn_error":
+                return _f("backend_error", result.stderr.decode("utf-8", "replace")[-800:])
+            if result.termination in ("wall_timeout", "idle_timeout", "termination_failed"):
+                return _f("timeout", f"backend {result.termination} after {result.duration_s:.0f}s",
+                          termination=result.termination)
+            if result.exit_code != 0:
+                err = _extract_backend_error(result.stdout, result.stderr,
+                                             parse_jsonl=(be.type == "codex-cli"))
+                # Auto-retry ONLY a transient outage; a rate/usage cap or auth failure won't clear
+                # in seconds, so surface it (with a retryable hint) for the host to offer recovery.
+                if err["code"] == "service_unavailable" and attempt < _MAX_TRANSIENT_RETRIES:
+                    time.sleep(min(2 ** (attempt + 1), 10))
+                    continue
+                return _f(err["code"], err["message"], retryable=err["retryable"])
+            break   # exit 0 — proceed to read the final message
 
         final = None
         if out_last is not None:            # codex writes the final message to a file

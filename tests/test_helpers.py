@@ -27,20 +27,49 @@ def check(cond, label):
 
 
 FAKE_CODEX = r"""#!/usr/bin/env python3
-import sys, os
+import sys, os, json, time
 argv = sys.argv[1:]
 outp = None
 for i, a in enumerate(argv):
     if a == "--output-last-message" and i + 1 < len(argv):
         outp = argv[i + 1]
 mode = os.environ.get("FAKE_MODE", "valid")
+time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
+
+def emit_error(status, message):
+    inner = json.dumps({"type": "error", "status": status, "error": {"type": "x", "message": message}})
+    print(json.dumps({"type": "turn.failed", "error": {"message": inner}}))
+    sys.exit(1)
+
+if mode == "unavailable_then_ok":   # fail on the first attempt, succeed after (proves retry recovery)
+    cf = os.environ.get("FAKE_COUNTER")
+    n = 0
+    if cf and os.path.exists(cf):
+        try:
+            n = int(open(cf).read() or "0")
+        except Exception:
+            n = 0
+    n += 1
+    if cf:
+        open(cf, "w").write(str(n))
+    if n == 1:
+        emit_error(503, "The service is temporarily unavailable, please try again.")
+    mode = "valid"
+if mode == "noise_stderr_unavailable":   # exit nonzero with NO error event; "unavailable" only in stderr noise
+    sys.stderr.write("warning: connection temporarily unavailable during an unrelated step\n")
+    sys.exit(1)
+if mode == "ratelimit":
+    emit_error(429, "Rate limit reached for your account. Please try again later.")
+if mode == "unavailable":
+    emit_error(503, "Service is overloaded, temporarily unavailable.")
+if mode == "authfail":
+    emit_error(401, "You are not logged in. Please log in with codex login.")
+
 content = {
     "valid": '{"schema_version":"1.0","review_id":"r","artifact":{"kind":"code","revision":{"algorithm":"sha256","value":"x"}},"assessment":"approve","summary":"ok","findings":[]}',
     "notjson": "this is not json at all",
     "noshape": '{"hello":"world"}',
 }.get(mode, "")
-import time
-time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
 if outp and mode != "nowrite":
     open(outp, "w").write(content)
 print('{"type":"turn.completed"}')
@@ -214,6 +243,38 @@ def main() -> int:
     os.environ["FAKE_EXIT"] = "0"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] is False and res["failure"]["code"] == "invalid_response", "review: no final message -> invalid_response")
+
+    # --- backend error classification + transient-retry recovery (limits / outages) ---
+    _orig_sleep = run.time.sleep
+    run.time.sleep = lambda *a, **k: None   # don't actually wait during retry tests
+    os.environ["FAKE_EXIT"] = "0"
+    os.environ["FAKE_MODE"] = "ratelimit"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["ok"] is False and res["failure"]["code"] == "rate_limited" and res["failure"].get("retryable") is True, "review: 429 -> rate_limited (retryable), surfaced not auto-retried")
+    check("rate limit" in res["failure"]["message"].lower(), "review: failure carries the REAL error message, not stderr noise")
+    os.environ["FAKE_MODE"] = "authfail"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "auth_error" and res["failure"].get("retryable") is False, "review: 401 -> auth_error (not retryable)")
+    os.environ["FAKE_MODE"] = "unavailable"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "service_unavailable", "review: 503 -> service_unavailable")
+    # trusted-gate: stderr NOISE containing "unavailable" (no error event) must NOT become retryable
+    check(run._classify_backend_error(None, "temporarily unavailable", trusted=False) == ("backend_error", False), "classify: untrusted stderr text -> backend_error (no retry)")
+    check(run._classify_backend_error(503, "overloaded", trusted=True) == ("service_unavailable", True), "classify: trusted 503 -> service_unavailable (retryable)")
+    os.environ["FAKE_MODE"] = "noise_stderr_unavailable"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "backend_error" and not res["failure"].get("retryable"), "review: stderr noise with 'unavailable' stays backend_error (no wasted retries)")
+    counter = os.path.join(tmp, "fake-counter")
+    if os.path.exists(counter):
+        os.remove(counter)
+    os.environ["FAKE_MODE"] = "unavailable_then_ok"
+    os.environ["FAKE_COUNTER"] = counter
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["ok"] is True and res["response"]["schema_version"] == "1.0", "review: transient outage auto-recovers on retry")
+    os.environ.pop("FAKE_COUNTER", None)
+    run.time.sleep = _orig_sleep
+    os.environ["FAKE_MODE"] = "valid"
+    os.environ["FAKE_EXIT"] = "0"
 
     if os.name == "posix":
         os.environ["FAKE_MODE"] = "valid"

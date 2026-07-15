@@ -82,3 +82,15 @@ on the independence ladder.
 account-dependent (ChatGPT-account tier vs API key); an unsupported `-m` value fails only at call
 time with a `400 … model is not supported`. So an interactive picker can offer a *curated*
 candidate list plus a free-text "other" — it can't authoritatively enumerate.
+
+## Failure handling (limits & outages)
+
+On an API error Codex exits non-zero and puts the real error — `{"type":"error"|"turn.failed", …}`
+carrying the HTTP status + message — in the **`--json` stream**, not stderr. The runner parses that
+stream and classifies the failure: `rate_limited` (429 / "usage limit" / "quota"),
+`service_unavailable` (5xx / "overloaded"), `auth_error` (401/403), else `backend_error` — each with
+the real message and a `retryable` hint. A **transient** `service_unavailable` is auto-retried up to
+twice with backoff; a rate/usage cap or auth failure is surfaced (it won't clear in seconds) for the
+host to offer recovery — wait, switch `--model`, or the `--backend claude` fallback with disclosure.
+Classification only trusts a real HTTP status or a structured error EVENT, so stderr noise that
+merely contains "unavailable"/"rate limit" can't trigger pointless retries.

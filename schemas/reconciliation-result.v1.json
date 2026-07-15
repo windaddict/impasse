@@ -112,7 +112,7 @@
       "additionalProperties": false,
       "required": ["code", "message"],
       "properties": {
-        "code": { "enum": ["backend_error", "timeout", "consent_denied", "invalid_response", "artifact_unavailable", "cancelled"] },
+        "code": { "enum": ["backend_error", "rate_limited", "service_unavailable", "auth_error", "timeout", "consent_denied", "invalid_response", "artifact_unavailable", "cancelled"] },
         "message": { "type": "string", "minLength": 1 },
         "retryable": { "type": "boolean" },
         "backend_request_id": { "type": "string", "minLength": 1 }
