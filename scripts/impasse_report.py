@@ -191,12 +191,13 @@ def lifetime_recap() -> str:
         return ""
     rev_word = "review" if n == 1 else "reviews"
     # Keep the dispositions distinct: 'resolved' can be host-fixed OR operator-decided, so it must
-    # NOT be rolled into an "escalated to you" count — only genuine deadlocks reached you.
+    # NOT be rolled into the escalated count. 'escalated' counts only items still deadlocked — the
+    # ones currently AWAITING the operator (a resolved escalation is no longer counted here).
     lines = [
         "━" * 78,
         f"📈 Your Impasse record — {n} {rev_word} reconciled",
         f"   {reviewed} findings reviewed · {accepted} accepted · {rejected} refuted with evidence · "
-        f"{resolved} resolved · {escalated} escalated to you",
+        f"{resolved} resolved · {escalated} awaiting you",
         "   Each raised by an independent reviewer and ruled on by the host before it reached you.",
     ]
     return "\n".join(lines)

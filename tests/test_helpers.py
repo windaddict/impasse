@@ -357,6 +357,14 @@ def main() -> int:
     os.environ.pop("IMPASSE_CODEX_MODEL", None)
     lib.set_default_model("codex", None)
     check(lib.get_default_model("codex") is None, "settings: clear persisted default model")
+    # malformed settings must not crash the hot path (F001), and set-model repairs it
+    with open(lib._settings_path(), "w") as _sf:
+        _sf.write('{"default_model": "not-a-mapping"}')
+    check(lib.get_default_model("codex") is None, "settings: non-mapping default_model -> None, no crash")
+    lib.set_default_model("codex", "repaired-model")
+    check(lib.get_default_model("codex") == "repaired-model", "settings: set-model repairs a malformed default_model")
+    lib.set_default_model("codex", None)
+    check(run._main(["set-model", "--backend", "codex", "x", "--clear"]) == 2, "set-model: a model + --clear together is rejected")
     check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
     check(res.get("record_path") and "Recorded locally" in (res.get("record_notice") or ""), "run record: result surfaces where it was saved")
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
@@ -393,7 +401,7 @@ def main() -> int:
     recap = report.lifetime_recap()
     check("2 reviews reconciled" in recap, "recap: counts reconciled runs")
     check("5 findings reviewed" in recap and "2 accepted" in recap, "recap: sums findings + accepted")
-    check("1 refuted with evidence" in recap and "1 resolved" in recap and "1 escalated to you" in recap, "recap: resolved and escalated counted separately (not conflated)")
+    check("1 refuted with evidence" in recap and "1 resolved" in recap and "1 awaiting you" in recap, "recap: resolved and escalated counted separately (not conflated)")
     lib.save_run_doc("recap-review-only", "reviewer-response",
                      {"schema_version": "1.0", "review_id": "recap-review-only",
                       "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},

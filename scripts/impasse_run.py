@@ -536,6 +536,9 @@ def _main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "set-model":
+        if args.clear and args.model:
+            print("give a model to persist OR --clear, not both", file=sys.stderr)
+            return 2
         if args.clear:
             lib.set_default_model(args.backend, None)
             print(f"cleared persisted default model for {args.backend}")

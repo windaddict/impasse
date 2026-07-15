@@ -365,15 +365,25 @@ def load_settings() -> dict:
 
 def get_default_model(backend: str) -> str | None:
     """The persisted default reviewer model for a backend, or None. Lower precedence than a
-    per-run --model and than IMPASSE_{CODEX,CLAUDE}_MODEL — see impasse_run.review()."""
-    return (load_settings().get("default_model") or {}).get(backend) or None
+    per-run --model and than IMPASSE_{CODEX,CLAUDE}_MODEL — see impasse_run.review(). Tolerant of a
+    malformed settings file: a non-mapping default_model (or non-string value) yields None, never a
+    crash — review() calls this on the hot path and must not fail because settings.json is bad."""
+    dm = load_settings().get("default_model")
+    if not isinstance(dm, dict):
+        return None
+    m = dm.get(backend)
+    return m if isinstance(m, str) and m else None
 
 
 def set_default_model(backend: str, model: str | None) -> None:
     """Persist (model set) or clear (model None) the default reviewer model for a backend.
-    Atomic write, 0600 — same discipline as the consent store."""
+    Atomic + fsynced write, 0600 — same discipline as the run-record store. A malformed existing
+    default_model is repaired (rebuilt) rather than crashing. Single-writer: the read-modify-replace
+    isn't locked, so two concurrent set-model calls could lose one update — acceptable for a
+    single-user CLI (same assumption as the consent store)."""
     s = load_settings()
-    dm = dict(s.get("default_model") or {})
+    dm = s.get("default_model")
+    dm = dict(dm) if isinstance(dm, dict) else {}
     if model:
         dm[backend] = model
     else:
@@ -385,6 +395,8 @@ def set_default_model(backend: str, model: str | None) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(s, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     finally:
