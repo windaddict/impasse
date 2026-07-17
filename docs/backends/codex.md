@@ -1,8 +1,12 @@
 # Backend: OpenAI Codex CLI
 
-The reference reviewer backend. Impasse's protocol is backend-neutral; Codex is the first
-(and, in v1, only) implementation. `scripts/impasse_lib.py` resolves it and
-`scripts/impasse_run.py` supervises it.
+The reference reviewer backend. Impasse's protocol is backend-neutral; Codex is the reference
+implementation, alongside the `claude` fallback backend (`docs/backends/claude.md`).
+`scripts/impasse_lib.py` resolves it and `scripts/impasse_run.py` supervises it.
+
+Its independence tier is **host-relative**: to a Claude host (the usual case) it's the
+`cross_provider` reviewer; to a Codex host (`IMPASSE_HOST=codex`) it's `same_provider` and the
+runner says so — use `--backend claude` there instead. See `docs/environments.md`.
 
 ## Requirements
 
@@ -83,6 +87,21 @@ account-dependent (ChatGPT-account tier vs API key); an unsupported `-m` value f
 time with a `400 … model is not supported`. So an interactive picker can offer a *curated*
 candidate list plus a free-text "other" — it can't authoritatively enumerate.
 
+## Reasoning effort
+
+Mirrors model precedence: `--effort` (per run) > `IMPASSE_CODEX_EFFORT` env > a persisted default
+(`impasse_run.py set-effort <effort>`, stored in `settings.json` next to the model default) > the
+backend default. When nothing is configured the runner omits the flag and Codex uses its own
+default (**medium**, as of current CLI builds). Values are allowlisted (`none|low|medium|high|
+xhigh`) at every entry point: the CLI flag and `set-effort` by argparse choices, the persisted
+value again on read (a hand-edited `settings.json` can't smuggle a bad value), and the env var at
+resolution — an invalid `IMPASSE_CODEX_EFFORT` fails as a structured `backend_error` naming the
+variable, never a traceback. The review result reports the resolved value in `effort` (`null`
+means backend default). Higher effort means longer silent server-side reasoning — scale `--wall`
+with it (see SKILL.md Timeouts). The claude backend has no effort equivalent: nothing resolves
+for it (an `IMPASSE_CLAUDE_EFFORT` is ignored, never an error) and it reports `effort: null`.
+The argv builder re-checks the allowlist before interpolating into `-c` (defense in depth).
+
 ## Failure handling (limits & outages)
 
 On an API error Codex exits non-zero and puts the real error — `{"type":"error"|"turn.failed", …}`
@@ -94,3 +113,14 @@ twice with backoff; a rate/usage cap or auth failure is surfaced (it won't clear
 host to offer recovery — wait, switch `--model`, or the `--backend claude` fallback with disclosure.
 Classification only trusts a real HTTP status or a structured error EVENT, so stderr noise that
 merely contains "unavailable"/"rate limit" can't trigger pointless retries.
+
+**Malformed reviewer output is retried once** (issue #1): an LLM's invalid JSON, wrong-shape JSON,
+or empty final message is stochastic the way an outage is transient — an immediate identical
+re-run usually succeeds — so the runner retries it once (no backoff, same wall-clock budget) and,
+if it persists, fails `invalid_response` with `retryable: true`. The size-bound variants (stdout
+capture cap, final message over the 2 MB byte bound) are **not auto-retried** — the costliest
+class to re-spend on blindly, and often a systematic cause (artifact echoed back, a degenerate
+loop) — but they still carry `retryable: true`: as with `rate_limited`, the hint means "recovery
+is plausible, offer it to the operator", and the failure message names the remedy (shrink the
+artifact, tighten the instruction, lower effort, or re-run unchanged — most plausible near the
+bound). `retryable` is a recoverability hint, not an auto-retry marker.

@@ -57,7 +57,7 @@ class Backend:
     destination_id: str  # normalized endpoint consent is keyed on, e.g. "https://api.openai.com"
     endpoint: str        # the raw configured endpoint
     command: list[str]   # argv to invoke, e.g. ["/path/to/codex"]
-    independence: str = "cross_provider"  # "cross_provider" (Codex) | "same_provider" (Claude fallback)
+    independence: str = "cross_provider"  # tier RELATIVE to the detected host — see independence_tier()
 
 
 def _resolve_from_env(*names: str) -> list[str] | None:
@@ -109,7 +109,8 @@ def resolve_claude_command() -> list[str] | None:
     """Resolve the claude (Claude Code) binary cross-platform. See docs/backends/claude.md.
 
     Order: IMPASSE_CLAUDE_BIN / CLAUDE_BIN override -> PATH -> known locations. Returns argv,
-    or None if not found. Used only for the same-provider fallback backend.
+    or None if not found. Used for the `claude` reviewer backend — the same-provider fallback
+    for a Claude host, and the cross-provider choice for a Codex host.
     """
     override = _resolve_from_env("IMPASSE_CLAUDE_BIN", "CLAUDE_BIN")
     if override:
@@ -163,10 +164,12 @@ def _provider_label(destination_id: str) -> str:
 def get_backend(name: str = "codex") -> Backend:
     """Return a resolved Backend.
 
-    'codex' (default) is the cross-provider reviewer — real independence. 'claude' is a
-    same-provider FALLBACK for users without Codex: it shares the host's blind spots, so it
-    buys breadth / an adversarial second pass, NOT independence. See docs/backends/claude.md
-    and the independence ladder in the Guardrails.
+    The `independence` field is computed RELATIVE to the detected host (see independence_tier):
+    to a Claude host, 'codex' (default) is the cross-provider reviewer and 'claude' the
+    same-provider fallback — a same-provider reviewer shares the host's blind spots, so it buys
+    breadth / an adversarial second pass, NOT independence. To a Codex host the ladder inverts:
+    'claude' is the cross-provider choice. See docs/backends/claude.md and the independence
+    ladder in the Guardrails.
     """
     if name == "codex":
         cmd = resolve_codex_command()
@@ -179,10 +182,11 @@ def get_backend(name: str = "codex") -> Backend:
         # actually goes; normalize it so consent is keyed to the real destination.
         endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
         destination_id = normalize_destination(endpoint)
+        provider = _provider_label(destination_id)
         return Backend(
-            name="codex", type="codex-cli", provider=_provider_label(destination_id),
+            name="codex", type="codex-cli", provider=provider,
             destination_id=destination_id, endpoint=endpoint, command=cmd,
-            independence="cross_provider",
+            independence=independence_tier(detect_host(), provider),
         )
     if name == "claude":
         # Claude Code can route to AWS Bedrock / GCP Vertex via these env vars. Then the data does
@@ -203,23 +207,100 @@ def get_backend(name: str = "codex") -> Backend:
         # A custom ANTHROPIC_BASE_URL (a gateway/proxy) still keys consent to wherever data goes.
         endpoint = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
         destination_id = normalize_destination(endpoint)
+        provider = _provider_label(destination_id)
         return Backend(
-            name="claude", type="claude-cli", provider=_provider_label(destination_id),
+            name="claude", type="claude-cli", provider=provider,
             destination_id=destination_id, endpoint=endpoint, command=cmd,
-            independence="same_provider",
+            independence=independence_tier(detect_host(), provider),
         )
     raise ValueError(f"unknown backend '{name}' (supported: codex, claude)")
+
+
+# --- Host identity + host-relative independence ---------------------------------------------
+#
+# Independence is a RELATION between the host's provider and the reviewer's provider, not a
+# static property of a backend: to a Claude host, Codex is the cross-provider reviewer; to a
+# Codex host, the `claude` backend is. The host declares itself with IMPASSE_HOST
+# (authoritative; non-Claude host adapters MUST set it — the runner can only auto-detect Claude
+# surfaces). A host that DOESN'T declare itself gets 'undetermined', never a positive
+# cross-provider claim: a subprocess cannot identify a driver that won't identify itself, so
+# the only fail-safe answer for an unattributed driver is "we don't know".
+KNOWN_HOSTS = ("claude", "codex", "cursor", "other")
+# Hosts attributable to a single model provider. cursor/other run an operator-selected
+# underlying model (a Cursor agent may BE Claude or GPT), so no provider can be attributed.
+_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI"}
+_KNOWN_PROVIDERS = ("Anthropic", "OpenAI")
+
+
+def detect_host() -> str:
+    """Best-effort identity of the agent DRIVING the protocol. `IMPASSE_HOST` overrides
+    (authoritative; an unrecognized value is ignored and detection continues). Detection keys
+    off GENUINE Claude surface markers only — deliberately not detect_environment(), whose
+    IMPASSE_ENV override is a surface-policy knob and must not be able to manufacture a host
+    identity (and with it a cross-provider label). Anything else is 'unknown'."""
+    forced = os.environ.get("IMPASSE_HOST")
+    if forced in KNOWN_HOSTS:
+        return forced
+    if (os.environ.get("CLAUDECODE") == "1" or os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+            or os.environ.get("CLAUDE_COWORK") or os.environ.get("CLAUDE_CHAT_SANDBOX")
+            or os.environ.get("CLAUDE_SURFACE") in ("cowork", "chat", "sandbox")):
+        return "claude"
+    return "unknown"
+
+
+def independence_tier(host: str, backend_provider: str) -> str:
+    """The independence tier of a reviewer backend RELATIVE to a host.
+
+    - Host with a known provider: compare providers — same_provider on a match,
+      cross_provider only when the backend's provider is a KNOWN different vendor; a custom
+      endpoint/gateway (unattributable provider label) is 'undetermined', never overstated.
+    - Everything else is 'undetermined': cursor/other hosts (operator-chosen underlying model)
+      and an unknown/undeclared host alike. A positive independence claim requires BOTH sides
+      to be attributable — a human at the CLI can export IMPASSE_HOST if the driver is known.
+    """
+    hp = _HOST_PROVIDERS.get(host)
+    if hp:
+        if backend_provider == hp:
+            return "same_provider"
+        if backend_provider in _KNOWN_PROVIDERS:
+            return "cross_provider"
+    return "undetermined"
+
+
+def independence_notice(tier: str, host: str, backend_name: str, provider: str) -> str | None:
+    """The mandatory downgrade disclosure for a tier, or None when none is owed
+    (cross_provider). ONE formatter shared by review() and review_mode(), so no surface that
+    reports a downgraded tier can forget the notice that must ride with it."""
+    if tier == "same_provider":
+        return (
+            f"⚠ Same-provider review via {provider} (backend '{backend_name}', host '{host}'): "
+            "the reviewer shares the host's provider — and so its training and blind spots — so "
+            "this is an adversarial second pass / breadth, NOT cross-provider independence. "
+            "Agreement is weak evidence. Prefer a different-provider backend when available."
+        )
+    if tier == "undetermined":
+        return (
+            f"⚠ Independence undetermined (backend '{backend_name}' via {provider}, host "
+            f"'{host}'): the host's underlying model or the backend's real destination can't be "
+            "attributed to a single provider, so the reviewer may share the host's provider. "
+            "Treat agreement cautiously; if the host is actually a single-provider agent, set "
+            "IMPASSE_HOST."
+        )
+    return None
 
 
 # --- Environment-aware review-mode policy ---------------------------------------------------
 #
 # Independence tiers, strongest to weakest:
-#   cross_provider — a different-provider reviewer (Codex, a subprocess). Real independence.
-#   same_provider  — a Claude reviewer in a FRESH process (`claude -p`). Breadth; shared blind spots.
+#   cross_provider — a reviewer from a DIFFERENT provider than the host. Real independence.
+#   undetermined   — provider correlation can't be established (mixed-model host, or a
+#                    custom endpoint whose provider can't be attributed). Trust accordingly.
+#   same_provider  — a reviewer sharing the host's provider, in a FRESH process. Breadth;
+#                    shared blind spots.
 #   self_review    — the HOST model reviews in its OWN context (no separate reviewer can run).
 #                    Near-zero independence. Permitted ONLY where no subprocess reviewer exists —
 #                    the claude.ai chat sandbox or Claude Cowork — and NEVER for code.
-INDEPENDENCE_TIERS = ("cross_provider", "same_provider", "self_review")
+INDEPENDENCE_TIERS = ("cross_provider", "undetermined", "same_provider", "self_review")
 
 # Surfaces that cannot spawn a reviewer subprocess, so self-review is the only fallback.
 SELF_REVIEW_ENVIRONMENTS = ("chat_sandbox", "cowork")
@@ -232,8 +313,17 @@ _ENV_LABELS = {
 }
 
 CLAUDE_CODE_RECOMMENDATION = (
-    "Claude Code is the best environment for Impasse: only there can it run a cross-provider "
-    "reviewer (Codex) for real independence. Other surfaces can self-review at best."
+    "Claude Code is the best environment for Impasse: it runs a reviewer subprocess in a real "
+    "shell, so a Claude host gets a cross-provider reviewer (Codex) there. Weaker Claude "
+    "surfaces can self-review at best."
+)
+
+# For non-Claude hosts the Claude Code pitch is wrong (their own shell already runs a reviewer
+# subprocess, and to them `claude -p` is the cross-provider choice) — recommend the capability,
+# not the surface.
+SUBPROCESS_RECOMMENDATION = (
+    "Run Impasse where a reviewer subprocess (codex exec / claude -p) can execute — any real "
+    "shell. Independence is computed relative to the host; see docs/environments.md."
 )
 
 
@@ -271,42 +361,80 @@ def self_review_notice(environment: str) -> str:
     )
 
 
-def review_mode(kind: str, *, environment: str | None = None,
-                codex_available: bool = False, claude_available: bool = False) -> dict:
-    """The single policy entry point: pick the strongest HONEST review mode for this environment
-    and the available backends, and carry the mandatory disclosure. Capability-first, env-gated.
+def _configured_provider(env_var: str, default: str) -> str | None:
+    """The provider label of a backend's CONFIGURED destination (its base-URL env var), for the
+    review_mode pre-flight — or None when the endpoint doesn't normalize (malformed, embedded
+    credentials): get_backend() would refuse it, so the pre-flight must not offer it. The raw
+    value is never echoed — a malformed endpoint is exactly where credentials live. A VALID but
+    unattributable endpoint (a custom gateway) still returns its label; the tier degrades to
+    'undetermined' rather than overstating."""
+    endpoint = os.environ.get(env_var) or default
+    try:
+        return _provider_label(normalize_destination(endpoint))
+    except ValueError:
+        return None
 
-    Returns {mode, tier, allowed, notice, recommendation, reason}, where
+
+def review_mode(kind: str, *, environment: str | None = None, codex_available: bool = False,
+                claude_available: bool = False, host: str | None = None) -> dict:
+    """The single policy entry point: pick the strongest HONEST review mode for this environment,
+    the available backends, and the host, and carry the mandatory disclosure. Capability-first,
+    env-gated, host-relative.
+
+    Returns {mode, tier, allowed, notice, recommendation, reason, host}, where
     mode ∈ {'codex','claude','self_review','refuse'}:
-      - prefer a subprocess backend wherever it resolves (codex > claude), on ANY surface;
+      - among available subprocess backends, prefer the one most INDEPENDENT of the host's
+        provider (cross_provider > undetermined > same_provider; ties keep codex first — its
+        hermetic, OS-sandboxed invocation is the stronger runtime posture), on ANY surface.
+        Tiers are computed against each backend's CONFIGURED endpoint (a custom gateway is
+        'undetermined', mirroring the actual run), and a backend get_backend() would refuse
+        (claude under Bedrock/Vertex routing) is never recommended. A downgraded tier carries
+        its independence_notice here too — this pre-flight is its own disclosure surface;
       - if none resolves: self-review is allowed ONLY in the chat sandbox or Cowork, and NEVER for
         code (its verification needs to run tests, impossible there); otherwise refuse.
     """
     kind = (kind or "").strip().lower()   # normalize so 'Code'/'CODE' can't slip past the code gate
     env = environment or detect_environment()
-    at_best = env == "claude_code"
-    rec = None if at_best else CLAUDE_CODE_RECOMMENDATION
-    if codex_available:
-        return {"mode": "codex", "tier": "cross_provider", "allowed": True,
-                "notice": None, "recommendation": rec,
-                "reason": "cross-provider reviewer (Codex) available"}
-    if claude_available:
-        return {"mode": "claude", "tier": "same_provider", "allowed": True,
-                "notice": None,  # review() itself emits the same_provider independence_notice
-                "recommendation": rec,
-                "reason": "same-provider fresh-process reviewer (claude -p) available"}
+    hst = host if host in KNOWN_HOSTS else detect_host()
+    # The Claude Code pitch is only apt for a Claude(-ish) host; other hosts get the
+    # capability-framed recommendation (their own shell already qualifies).
+    surface_rec = CLAUDE_CODE_RECOMMENDATION if hst in ("claude", "unknown") else SUBPROCESS_RECOMMENDATION
+    rec = None if env == "claude_code" else surface_rec
+    # get_backend() refuses claude under Bedrock/Vertex routing (consent would be mis-keyed) —
+    # a pre-flight must not recommend a backend the run is guaranteed to refuse.
+    claude_refused = bool(os.environ.get("CLAUDE_CODE_USE_BEDROCK") or os.environ.get("CLAUDE_CODE_USE_VERTEX"))
+    codex_provider = _configured_provider("OPENAI_BASE_URL", "https://api.openai.com")
+    claude_provider = _configured_provider("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    backends = (
+        # provider None = the configured endpoint won't normalize, so get_backend() would refuse
+        # this backend — a pre-flight must not offer what the run is guaranteed to reject.
+        ("codex", codex_provider, codex_available and codex_provider is not None),
+        ("claude", claude_provider,
+         claude_available and not claude_refused and claude_provider is not None),
+    )
+    candidates = [(n, p, independence_tier(hst, p)) for n, p, avail in backends if avail]
+    rank = {"cross_provider": 0, "undetermined": 1, "same_provider": 2}
+    candidates.sort(key=lambda c: rank[c[2]])   # stable: codex stays first on a tie
+    if candidates:
+        name, provider, tier = candidates[0]
+        return {"mode": name, "tier": tier, "allowed": True,
+                "notice": independence_notice(tier, hst, name, provider),
+                "recommendation": rec, "host": hst,
+                "reason": f"strongest available reviewer relative to the {hst} host: "
+                          f"{name} ({tier})"}
     # No subprocess reviewer available on this surface.
     if kind == "code":
         return {"mode": "refuse", "tier": None, "allowed": False, "notice": None,
-                "recommendation": CLAUDE_CODE_RECOMMENDATION,
+                "recommendation": surface_rec, "host": hst,
                 "reason": "code review needs a runnable reviewer and executable verification, "
-                          "which no non-Claude-Code surface provides"}
+                          "which requires a surface that can run one"}
     if self_review_allowed(env):
         return {"mode": "self_review", "tier": "self_review", "allowed": True,
                 "notice": self_review_notice(env), "recommendation": CLAUDE_CODE_RECOMMENDATION,
+                "host": hst,
                 "reason": f"no reviewer subprocess in {_ENV_LABELS.get(env, env)}; self-review permitted"}
     return {"mode": "refuse", "tier": None, "allowed": False, "notice": None,
-            "recommendation": CLAUDE_CODE_RECOMMENDATION,
+            "recommendation": surface_rec, "host": hst,
             "reason": f"no reviewer subprocess and self-review not permitted in {_ENV_LABELS.get(env, env)}"}
 
 
@@ -355,6 +483,11 @@ def _run_dir(run_id: str) -> str:
     return d
 
 
+# Codex reasoning-effort allowlist ('minimal' is rejected by codex). Lives here so both the
+# runner (per-run validation) and the settings store (set-effort validation) share one source.
+ALLOWED_EFFORT = ("none", "low", "medium", "high", "xhigh")
+
+
 # --- Persisted settings (a small config store, e.g. the operator's default reviewer model) ------
 
 def _settings_path() -> str:
@@ -373,32 +506,46 @@ def load_settings() -> dict:
         return {}
 
 
-def get_default_model(backend: str) -> str | None:
-    """The persisted default reviewer model for a backend, or None. Lower precedence than a
-    per-run --model and than IMPASSE_{CODEX,CLAUDE}_MODEL — see impasse_run.review(). Tolerant of a
-    malformed settings file: a non-mapping default_model (or non-string value) yields None, never a
+def _get_default_setting(key: str, backend: str) -> str | None:
+    """A persisted per-backend default (settings.json {key: {backend: value}}), or None. Tolerant
+    of a malformed settings file: a non-mapping entry (or non-string value) yields None, never a
     crash — review() calls this on the hot path and must not fail because settings.json is bad."""
-    dm = load_settings().get("default_model")
+    dm = load_settings().get(key)
     if not isinstance(dm, dict):
         return None
     m = dm.get(backend)
     return m if isinstance(m, str) and m else None
 
 
-def set_default_model(backend: str, model: str | None) -> None:
-    """Persist (model set) or clear (model None) the default reviewer model for a backend.
+def get_default_model(backend: str) -> str | None:
+    """The persisted default reviewer model for a backend, or None. Lower precedence than a
+    per-run --model and than IMPASSE_{CODEX,CLAUDE}_MODEL — see impasse_run.review()."""
+    return _get_default_setting("default_model", backend)
+
+
+def get_default_effort(backend: str) -> str | None:
+    """The persisted default reasoning effort for a backend, or None. Lower precedence than a
+    per-run --effort and than IMPASSE_{CODEX,CLAUDE}_EFFORT — see impasse_run.review(). A
+    hand-edited value outside ALLOWED_EFFORT is dropped here (fail safe on the read path);
+    set_default_effort refuses to write one."""
+    e = _get_default_setting("default_effort", backend)
+    return e if e in ALLOWED_EFFORT else None
+
+
+def _set_default_setting(key: str, backend: str, value: str | None) -> None:
+    """Persist (value set) or clear (value None) a per-backend default under `key`.
     Atomic + fsynced write, 0600 — same discipline as the run-record store. A malformed existing
-    default_model is repaired (rebuilt) rather than crashing. Single-writer: the read-modify-replace
-    isn't locked, so two concurrent set-model calls could lose one update — acceptable for a
+    entry is repaired (rebuilt) rather than crashing. Single-writer: the read-modify-replace
+    isn't locked, so two concurrent writes could lose one update — acceptable for a
     single-user CLI (same assumption as the consent store)."""
     s = load_settings()
-    dm = s.get("default_model")
+    dm = s.get(key)
     dm = dict(dm) if isinstance(dm, dict) else {}
-    if model:
-        dm[backend] = model
+    if value:
+        dm[backend] = value
     else:
         dm.pop(backend, None)
-    s["default_model"] = dm
+    s[key] = dm
     ensure_config_dir()
     path = _settings_path()
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings-", suffix=".tmp")
@@ -416,6 +563,19 @@ def set_default_model(backend: str, model: str | None) -> None:
                 os.remove(tmp)
             except OSError:
                 pass
+
+
+def set_default_model(backend: str, model: str | None) -> None:
+    """Persist (model set) or clear (model None) the default reviewer model for a backend."""
+    _set_default_setting("default_model", backend, model)
+
+
+def set_default_effort(backend: str, effort: str | None) -> None:
+    """Persist (effort set) or clear (effort None) the default reasoning effort for a backend.
+    Refuses a value outside ALLOWED_EFFORT — never persist something the runner would reject."""
+    if effort is not None and effort not in ALLOWED_EFFORT:
+        raise ValueError(f"effort must be one of {sorted(ALLOWED_EFFORT)}")
+    _set_default_setting("default_effort", backend, effort)
 
 
 def fsync_dir(path: str) -> None:

@@ -44,7 +44,7 @@ import impasse_lib as lib          # noqa: E402
 import impasse_consent as consent  # noqa: E402
 
 _POSIX = os.name == "posix"
-_ALLOWED_EFFORT = {"none", "low", "medium", "high", "xhigh"}  # 'minimal' is rejected by codex
+_ALLOWED_EFFORT = frozenset(lib.ALLOWED_EFFORT)  # single source of truth in impasse_lib
 _MAX_FINAL = 2_000_000
 _MAX_INPUT = 4_000_000
 
@@ -245,6 +245,11 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
     pattern) — the rich reviewer-response schema doesn't qualify. Instead the schema is
     embedded in the instruction (see review()) and the output is validated afterward.
     """
+    # Defense in depth: review() allowlists every effort source (flag/env/persisted), but this
+    # helper is the surface that interpolates the value into a codex `-c` config expression — a
+    # future direct caller must not be able to smuggle config syntax through it.
+    if effort is not None and effort not in _ALLOWED_EFFORT:
+        raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
     argv = list(backend_command) + [
         "exec", "--json", "--output-last-message", output_last_message,
         "--sandbox", "read-only", "--color", "never",
@@ -363,6 +368,7 @@ def compose_full_instruction(instruction: str, schema_text: str | None = None) -
 
 
 _MAX_TRANSIENT_RETRIES = 2   # extra attempts on a transient backend outage (service_unavailable)
+_MAX_OUTPUT_RETRIES = 1      # extra attempt on stochastically malformed reviewer output (issue #1)
 
 
 def _unwrap_error(raw):
@@ -447,6 +453,14 @@ def _extract_backend_error(stdout: bytes, stderr: bytes, parse_jsonl: bool = Tru
             "message": message + (f" (HTTP {status})" if status else "")}
 
 
+def _size_remedy(backend_name: str) -> str:
+    """The remedy fragment for a size-bound failure message. Backend-specific: only codex has
+    an effort knob, so 'lower --effort' must not be suggested to a claude reviewer."""
+    if backend_name == "codex":
+        return "shrinking the artifact, tightening the instruction, or lowering --effort"
+    return "shrinking the artifact or tightening the instruction"
+
+
 def _fail(code, message, kind, notice, manifest, termination=None, retryable=None) -> dict:
     failure = {"code": code, "message": message}
     if retryable is not None:
@@ -464,33 +478,49 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
            idle_timeout: float = 300.0, no_record: bool = False, raw: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
-    `backend` selects the reviewer: 'codex' (cross-provider, default) or 'claude' (same-provider
-    fallback — the result carries an `independence_notice` disclosing the weaker guarantee)."""
+    `backend` selects the reviewer ('codex', the default, or 'claude'); its independence tier is
+    computed relative to the detected host, and any downgraded tier (same_provider/undetermined)
+    carries an `independence_notice` the host must surface."""
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
 
     manifest = consent.manifest_for_bytes(artifact_bytes)
+    host = lib.detect_host()   # one snapshot up front — every return path reports the host
     try:
         be = lib.get_backend(backend)
     except (FileNotFoundError, ValueError) as e:
-        return _fail("backend_error", str(e), kind, str(e), manifest)
+        return {**_fail("backend_error", str(e), kind, str(e), manifest), "host": host}
 
     # Model precedence: per-run --model > IMPASSE_{CODEX,CLAUDE}_MODEL env > persisted default
     # (settings.json via `set-model`) > the backend's own default.
     model = (model or os.environ.get(f"IMPASSE_{be.name.upper()}_MODEL")
              or lib.get_default_model(be.name))
+    # Effort precedence mirrors model: per-run --effort > IMPASSE_CODEX_EFFORT env > persisted
+    # default (`set-effort`) > the backend's own default (flag omitted; codex defaults to medium).
+    # Only the codex backend HAS an effort knob — for backends without one (claude), resolve
+    # nothing and report null: an irrelevant IMPASSE_CLAUDE_EFFORT must neither fail the run nor
+    # masquerade in the result as configuration that was actually applied.
+    if be.name == "codex":
+        effort = (effort or os.environ.get("IMPASSE_CODEX_EFFORT")
+                  or lib.get_default_effort("codex"))
+    else:
+        effort = None
 
-    independence_notice = None
-    if be.independence == "same_provider":
-        independence_notice = (
-            f"⚠ Same-provider review via {be.provider} (backend '{be.name}'): the reviewer shares "
-            "the host's training and blind spots, so this is an adversarial second pass / breadth, "
-            "NOT cross-provider independence — agreement is weak evidence. Prefer the codex backend "
-            "when available."
-        )
+    # Independence is host-relative (lib.independence_tier); the shared formatter names the host
+    # so a downgrade can't read as a property of the backend alone.
+    independence_notice = lib.independence_notice(be.independence, host, be.name, be.provider)
     # disclosure carried on EVERY return path (success and failure), not just success
     bmeta = {"backend": be.name, "provider": be.provider, "independence": be.independence,
-             "model": model, "independence_notice": independence_notice}
+             "host": host, "model": model, "effort": effort,
+             "independence_notice": independence_notice}
+
+    # The per-run param was validated above; the persisted default is allowlisted on both write
+    # (set_default_effort) and read (get_default_effort). So an invalid value here can only come
+    # from the env var — a config error, not API misuse: fail structured, don't traceback.
+    if effort is not None and effort not in _ALLOWED_EFFORT:
+        msg = (f"IMPASSE_CODEX_EFFORT={effort!r} is not a valid reasoning effort "
+               f"(one of {sorted(_ALLOWED_EFFORT)})")
+        return {**_fail("backend_error", msg, kind, msg, manifest), **bmeta}
 
     approved, notice = consent.check(be, manifest=manifest, approve_send=approve_send)
     if not approved:
@@ -523,8 +553,11 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
         result = None
+        parsed = None
         deadline = time.monotonic() + wall_timeout   # ONE wall-clock budget for the whole review
-        for attempt in range(_MAX_TRANSIENT_RETRIES + 1):   # attempt 0, then up to N retries
+        transient_used = 0   # retries spent on outages (service_unavailable)
+        output_used = 0      # retries spent on malformed reviewer output (issue #1)
+        while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return _f("timeout", f"backend wall_timeout after {wall_timeout:.0f}s")
@@ -542,35 +575,62 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                                              parse_jsonl=(be.type == "codex-cli"))
                 # Auto-retry ONLY a transient outage; a rate/usage cap or auth failure won't clear
                 # in seconds, so surface it (with a retryable hint) for the host to offer recovery.
-                backoff = min(2 ** (attempt + 1), 10)
-                if (err["code"] == "service_unavailable" and attempt < _MAX_TRANSIENT_RETRIES
+                backoff = min(2 ** (transient_used + 1), 10)
+                if (err["code"] == "service_unavailable" and transient_used < _MAX_TRANSIENT_RETRIES
                         and deadline - time.monotonic() > backoff):
+                    transient_used += 1
                     time.sleep(backoff)
                     continue
                 return _f(err["code"], err["message"], retryable=err["retryable"])
-            break   # exit 0 — proceed to read the final message
 
-        final = None
-        if out_last is not None:            # codex writes the final message to a file
-            try:
-                with open(out_last, "rb") as f:
-                    final = f.read(_MAX_FINAL + 1).decode("utf-8", "replace")   # bound memory
-            except OSError:
-                pass
-        else:                               # claude -p prints the final message to stdout
-            if result.stdout_truncated:     # stdout hit the capture cap — the JSON is cut off
-                return _f("invalid_response", "reviewer output exceeded the capture cap (truncated)")
-            final = result.stdout.decode("utf-8", "replace")
-        if not final or not final.strip():
-            return _f("invalid_response", "reviewer produced no final message")
-        if len(final) > _MAX_FINAL:
-            return _f("invalid_response", f"final message exceeds {_MAX_FINAL} bytes")
-        try:
-            parsed = _parse_reviewer_json(final)
-        except (json.JSONDecodeError, ValueError) as e:
-            return _f("invalid_response", f"final message is not valid JSON: {e}")
-        if not isinstance(parsed, dict) or "schema_version" not in parsed or not (("findings" in parsed) or ("items" in parsed)):
-            return _f("invalid_response", "final message JSON is missing expected top-level fields")
+            # exit 0 — read and validate the final message. An LLM's malformed output is
+            # stochastic the same way an outage is transient: an immediate identical retry
+            # usually succeeds, so retry it once (no backoff — nothing to wait out). The
+            # size-bound failures are exempt from AUTO-retry — they're the costliest class to
+            # re-spend on blindly and often signal a systematic cause (artifact echoed back, a
+            # degenerate loop) — but they stay retryable: true, like rate_limited: the hint
+            # means "recovery is plausible, offer it", not "the supervisor will re-spend"; the
+            # message carries the remedy (operator ruling on finding F002, 2026-07-16).
+            final_bytes = None
+            if out_last is not None:            # codex writes the final message to a file
+                try:
+                    with open(out_last, "rb") as f:
+                        final_bytes = f.read(_MAX_FINAL + 1)   # bound memory
+                except OSError:
+                    pass
+            else:                               # claude -p prints the final message to stdout
+                if result.stdout_truncated:     # stdout hit the capture cap — the JSON is cut off
+                    return _f("invalid_response",
+                              "reviewer output exceeded the capture cap (truncated). An unchanged "
+                              f"re-run may fit; {_size_remedy(be.name)} is more reliable.",
+                              retryable=True)
+                final_bytes = result.stdout
+            problem = None
+            if not final_bytes or not final_bytes.strip():
+                problem = "reviewer produced no final message"
+            elif len(final_bytes) > _MAX_FINAL:
+                # Size-check the BYTES before decoding: decoding first would count characters,
+                # letting a multi-byte UTF-8 message slip the bound — and the tolerant parser
+                # could then accept a complete object out of a silently truncated prefix.
+                return _f("invalid_response",
+                          f"final message exceeds the {_MAX_FINAL}-byte bound (read at least "
+                          f"{len(final_bytes)} bytes). An unchanged re-run may fit, especially "
+                          f"near the bound; {_size_remedy(be.name)} is more reliable.",
+                          retryable=True)
+            else:
+                try:
+                    parsed = _parse_reviewer_json(final_bytes.decode("utf-8", "replace"))
+                except (json.JSONDecodeError, ValueError) as e:
+                    problem = f"final message is not valid JSON: {e}"
+                else:
+                    if not isinstance(parsed, dict) or "schema_version" not in parsed or not (("findings" in parsed) or ("items" in parsed)):
+                        problem = "final message JSON is missing expected top-level fields"
+                    else:
+                        break   # valid response
+            if output_used < _MAX_OUTPUT_RETRIES and deadline - time.monotonic() > 0:
+                output_used += 1
+                continue
+            return _f("invalid_response", problem, retryable=True)
 
         run_id = parsed.get("review_id")
         recorded = False
@@ -606,14 +666,14 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
 
 
 def _read_limited(path: str, limit: int, *, binary: bool) -> bytes | str:
-    # Read limit+1 and reject if longer — no getsize()/read() TOCTOU.
-    mode = "rb" if binary else "r"
-    kwargs = {} if binary else {"encoding": "utf-8"}
-    with open(path, mode, **kwargs) as f:
+    # Read limit+1 BYTES and reject if longer — no getsize()/read() TOCTOU, and no
+    # bytes-vs-characters confusion for text: the bound is checked on raw bytes, and only
+    # then decoded (a multi-byte instruction must not slip a byte limit via char count).
+    with open(path, "rb") as f:
         data = f.read(limit + 1)
     if len(data) > limit:
         raise ValueError(f"{path} exceeds {limit} bytes")
-    return data
+    return data if binary else data.decode("utf-8")
 
 
 def _main(argv=None) -> int:
@@ -624,11 +684,14 @@ def _main(argv=None) -> int:
     rv.add_argument("--instruction-file", required=True)
     rv.add_argument("--artifact-file", required=True)
     rv.add_argument("--backend", default="codex", choices=["codex", "claude"],
-                    help="reviewer backend: codex (cross-provider, default) or claude (same-provider fallback)")
+                    help="reviewer backend (default codex). Independence is computed relative to "
+                         "the host: to a Claude host codex is cross-provider; to a Codex host "
+                         "claude is. See docs/environments.md.")
     rv.add_argument("--schema", default=None)
     rv.add_argument("--approve-send", default=None)
     rv.add_argument("--effort", default=None, choices=sorted(_ALLOWED_EFFORT),
-                    help="codex reasoning effort (ignored by the claude backend)")
+                    help="codex reasoning effort (else IMPASSE_CODEX_EFFORT, else the persisted "
+                         "set-effort default, else the codex default; ignored by the claude backend)")
     rv.add_argument("--model", default=None,
                     help="reviewer model (else IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL, else the backend default)")
     rv.add_argument("--wall", type=float, default=300.0,
@@ -643,10 +706,19 @@ def _main(argv=None) -> int:
     md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
     md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     md.add_argument("--environment", default=None, help="override auto-detection (else IMPASSE_ENV / auto)")
+    md.add_argument("--host", default=None, choices=sorted(lib.KNOWN_HOSTS),
+                    help="the agent driving the protocol (else IMPASSE_HOST / auto; independence is "
+                         "host-relative). Advisory for this pre-flight only — export IMPASSE_HOST so "
+                         "the actual review run sees the same host.")
     sm = sub.add_parser("set-model", help="persist (or show/clear) the default reviewer model for a backend")
     sm.add_argument("--backend", default="codex", choices=["codex", "claude"])
     sm.add_argument("model", nargs="?", default=None, help="model name to persist; omit to show the current default")
     sm.add_argument("--clear", action="store_true", help="clear the persisted default for this backend")
+    se = sub.add_parser("set-effort", help="persist (or show/clear) the default reasoning effort for a backend")
+    se.add_argument("--backend", default="codex", choices=["codex", "claude"])
+    se.add_argument("effort", nargs="?", default=None, choices=sorted(_ALLOWED_EFFORT),
+                    help="effort to persist; omit to show the current default")
+    se.add_argument("--clear", action="store_true", help="clear the persisted default for this backend")
     args = ap.parse_args(argv)
 
     if args.cmd == "set-model":
@@ -663,6 +735,20 @@ def _main(argv=None) -> int:
             print(f"default model for {args.backend}: {lib.get_default_model(args.backend) or '(backend default)'}")
         return 0
 
+    if args.cmd == "set-effort":
+        if args.clear and args.effort:
+            print("give an effort to persist OR --clear, not both", file=sys.stderr)
+            return 2
+        if args.clear:
+            lib.set_default_effort(args.backend, None)
+            print(f"cleared persisted default effort for {args.backend}")
+        elif args.effort:
+            lib.set_default_effort(args.backend, args.effort)
+            print(f"persisted default effort for {args.backend}: {args.effort}")
+        else:
+            print(f"default effort for {args.backend}: {lib.get_default_effort(args.backend) or '(backend default)'}")
+        return 0
+
     if args.cmd == "mode":
         def _avail(resolve):
             try:                       # a bad *_BIN override raises; treat as unavailable, don't crash
@@ -670,7 +756,7 @@ def _main(argv=None) -> int:
             except OSError:
                 return False
         decision = lib.review_mode(
-            args.kind, environment=args.environment,
+            args.kind, environment=args.environment, host=args.host,
             codex_available=_avail(lib.resolve_codex_command),
             claude_available=_avail(lib.resolve_claude_command),
         )

@@ -164,7 +164,10 @@ flowchart TB
     style B3 fill:#dc2626,color:#fff
 ```
 
-Genuine independence needs a Codex login; the weaker rungs run on Claude alone. Detail:
+For the usual Claude host, genuine independence needs a Codex login; the weaker rungs run on
+Claude alone. The rungs are labeled **relative to the host** driving the protocol (the diagram
+shows the Claude-host case): to a Codex host, the Claude backend is the different-provider rung,
+and the runner computes and discloses the tier accordingly (`IMPASSE_HOST`). Detail:
 [`docs/environments.md`](docs/environments.md).
 
 ## Install

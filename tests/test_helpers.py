@@ -36,6 +36,16 @@ for i, a in enumerate(argv):
 mode = os.environ.get("FAKE_MODE", "valid")
 time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
 
+cf_all = os.environ.get("FAKE_COUNT_ALL")   # counts EVERY invocation (proves retry behavior)
+if cf_all:
+    n_all = 0
+    if os.path.exists(cf_all):
+        try:
+            n_all = int(open(cf_all).read() or "0")
+        except Exception:
+            n_all = 0
+    open(cf_all, "w").write(str(n_all + 1))
+
 def emit_error(status, message):
     inner = json.dumps({"type": "error", "status": status, "error": {"type": "x", "message": message}})
     print(json.dumps({"type": "turn.failed", "error": {"message": inner}}))
@@ -55,6 +65,28 @@ if mode == "unavailable_then_ok":   # fail on the first attempt, succeed after (
     if n == 1:
         emit_error(503, "The service is temporarily unavailable, please try again.")
     mode = "valid"
+def bump_counter():
+    cf = os.environ.get("FAKE_COUNTER")
+    n = 0
+    if cf and os.path.exists(cf):
+        try:
+            n = int(open(cf).read() or "0")
+        except Exception:
+            n = 0
+    n += 1
+    if cf:
+        open(cf, "w").write(str(n))
+    return n
+
+if mode == "badjson_then_ok":   # malformed final message once, valid on retry (issue #1)
+    mode = "badjson" if bump_counter() == 1 else "valid"
+if mode == "unavailable_then_badjson_then_ok":   # both retry budgets consumed independently
+    n = bump_counter()
+    if n == 1:
+        emit_error(503, "The service is temporarily unavailable, please try again.")
+    mode = "badjson" if n == 2 else "valid"
+if mode == "badjson_then_nowrite":   # proves per-attempt truncation: retry must NOT see attempt 1's file
+    mode = "badjson" if bump_counter() == 1 else "nowrite"
 if mode == "noise_stderr_unavailable":   # exit nonzero with NO error event; "unavailable" only in stderr noise
     sys.stderr.write("warning: connection temporarily unavailable during an unrelated step\n")
     sys.exit(1)
@@ -69,9 +101,14 @@ content = {
     "valid": '{"schema_version":"1.0","review_id":"r","artifact":{"kind":"code","revision":{"algorithm":"sha256","value":"x"}},"assessment":"approve","summary":"ok","findings":[]}',
     "notjson": "this is not json at all",
     "noshape": '{"hello":"world"}',
+    "badjson": '{"schema_version":"1.0","review_id":"r","findings":[{"id":"F001" "claim":"missing comma"}]}',
 }.get(mode, "")
+if mode == "oversize":   # a final message that cannot FIT — a retry can't fix this
+    content = '{"schema_version":"1.0","findings":[]}' + " " * 2000001
+if mode == "oversize_utf8":   # >2MB of BYTES but <2MB of CHARACTERS — a char-count check misses it
+    content = '{"schema_version":"1.0","findings":[]}' + "é" * 1100000
 if outp and mode != "nowrite":
-    open(outp, "w").write(content)
+    open(outp, "w", encoding="utf-8").write(content)
 print('{"type":"turn.completed"}')
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 """
@@ -88,6 +125,30 @@ try:
 except Exception:
     pass
 mode = os.environ.get("FAKE_CLAUDE_MODE", "valid")
+
+cf_all = os.environ.get("FAKE_COUNT_ALL")   # counts EVERY invocation (proves retry behavior)
+if cf_all:
+    n_all = 0
+    if os.path.exists(cf_all):
+        try:
+            n_all = int(open(cf_all).read() or "0")
+        except Exception:
+            n_all = 0
+    open(cf_all, "w").write(str(n_all + 1))
+
+if mode == "notjson_then_ok":   # malformed stdout once, valid on retry (issue #1, claude path)
+    cf = os.environ.get("FAKE_COUNTER")
+    n = 0
+    if cf and os.path.exists(cf):
+        try:
+            n = int(open(cf).read() or "0")
+        except Exception:
+            n = 0
+    n += 1
+    if cf:
+        open(cf, "w").write(str(n))
+    mode = "notjson" if n == 1 else "valid"
+
 valid = ''' + repr(_VALID_REVIEW) + r'''
 out = {
     "valid": valid,
@@ -95,6 +156,10 @@ out = {
     "preamble": "Here is my review:\n\n" + valid,   # chat backends sometimes prepend prose
     "notjson": "I could not produce JSON.",
 }.get(mode, valid)
+if mode == "oversize":     # within the capture cap but over the 2MB final-message bound
+    out = valid + " " * 2000001
+if mode == "hugestdout":   # breaches the supervisor's 8MB capture cap itself
+    out = "x" * 8100000
 sys.stdout.write(out)
 sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0")))
 '''
@@ -104,6 +169,19 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="impasse-test-")
     os.environ["IMPASSE_CONFIG_DIR"] = tmp
     os.environ.pop("IMPASSE_APPROVE_SEND", None)
+    # Ambient Impasse/backend configuration must not leak into assertions — a user's own
+    # IMPASSE_CODEX_MODEL or a custom base URL would otherwise break the suite. Standalone
+    # process: clear, don't bother restoring.
+    for _v in ("IMPASSE_HOST", "IMPASSE_ENV", "IMPASSE_CODEX_MODEL", "IMPASSE_CODEX_EFFORT",
+               "IMPASSE_CLAUDE_MODEL", "IMPASSE_CLAUDE_EFFORT", "IMPASSE_CODEX_RESPECT_CONFIG",
+               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_BASE_URL",
+               "ANTHROPIC_BASE_URL", "FAKE_COUNT_ALL", "FAKE_COUNTER"):
+        os.environ.pop(_v, None)
+    # Independence tiers are host-relative; every legacy assertion below reads them from a Claude
+    # host's perspective. Pin it so the suite is deterministic in CI (no Claude markers there —
+    # an unknown host is 'undetermined', not the historical labels). The host-relative block
+    # below manages its own host identity.
+    os.environ["IMPASSE_HOST"] = "claude"
 
     import impasse_lib as lib
     import impasse_consent as consent
@@ -272,6 +350,76 @@ def main() -> int:
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
     check(res["ok"] is True and res["response"]["schema_version"] == "1.0", "review: transient outage auto-recovers on retry")
     os.environ.pop("FAKE_COUNTER", None)
+
+    # --- issue #1: stochastically malformed reviewer output is retried once + retryable hint ---
+    cnt = os.path.join(tmp, "fake-count-all")
+    if os.path.exists(counter):
+        os.remove(counter)
+    os.environ["FAKE_MODE"] = "badjson_then_ok"
+    os.environ["FAKE_COUNTER"] = counter
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["ok"] is True and res["response"]["schema_version"] == "1.0",
+          "review: malformed JSON on attempt 1 auto-retries and recovers (issue #1)")
+    os.environ.pop("FAKE_COUNTER", None)
+    os.environ["FAKE_COUNT_ALL"] = cnt
+    os.environ["FAKE_MODE"] = "badjson"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["ok"] is False and res["failure"]["code"] == "invalid_response"
+          and res["failure"].get("retryable") is True,
+          "review: persistently malformed JSON -> invalid_response with retryable: true")
+    check(int(open(cnt).read()) == 2, "review: malformed output retried exactly once (2 invocations)")
+    os.remove(cnt)
+    os.environ["FAKE_MODE"] = "noshape"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and res["failure"].get("retryable") is True
+          and int(open(cnt).read()) == 2,
+          "review: wrong-shape JSON also retried once, then retryable: true")
+    os.remove(cnt)
+    os.environ["FAKE_MODE"] = "nowrite"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and res["failure"].get("retryable") is True
+          and int(open(cnt).read()) == 2,
+          "review: empty final message also retried once, then retryable: true")
+    os.remove(cnt)
+    # size-bound failures: retryable: TRUE (an offer, like rate_limited) but never AUTO-retried,
+    # and the message carries the remedy — operator ruling on finding F002, 2026-07-16
+    os.environ["FAKE_MODE"] = "oversize"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and res["failure"].get("retryable") is True
+          and int(open(cnt).read()) == 1 and "shrinking the artifact" in res["failure"]["message"],
+          "review: oversize -> retryable hint (offer) + remedy in message, but NO auto-retry spend")
+    os.remove(cnt)
+    # the 2MB bound is enforced on BYTES: >2MB of multi-byte UTF-8 is <2MB of characters, and a
+    # char-count check would silently parse (and accept!) a truncated prefix
+    os.environ["FAKE_MODE"] = "oversize_utf8"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and "exceeds" in res["failure"]["message"]
+          and int(open(cnt).read()) == 1,
+          "review: multi-byte UTF-8 oversize caught by the BYTE bound (not fooled by char count)")
+    os.remove(cnt)
+    # the outage retry ceiling is pinned, not just eventual recovery
+    os.environ["FAKE_MODE"] = "unavailable"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "service_unavailable" and int(open(cnt).read()) == 3,
+          "review: persistent outage stops after exactly 2 retries (3 invocations)")
+    os.remove(cnt)
+    # the two retry budgets are independent: an outage retry doesn't consume the output retry
+    if os.path.exists(counter):
+        os.remove(counter)
+    os.environ["FAKE_MODE"] = "unavailable_then_badjson_then_ok"
+    os.environ["FAKE_COUNTER"] = counter
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["ok"] is True and int(open(cnt).read()) == 3,
+          "review: outage then malformed output recovers — the budgets are independent")
+    os.remove(cnt)
+    os.remove(counter)
+    # per-attempt truncation: the retry must never re-read attempt 1's stale final message
+    os.environ["FAKE_MODE"] = "badjson_then_nowrite"
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and "no final message" in res["failure"]["message"],
+          "review: retry never reads a prior attempt's stale output (out_last truncated per attempt)")
+    os.environ.pop("FAKE_COUNTER", None)
+    os.environ.pop("FAKE_COUNT_ALL", None)
     run.time.sleep = _orig_sleep
     os.environ["FAKE_MODE"] = "valid"
     os.environ["FAKE_EXIT"] = "0"
@@ -329,6 +477,8 @@ def main() -> int:
     argv_x = run.build_codex_argv(["/x/codex"], instruction="INSTR", output_last_message="/tmp/o", effort="low", model="gpt-x")
     check("--ignore-user-config" in argv_x and "--ignore-rules" in argv_x, "build_codex_argv: hermetic (ignores user config + repo rules) by default")
     check(argv_x[argv_x.index("-m") + 1] == "gpt-x" and argv_x[-1] == "INSTR", "build_codex_argv: -m model set, instruction stays the final positional")
+    check(argv_x[argv_x.index("-c") + 1] == 'model_reasoning_effort="low"', "build_codex_argv: effort -> -c model_reasoning_effort")
+    check("-c" not in run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o"), "build_codex_argv: no effort -> flag omitted (backend default)")
     os.environ["IMPASSE_CODEX_RESPECT_CONFIG"] = "1"
     check("--ignore-user-config" not in run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o"), "build_codex_argv: IMPASSE_CODEX_RESPECT_CONFIG opts out of hermetic mode")
     os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
@@ -364,6 +514,38 @@ def main() -> int:
     os.environ["FAKE_EXIT"] = "0"
     codex_only = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(codex_only.get("independence") == "cross_provider" and codex_only.get("independence_notice") is None, "review(codex): cross-provider, no downgrade notice")
+    os.environ.pop("FAKE_CLAUDE_MODE", None)
+
+    # --- the claude transport path (stdout, capture cap) carries the SAME retry/size contract ---
+    cnt_c = os.path.join(tmp, "fake-count-claude")
+    ctr_c = os.path.join(tmp, "fake-counter-claude")
+    os.environ["FAKE_COUNT_ALL"] = cnt_c
+    os.environ["FAKE_CLAUDE_MODE"] = "notjson_then_ok"
+    os.environ["FAKE_COUNTER"] = ctr_c
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    check(res["ok"] is True and int(open(cnt_c).read()) == 2,
+          "review(claude): malformed stdout recovers on the single output retry")
+    os.environ.pop("FAKE_COUNTER", None)
+    os.remove(cnt_c)
+    os.environ["FAKE_CLAUDE_MODE"] = "notjson"
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and res["failure"].get("retryable") is True
+          and int(open(cnt_c).read()) == 2,
+          "review(claude): persistent malformed stdout -> retryable true after exactly one retry")
+    os.remove(cnt_c)
+    os.environ["FAKE_CLAUDE_MODE"] = "oversize"
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and res["failure"].get("retryable") is True
+          and int(open(cnt_c).read()) == 1 and "--effort" not in res["failure"]["message"],
+          "review(claude): oversize stdout -> retryable hint, no auto-retry, no effort remedy (claude has none)")
+    os.remove(cnt_c)
+    os.environ["FAKE_CLAUDE_MODE"] = "hugestdout"
+    res = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    check(res["failure"]["code"] == "invalid_response" and res["failure"].get("retryable") is True
+          and "capture cap" in res["failure"]["message"] and int(open(cnt_c).read()) == 1,
+          "review(claude): capture-cap breach -> retryable hint, no auto-retry")
+    os.remove(cnt_c)
+    os.environ.pop("FAKE_COUNT_ALL", None)
     os.environ.pop("FAKE_CLAUDE_MODE", None)
 
     # --- environment-aware review-mode policy + self-review tier ---
@@ -443,6 +625,251 @@ def main() -> int:
     check(lib.get_default_model("codex") == "repaired-model", "settings: set-model repairs a malformed default_model")
     lib.set_default_model("codex", None)
     check(run._main(["set-model", "--backend", "codex", "x", "--clear"]) == 2, "set-model: a model + --clear together is rejected")
+    # effort precedence mirrors model: per-run --effort > IMPASSE_CODEX_EFFORT env > persisted
+    # set-effort default > the backend's own default (flag omitted)
+    check(lib.get_default_effort("codex") is None, "settings: no persisted effort by default")
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm["ok"] and rm.get("effort") is None, "review: no effort configured -> backend default (flag omitted)")
+    lib.set_default_effort("codex", "low")
+    check(lib.get_default_effort("codex") == "low", "settings: set/get persisted default effort")
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm.get("effort") == "low", "review: persisted default effort resolves when no flag/env")
+    os.environ["IMPASSE_CODEX_EFFORT"] = "high"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm.get("effort") == "high", "review: IMPASSE_CODEX_EFFORT beats the persisted default")
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", effort="medium", no_record=True)
+    check(rm.get("effort") == "medium", "review: per-run --effort beats env and persisted")
+    os.environ["IMPASSE_CODEX_EFFORT"] = "minimal"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm["ok"] is False and rm["failure"]["code"] == "backend_error"
+          and "IMPASSE_CODEX_EFFORT" in rm["failure"]["message"],
+          "review: invalid env effort -> structured failure naming the env var, not a traceback")
+    os.environ.pop("IMPASSE_CODEX_EFFORT", None)
+    lib.set_default_effort("codex", None)
+    check(lib.get_default_effort("codex") is None, "settings: clear persisted default effort")
+    try:
+        lib.set_default_effort("codex", "minimal")
+        bad_persist = False
+    except ValueError:
+        bad_persist = True
+    check(bad_persist, "settings: set_default_effort refuses a disallowed value ('minimal')")
+    with open(lib._settings_path(), "w") as _sf:
+        _sf.write('{"default_effort": {"codex": "minimal"}}')
+    check(lib.get_default_effort("codex") is None, "settings: hand-edited invalid effort dropped on read (fail safe)")
+    check(run._main(["set-effort", "--backend", "codex", "high", "--clear"]) == 2, "set-effort: an effort + --clear together is rejected")
+    check(run._main(["set-effort", "high"]) == 0 and lib.get_default_effort("codex") == "high", "set-effort: persists via CLI (and repairs a malformed store)")
+    check(run._main(["set-effort", "--clear"]) == 0 and lib.get_default_effort("codex") is None, "set-effort: --clear via CLI")
+    # the resolved effort must actually reach the codex argv, not just the result metadata
+    _orig_sup, _cap = run.supervise, {}
+
+    def _spy(argv, **kw):
+        _cap["argv"] = argv
+        return _orig_sup(argv, **kw)
+    run.supervise = _spy
+    os.environ["IMPASSE_CODEX_EFFORT"] = "high"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    run.supervise = _orig_sup
+    os.environ.pop("IMPASSE_CODEX_EFFORT", None)
+    check(rm.get("effort") == "high" and 'model_reasoning_effort="high"' in _cap.get("argv", []),
+          "review: env-resolved effort reaches the codex argv (not just metadata)")
+    # defense in depth: the argv builder itself refuses a non-allowlisted effort (config-syntax payload)
+    inj = False
+    try:
+        run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o",
+                             effort='high" injected="1')
+    except ValueError:
+        inj = True
+    check(inj, "build_codex_argv: rejects a non-allowlisted effort itself (no config injection)")
+    # claude has no effort knob: an irrelevant IMPASSE_CLAUDE_EFFORT (even an invalid one) must
+    # neither fail the run nor be reported as configuration that was applied
+    os.environ["IMPASSE_CLAUDE_EFFORT"] = "minimal"
+    rc = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    os.environ.pop("IMPASSE_CLAUDE_EFFORT", None)
+    check(rc["ok"] is True and rc.get("effort") is None,
+          "review(claude): irrelevant IMPASSE_CLAUDE_EFFORT neither fails the run nor reports as applied")
+    # the generic settings writer preserves sibling keys and the 0600 discipline
+    lib.set_default_model("codex", "keep-model")
+    lib.set_default_effort("codex", "low")
+    check(lib.get_default_model("codex") == "keep-model" and lib.get_default_effort("codex") == "low",
+          "settings: effort write preserves the model default")
+    lib.set_default_model("codex", "keep-model-2")
+    check(lib.get_default_effort("codex") == "low", "settings: model write preserves the effort default")
+    if os.name == "posix":
+        check(stat.S_IMODE(os.stat(lib._settings_path()).st_mode) == 0o600, "settings: settings.json stays 0600 after generic writes")
+    lib.set_default_model("codex", None)
+    lib.set_default_effort("codex", None)
+
+    # --- host-relative independence (IMPASSE_HOST): the tier is a relation, not a backend property ---
+    _host_env = {k: os.environ.pop(k, None) for k in (
+        "IMPASSE_HOST", "IMPASSE_ENV", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_COWORK", "CLAUDE_SURFACE", "CLAUDE_CHAT_SANDBOX")}
+    try:
+        check(lib.detect_host() == "unknown", "detect_host: no markers -> unknown")
+        # a surface-policy override must not be able to manufacture a host identity (F002)
+        os.environ["IMPASSE_ENV"] = "claude_code"
+        check(lib.detect_environment() == "claude_code" and lib.detect_host() == "unknown",
+              "detect_host: IMPASSE_ENV alone cannot manufacture a claude host identity")
+        os.environ.pop("IMPASSE_ENV", None)
+        os.environ["CLAUDECODE"] = "1"
+        check(lib.detect_host() == "claude", "detect_host: genuine Claude Code markers -> claude host")
+        os.environ["IMPASSE_HOST"] = "codex"
+        check(lib.detect_host() == "codex", "detect_host: IMPASSE_HOST overrides auto-detection")
+        os.environ["IMPASSE_HOST"] = "skynet"
+        check(lib.detect_host() == "claude", "detect_host: unrecognized IMPASSE_HOST ignored, detection continues")
+        os.environ.pop("IMPASSE_HOST", None)
+        os.environ.pop("CLAUDECODE", None)   # back to an undeclared host for the e2e below
+        check(lib.independence_tier("claude", "OpenAI") == "cross_provider", "tier: claude host + OpenAI reviewer -> cross_provider")
+        check(lib.independence_tier("claude", "Anthropic") == "same_provider", "tier: claude host + Anthropic reviewer -> same_provider")
+        check(lib.independence_tier("codex", "Anthropic") == "cross_provider", "tier: codex host + Anthropic reviewer -> cross_provider (ladder inverts)")
+        check(lib.independence_tier("codex", "OpenAI") == "same_provider", "tier: codex host + OpenAI reviewer -> same_provider (no false independence)")
+        check(lib.independence_tier("cursor", "OpenAI") == "undetermined", "tier: mixed-model host (cursor) -> undetermined")
+        check(lib.independence_tier("claude", "https://gw.corp.example") == "undetermined", "tier: unattributable backend endpoint -> undetermined, never overstated")
+        # fail-safe boundary (F001): an unattributed host NEVER receives a positive independence claim
+        check(lib.independence_tier("unknown", "OpenAI") == "undetermined", "tier: unknown host -> undetermined, never cross_provider")
+        check(lib.independence_tier("unknown", "Anthropic") == "undetermined", "tier: unknown host -> undetermined (claude too)")
+        # e2e: an UNDECLARED host gets the undetermined disclosure, not a cross-provider claim
+        ru = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+        check(ru.get("host") == "unknown" and ru.get("independence") == "undetermined"
+              and "IMPASSE_HOST" in (ru.get("independence_notice") or ""),
+              "review(codex, undeclared host): undetermined + notice telling the driver to declare itself")
+        # e2e: a codex host inverts the ladder — claude becomes the cross-provider reviewer
+        os.environ["IMPASSE_HOST"] = "codex"
+        rc = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+        check(rc["ok"] and rc.get("independence") == "cross_provider" and rc.get("independence_notice") is None,
+              "review(claude, codex host): cross-provider, no downgrade notice")
+        check(rc.get("host") == "codex", "review: result reports the host")
+        rx = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+        check(rx.get("independence") == "same_provider" and "Same-provider" in (rx.get("independence_notice") or ""),
+              "review(codex, codex host): same-provider notice fires (was mislabeled cross before)")
+        os.environ["IMPASSE_HOST"] = "cursor"
+        ru = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+        check(ru.get("independence") == "undetermined" and "undetermined" in (ru.get("independence_notice") or "").lower(),
+              "review(codex, cursor host): undetermined tier + notice (host model is operator-chosen)")
+        os.environ.pop("IMPASSE_HOST", None)
+        # review_mode prefers the backend most independent of the host
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="codex")
+        check(m["mode"] == "claude" and m["tier"] == "cross_provider" and m["host"] == "codex",
+              "review_mode: codex host + both available -> claude (cross-provider) preferred")
+        check(m["notice"] is None, "review_mode: cross_provider selection owes no notice")
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="claude")
+        check(m["mode"] == "codex" and m["tier"] == "cross_provider", "review_mode: claude host + both available -> codex (unchanged)")
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="cursor")
+        check(m["mode"] == "codex" and m["tier"] == "undetermined", "review_mode: undetermined tie -> codex first (hermetic sandbox)")
+        m = lib.review_mode("code", environment="claude_code", codex_available=False, claude_available=True, host="codex")
+        check(m["mode"] == "claude" and m["tier"] == "cross_provider", "review_mode: codex host, claude only -> cross_provider, honest label")
+        # a downgraded tier carries its own disclosure from the pre-flight too (F004)
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=False, host="codex")
+        check(m["tier"] == "same_provider" and "Same-provider" in (m["notice"] or ""),
+              "review_mode: same_provider selection carries the independence notice")
+        # a pre-flight must not recommend a backend get_backend() is guaranteed to refuse (F003)
+        os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="codex")
+        check(m["mode"] == "codex" and m["tier"] == "same_provider",
+              "review_mode: claude excluded under Bedrock routing (never recommend a refused backend)")
+        os.environ.pop("CLAUDE_CODE_USE_BEDROCK", None)
+        # tiers are computed against the CONFIGURED endpoint, mirroring the actual run (F003)
+        os.environ["OPENAI_BASE_URL"] = "https://gw.corp.example"
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=False, host="claude")
+        check(m["tier"] == "undetermined" and m["notice"] is not None,
+              "review_mode: custom gateway endpoint -> undetermined pre-flight tier + notice")
+        os.environ.pop("OPENAI_BASE_URL", None)
+        # the Claude Code pitch is only apt for a Claude host; other hosts get the capability framing (F005)
+        m = lib.review_mode("code", environment="unknown", codex_available=True, claude_available=True, host="codex")
+        check(m["recommendation"] == lib.SUBPROCESS_RECOMMENDATION,
+              "review_mode: non-claude host is not steered to Claude Code")
+        m = lib.review_mode("decision", environment="unknown", codex_available=False, claude_available=False, host="claude")
+        check(m["mode"] == "refuse" and m["recommendation"] == lib.CLAUDE_CODE_RECOMMENDATION,
+              "review_mode: claude host on a weak surface still gets the Claude Code recommendation")
+        # a malformed base URL (embedded creds) means get_backend() would refuse — the pre-flight
+        # must EXCLUDE that backend, and must never echo the raw value (it's where creds live)
+        os.environ["OPENAI_BASE_URL"] = "https://user:secret@gw.example"
+        check(lib._configured_provider("OPENAI_BASE_URL", "https://api.openai.com") is None,
+              "pre-flight: malformed endpoint -> provider None (backend unofferable), raw value never echoed")
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=False, host="claude")
+        check(m["mode"] == "refuse" and "secret" not in str(m),
+              "review_mode: never recommends a backend get_backend() would refuse (malformed endpoint), no credential echo")
+        m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="claude")
+        check(m["mode"] == "claude", "review_mode: malformed codex endpoint -> falls to the usable claude backend")
+        os.environ.pop("OPENAI_BASE_URL", None)
+        # the mode CLI end-to-end honors --host (host-relative pre-flight through _main)
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_mode = run._main(["mode", "--kind", "code", "--host", "codex"])
+        mode_out = buf.getvalue()
+        check(rc_mode == 0 and '"host": "codex"' in mode_out,
+              "mode CLI: --host flows through to the decision")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            check(run._main(["set-effort"]) == 0 and "backend default" in buf.getvalue(),
+                  "set-effort: bare show path works (no persisted value)")
+    finally:
+        os.environ.pop("IMPASSE_HOST", None)
+        os.environ.pop("CLAUDECODE", None)
+        os.environ.pop("IMPASSE_ENV", None)
+        os.environ.pop("CLAUDE_CODE_USE_BEDROCK", None)
+        os.environ.pop("OPENAI_BASE_URL", None)
+        for k, v in _host_env.items():
+            if v is not None:
+                os.environ[k] = v
+
+    # --- review CLI end-to-end + the cross-feature matrix (host x effort x output retry) ---
+    # Runs AFTER the host-block restore: IMPASSE_HOST is back to the suite baseline ('claude').
+    import contextlib
+    import io
+    _ins = os.path.join(tmp, "cli-instr.txt")
+    _art = os.path.join(tmp, "cli-art.txt")
+    open(_ins, "w").write("review this artifact")
+    open(_art, "w").write("artifact body")
+    os.environ["FAKE_MODE"] = "valid"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc_rev = run._main(["review", "--kind", "code", "--instruction-file", _ins,
+                            "--artifact-file", _art, "--no-record"])
+    cli_out = _json.loads(buf.getvalue())
+    check(rc_rev == 0 and cli_out["ok"] is True and cli_out["backend"] == "codex"
+          and cli_out.get("host") == "claude",
+          "review CLI: end-to-end through _main returns the full result JSON (host included)")
+    # instruction-file bound is BYTES, not characters (mirror of the final-message fix)
+    _fat = os.path.join(tmp, "fat-instr.txt")
+    with open(_fat, "w", encoding="utf-8") as f:
+        f.write("é" * 6)   # 6 characters, 12 bytes
+    fat_ok = False
+    try:
+        run._read_limited(_fat, 10, binary=False)
+    except ValueError:
+        fat_ok = True
+    check(fat_ok, "_read_limited: multi-byte text over the BYTE limit rejected (char count would pass)")
+    check(run._read_limited(_fat, 12, binary=False) == "é" * 6, "_read_limited: within the byte limit decodes cleanly")
+    # matrix: codex host + env effort + malformed-then-ok output — identical argv on retry
+    argvs = []
+    _orig_sup_m = run.supervise
+
+    def _spy_m(argv, **kw):
+        argvs.append(list(argv))
+        return _orig_sup_m(argv, **kw)
+    try:
+        run.supervise = _spy_m
+        os.environ["IMPASSE_HOST"] = "codex"
+        os.environ["IMPASSE_CODEX_EFFORT"] = "high"
+        if os.path.exists(counter):
+            os.remove(counter)
+        os.environ["FAKE_MODE"] = "badjson_then_ok"
+        os.environ["FAKE_COUNTER"] = counter
+        res_m = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    finally:
+        run.supervise = _orig_sup_m
+        os.environ.pop("FAKE_COUNTER", None)
+        os.environ.pop("IMPASSE_CODEX_EFFORT", None)
+        os.environ["IMPASSE_HOST"] = "claude"   # back to the suite baseline
+        os.environ["FAKE_MODE"] = "valid"
+    check(res_m["ok"] is True and res_m.get("host") == "codex" and res_m.get("effort") == "high"
+          and "Same-provider" in (res_m.get("independence_notice") or ""),
+          "matrix: codex host + env effort + output retry -> all metadata correct after recovery")
+    check(len(argvs) == 2 and argvs[0] == argvs[1] and 'model_reasoning_effort="high"' in argvs[0],
+          "matrix: the retry re-runs the IDENTICAL argv (effort/model resolved once, not per attempt)")
+
     check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
     check(res.get("record_path") and "Recorded locally" in (res.get("record_notice") or ""), "run record: result surfaces where it was saved")
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)

@@ -8,6 +8,11 @@ independent second opinion.
 
 ## Where it sits on the independence ladder
 
+**The ladder is host-relative** (`independence_tier()`): everything below assumes the usual case —
+a **Claude host** (Claude Code). To a *Codex* host (`IMPASSE_HOST=codex`), this backend **is** the
+different-provider reviewer: the runner labels it `cross_provider` and emits no downgrade notice,
+while the codex backend gets the `same_provider` notice instead. See `docs/environments.md`.
+
 1. **Different provider (Codex)** — the default; lowest correlation of blind spots. Prefer it.
 2. **Same provider, different model** — some independence (pin a reviewer model ≠ the host's).
 3. **Same provider, same model, fresh context + adversarial stance** — what this backend gives
@@ -64,8 +69,9 @@ observations, not a durable API):
   tool `Task`). Verified on 2.1.197: under this config the reviewer's attempts to `Read` a local
   file and to `WebFetch` are both blocked, yet it still answers from stdin. **Caveat:** do not run
   this backend under an override that weakens the permission gate.
-- **No reasoning-effort knob.** There is no `model_reasoning_effort` equivalent; `--effort` is
-  ignored for this backend.
+- **No reasoning-effort knob.** There is no `model_reasoning_effort` equivalent; a configured
+  effort (`--effort`, `IMPASSE_CLAUDE_EFFORT`, or a persisted `set-effort` default) is ignored
+  for this backend.
 - **Model.** The runner omits `--model` (account default). Pinning a reviewer model *different*
   from the host's buys a rung of independence (ladder step 2) — worth doing if you know the host.
 
