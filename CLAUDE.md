@@ -14,12 +14,17 @@ disagreements. The repo *is* the skill directory. Backend-neutral protocol; stdl
 
 ```bash
 python3 tests/test_helpers.py       # stdlib, no pytest: supervisor, consent, backends, env policy, records
-python3 tests/validate_schemas.py   # needs jsonschema (dev/CI only): positive + negative fixtures
-ruff check scripts/ tests/          # lint
+.venv/bin/python3 tests/validate_schemas.py   # jsonschema lives in the repo-root .venv, not on PATH
+.venv/bin/ruff check scripts/ tests/          # ruff too
 ```
 
 All three must pass. Docs also follow the repo's understated, honest, no-hype voice — read the
 existing docs for tone; no marketing superlatives, and pair any failure mode with its mitigation.
+
+`tests/test_helpers.py` is one linear script with shared state: result variables (e.g. `res`)
+feed later assertions — new tests need fresh names and try/finally around env edits. Fake
+backends are driven by env vars (`FAKE_MODE`/`FAKE_CLAUDE_MODE`; `FAKE_COUNTER` for sequenced
+modes, `FAKE_COUNT_ALL` to count invocations).
 
 ## Invariants a change MUST preserve
 
@@ -58,6 +63,8 @@ Run records and consent (`runs/`, `consent.json`) hold artifact content — they
 Impasse reviews itself: bundle the scripts as an artifact and run `impasse_run.py review --kind
 code --backend codex …`. The cross-provider reviewer has caught real bugs here (path traversal,
 terminal-escape injection, supervisor teardown) — run it before shipping substantial changes.
+Run reviews in the background (`run_in_background`) whenever `--wall` ≥ ~550s — the Claude Code
+shell kills foreground commands at 10 min, which masquerades as a reviewer timeout.
 
 ## Maintainer note
 
