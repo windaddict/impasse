@@ -172,6 +172,18 @@ refuse; see "Environment & fallback"). Then:
    runtime. Don't rely on fields the runner didn't check without validating them yourself.
 5. **Verify, reconcile, and escalate** per the protocol. In Claude Code, put each deadlock's
    `operator_question` to the operator with `AskUserQuestion`; batch multiple deadlocks.
+
+   **Operator rulings count as escalations regardless of channel.** If an operator ruling
+   decides an item's disposition — whether the question traveled through a formal
+   `operator_question`, `AskUserQuestion`, or prose in conversation — record the `escalation`
+   object on that item (state `resolved`, the ruling as `resolution`). The `operator_question`
+   field must carry the question **as actually put to the operator, verbatim or excerpted** —
+   not a reconstruction — and the positions should record who initiated the decisive exchange.
+   If you amend a past record to apply this rule, append amendment metadata to the item's
+   `resolution` (date, reason, what changed, prior state) — never silently rewrite an audit
+   record. The ledger must count every question that decided a disposition; a low escalation
+   count is **not** a goal, and keeping judgment calls out of the record to flatter it is a
+   protocol violation.
 6. **Record and report.** The runner already persisted the reviewer's findings (a run record) —
    its result includes `record_notice` (where it saved, `0600`, and how to skip/delete).
    **Surface that to the operator** so they know the reviewed content is on disk. Save your

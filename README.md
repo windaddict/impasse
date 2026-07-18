@@ -82,6 +82,58 @@ It is **domain-general** — the same protocol reviews:
 - **code** (correctness, security, missing error handling),
 - a **dataset** or other artifact.
 
+## It reviews itself — the maintainer's ledger
+
+The maintainer's practice is to put substantial changes through Impasse before shipping them.
+Below is what that practice has produced so far — **a snapshot of every reconciled review record
+on the maintainer's machine, all artifact kinds** (as of 2026-07-18). It is a count of what the
+saved records contain — not an audit proving every change was reviewed, and not a complete count
+of every event in every conversation:
+
+| | |
+|---|---|
+| Reviews reconciled | 65 |
+| Findings raised by the reviewer | 391 |
+| … resolved (host addressed the finding) | 345 |
+| … accepted (host agreed; noted or deferred) | 36 |
+| … refuted — each with contradicting evidence, as the schema requires of a saved rejection | 10 |
+| … withdrawn | 0 |
+
+**Escalation counts are deliberately not reported yet.** An important operational metric is how
+often findings need a human ruling — no reliable historical rate exists. The counting rule only
+recently became channel-independent (an operator ruling that decides a disposition now counts as
+an escalation whether it arrived through a formal deadlock or through conversation), and the
+operator attests that more judgment calls reached him than the pre-rule records captured.
+Historical events whose exact wording is no longer recoverable can't be amended in (the rule
+requires the question as actually posed), so rather than publish a number known to undercount,
+**the ledger will report escalations — numerator and denominator — after the next 50 reconciled
+reviews under the corrected rule** (counting from 2026-07-18; the maintainer applies the rule).
+The same capture caveat bounds the whole table: these are counts of what the saved
+reconciliations contain — raw-mode runs, failed runs, and anything never reconciled are outside
+them by construction. Review runs that fail outright produce no reconciliation and are not in
+the 65 — at least one did, see below.
+
+Four of these reviews covered **this codebase's own release cycle** (23 findings). Three times
+the cross-provider reviewer **overturned the author's design decision** with an argument the
+author then conceded: a fail-open host-identity fallback that overstated independence in exactly
+the case it existed to prevent; a retryability spec the operator himself had written; and a
+byte-vs-character bound that could let a silently truncated reviewer message pass as a complete
+review. One review run also **failed outright** on malformed reviewer JSON — that failure became
+[issue #1](https://github.com/windaddict/impasse/issues/1) and the retry logic that fixed it.
+The [CHANGELOG](CHANGELOG.md) summarizes each episode; the resulting code and tests are in this
+repository. The raw run records stay local **by design** — they can contain reviewed artifact
+content (see the data-boundary section) — so what's public is the maintainer's summaries and the
+diffs, not the reviewer transcripts. **With one deliberate exception:** for the fail-open case,
+the full reviewer response and reconciliation are published verbatim in
+[`docs/evidence/host-independence-review/`](docs/evidence/host-independence-review/) (the
+reviewed artifact was this repo's own public code, so nothing sensitive rode along), with the
+case narrated for non-developers in
+[`docs/case-study-host-independence.md`](docs/case-study-host-independence.md).
+
+**Weigh this for what it is:** author-run dogfooding on the author's own artifacts, reported by
+the author. It's offered as a process record, not proof — and it says nothing yet about how
+Impasse performs on *your* work.
+
 ## How it works
 
 1. **Review** — an independent reviewer returns structured findings, each with *anchored

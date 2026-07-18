@@ -135,6 +135,31 @@ All notable changes to Impasse are documented here. This project adheres to
   is deliberately not implemented: a full re-run rescues the common case at the same cost, one
   invocation, without a new echo-untrusted-output-back path.
 
+### Escalation semantics: operator rulings count regardless of channel
+- SKILL reconciliation guidance: an operator ruling that decides an item's disposition is
+  recorded with an `escalation` object whether it arrived via a formal deadlock,
+  `AskUserQuestion`, or prose in conversation — the metric is "questions that decided a
+  disposition," and the channel is a UI detail. `operator_question` must be the question as
+  actually posed (verbatim/excerpt, not a reconstruction); who initiated the decisive exchange
+  is recorded in the positions; a low escalation count is explicitly not a goal.
+- Amendments to past records must append amendment metadata (date, reason, what changed, prior
+  state) to the item's `resolution` — never a silent rewrite. Applied once: the
+  size-bound-retryability ruling (operator-ratified 2026-07-16, conversation path) now carries
+  its escalation object with an amendment note.
+- Cross-provider decision review of this rule change surfaced the audit-integrity requirements
+  above (amendment provenance, verbatim questions, observable metric definition, anti-gaming
+  language) — the initial proposal had none of them. Roadmap noted for a possible v1.1 schema:
+  optional escalation-channel and amendment-provenance fields (`additionalProperties: false`
+  currently confines provenance to structured resolution text).
+- **Historical escalation counts are withheld from the public ledger** until 50 reconciled
+  reviews accumulate under the corrected rule (from 2026-07-18): the operator attests that more
+  judgment calls reached him than pre-rule records captured, and historical events whose exact
+  wording is no longer recoverable cannot be amended in without violating the verbatim-question
+  requirement. (The one amended record was eligible precisely because its exact wording — the
+  operator's question and the delivered ruling — remained available in the retained
+  conversation; events without recoverable wording stay uncounted, which is why the historical
+  number is a known undercount.)
+
 ### Final pre-commit hardening (Fable + Impasse dual review of the full changeset)
 - `review_mode` no longer offers a backend whose configured base URL fails to normalize
   (malformed / embedded credentials) — `get_backend()` would refuse it; the raw endpoint value

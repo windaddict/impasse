@@ -1,0 +1,254 @@
+{
+  "schema_version": "1.0",
+  "review_id": "host-independence-review-20260716-001",
+  "producer": {
+    "backend": "codex-cli"
+  },
+  "artifact": {
+    "id": "impasse-host-relative-independence-working-tree",
+    "kind": "code",
+    "revision": {
+      "algorithm": "other",
+      "value": "stdin-unified-diff-plus-post-change-impasse_lib.py-and-impasse_run.py"
+    }
+  },
+  "scope": {
+    "requested": [
+      "Host detection and host-relative independence classification",
+      "Overstated cross-provider claims and downgrade disclosure",
+      "Backend preference, fallback, refusal, and self-review behavior",
+      "Coverage and quality of the new host-relative tests"
+    ],
+    "excluded": [
+      "Previously reviewed configurable reasoning-effort change except where it intersects the new host-relative behavior"
+    ]
+  },
+  "assessment": "needs_attention",
+  "summary": "The change improves classification when IMPASSE_HOST is correct, but it remains fail-open at the most important boundary: absent, misspelled, or indirectly spoofed host identity can label a same-provider Codex review as cross_provider with no notice. The mode preflight also classifies nominal backends instead of their configured endpoints and can recommend a backend that get_backend will refuse. Several user-facing disclosures remain internally inconsistent with the new host-relative policy.",
+  "findings": [
+    {
+      "id": "F001",
+      "severity": "high",
+      "category": "honesty-of-disclosure",
+      "claim": "An unknown or invalidly declared host defaults to a positive cross_provider claim for the Codex backend, so the system knowingly overstates independence in the exact non-Claude-host case this change is intended to fix.",
+      "impact": "A Codex agent that omits IMPASSE_HOST, misspells it, changes its casing, or invokes the CLI directly receives cross_provider metadata and no independence notice even though the reviewer is also OpenAI. Downstream automation may treat correlated review as independent evidence.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "independence_tier"
+          },
+          "observation": "After handling known provider hosts and cursor/other, the final return unconditionally assigns cross_provider when backend_name is codex. This includes host='unknown' and every unexpected host string; backend_provider is ignored on this fallback path.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "detect_host"
+          },
+          "observation": "With no recognized IMPASSE_HOST and no detected Claude surface, detect_host returns 'unknown'. No Codex surface is auto-detected.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "tests/test_helpers.py",
+            "symbol": "main"
+          },
+          "observation": "The new tests explicitly require independence_tier('unknown', 'codex', 'OpenAI') == 'cross_provider', thereby locking in the unsafe fallback rather than testing that an unattributed host cannot receive a positive independence claim.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Return undetermined for unknown and unrecognized hosts. If preserving historical CLI presentation is mandatory, distinguish a verified non-agent human invocation from an unidentified driver; do not encode that compatibility policy as a cross-provider assertion. Treat invalid IMPASSE_HOST as a structured configuration error or at least undetermined rather than silently ignoring it.",
+      "confidence": "high"
+    },
+    {
+      "id": "F002",
+      "severity": "high",
+      "category": "configuration precedence",
+      "claim": "IMPASSE_ENV can silently determine host identity even though the documented host contract says IMPASSE_HOST is authoritative and Claude surfaces are auto-detected.",
+      "impact": "On a Codex host, setting IMPASSE_ENV=claude_code while omitting IMPASSE_HOST makes detect_host return claude; a Codex backend is then labeled cross_provider with no notice. A surface-policy override or stale environment variable can therefore become an independence-identity override.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "detect_host"
+          },
+          "observation": "detect_host calls detect_environment and maps any result of claude_code, chat_sandbox, or cowork to host='claude'; it does not require actual Claude marker variables.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "detect_environment"
+          },
+          "observation": "detect_environment accepts a recognized IMPASSE_ENV value before examining Claude marker variables. Consequently IMPASSE_ENV='claude_code' is sufficient to manufacture a Claude host classification.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "tests/test_helpers.py",
+            "symbol": "main"
+          },
+          "observation": "The host tests remove IMPASSE_ENV and test only a real CLAUDECODE marker. They do not exercise the precedence path where IMPASSE_ENV alone changes detect_host.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Separate surface detection from provider identity. detect_host should inspect explicit host identity and genuine host markers directly, not the overrideable result of detect_environment. If IMPASSE_ENV is intentionally allowed to imply provider identity, document that precedence and test conflicting combinations such as IMPASSE_ENV=claude_code with IMPASSE_HOST absent or codex.",
+      "confidence": "high"
+    },
+    {
+      "id": "F003",
+      "severity": "medium",
+      "category": "correctness",
+      "claim": "review_mode reports and ranks nominal provider tiers without considering configured endpoints or backend configurations that make the selected backend unusable.",
+      "impact": "The mode command can report cross_provider where the actual review will be undetermined, or select Claude on a Codex host even when get_backend is guaranteed to refuse that Claude configuration. This violates the claim that mode returns the strongest available honest mode.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "review_mode"
+          },
+          "observation": "Candidates are hardcoded as ('codex', 'OpenAI') and ('claude', 'Anthropic'). OPENAI_BASE_URL and ANTHROPIC_BASE_URL are not inspected, so a custom gateway is still reported with the nominal cross_provider tier.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_run.py",
+            "symbol": "_main"
+          },
+          "observation": "The mode command defines availability solely by resolve_codex_command or resolve_claude_command. It does not call get_backend, so endpoint validation and Claude's Bedrock/Vertex refusal are omitted.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "get_backend"
+          },
+          "observation": "get_backend refuses the Claude backend when CLAUDE_CODE_USE_BEDROCK or CLAUDE_CODE_USE_VERTEX is set. Nevertheless, with both executables present and host='codex', review_mode ranks nominal Claude as cross_provider and selects it over the usable Codex backend.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Build mode candidates from resolved Backend objects, catching resolution and configuration errors, and rank their actual independence fields. If mode must remain a binary-only preflight, label its tier as provisional and do not claim that it has selected the strongest available configured reviewer.",
+      "confidence": "high"
+    },
+    {
+      "id": "F004",
+      "severity": "medium",
+      "category": "disclosure",
+      "claim": "review_mode returns notice=null for same_provider and undetermined selections, despite its contract and documentation claiming mandatory downgrade disclosure.",
+      "impact": "Consumers that use the mode decision to present or authorize a review receive no explanatory warning for a downgraded tier. The review execution later emits a notice, but mode is independently exposed as a CLI policy decision and may be consumed without executing review.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "review_mode"
+          },
+          "observation": "Every subprocess candidate result sets 'notice': None, including tiers same_provider and undetermined. The adjacent comment delegates disclosure to review(), although review_mode's docstring says it carries the mandatory disclosure.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_run.py",
+            "symbol": "_main"
+          },
+          "observation": "The mode CLI prints review_mode's decision directly and does not add an independence notice. For example, a Codex host with only the Codex executable gets tier='same_provider' and notice=null.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "text_quote",
+            "section": "docs/environments.md",
+            "quote": "Each step down is disclosed: the runner emits an `independence_notice` for `same_provider` and `undetermined`"
+          },
+          "observation": "The documented disclosure guarantee is not true for the mode runner path.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Create one shared notice formatter and use it in both review and review_mode. At minimum, mode must return a non-null notice for same_provider and undetermined tiers.",
+      "confidence": "high"
+    },
+    {
+      "id": "F005",
+      "severity": "medium",
+      "category": "misleading guidance",
+      "claim": "The fallback recommendation still asserts that only Claude Code can run a cross-provider reviewer, contradicting the newly implemented host-relative policy.",
+      "impact": "Codex-host users are directed toward Claude Code even when a Claude subprocess in their current shell is the cross-provider option. Self-review and refusal responses can therefore recommend an unnecessary host migration based on the obsolete Claude-centric ladder.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "CLAUDE_CODE_RECOMMENDATION"
+          },
+          "observation": "The constant says only Claude Code can run a cross-provider reviewer and identifies Codex as that reviewer.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_lib.py",
+            "symbol": "review_mode"
+          },
+          "observation": "The same function now explicitly permits subprocess backends on any surface and, for host='codex', classifies Claude as cross_provider. It nevertheless attaches the Claude-only recommendation whenever environment is not claude_code.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "scripts/impasse_run.py",
+            "symbol": "_main"
+          },
+          "observation": "The review CLI help still describes codex as 'cross-provider, default' and claude as 'same-provider fallback' without qualifying those labels by host.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Generate recommendations from host and backend availability. Replace static backend labels in CLI help and review's docstring with host-relative language.",
+      "confidence": "high"
+    },
+    {
+      "id": "F006",
+      "severity": "low",
+      "category": "test coverage",
+      "claim": "The new tests verify the happy-path classification table but do not pin the configuration interactions most capable of producing false independence or broken backend selection.",
+      "impact": "The unsafe unknown fallback is enshrined, while regressions involving IMPASSE_ENV, invalid host declarations, custom endpoints, downgrade notices from mode, and refusing Claude configurations can pass the suite.",
+      "evidence": [
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "tests/test_helpers.py",
+            "symbol": "main"
+          },
+          "observation": "The host-relative section tests direct independence_tier calls, recognized IMPASSE_HOST values, one custom-provider direct call, and nominal review_mode availability. It has no mode assertion for custom base URLs, Bedrock/Vertex, only-same-provider selection, notice contents, invalid host input, or IMPASSE_ENV-only host inference.",
+          "grounding": "artifact_observed"
+        },
+        {
+          "anchor": {
+            "type": "file_range",
+            "path": "tests/test_helpers.py",
+            "symbol": "main"
+          },
+          "observation": "The sole unknown-host assertions expect the historical codex/claude labels; there is no assertion that an unidentified AI host receives an undetermined notice rather than a positive cross-provider claim.",
+          "grounding": "artifact_observed"
+        }
+      ],
+      "recommendation": "Add table-driven tests spanning host source and precedence, backend endpoint attribution, availability and refusal configuration, and every returned notice. Include end-to-end cases for unknown Codex-like hosts and custom gateways rather than testing independence_tier only in isolation.",
+      "confidence": "high"
+    }
+  ],
+  "limitations": [
+    "The stdin artifact did not provide an immutable digest, so the revision is identified descriptively rather than by a verified byte hash.",
+    "This review was static; backend CLIs and environment-marker behavior were not executed.",
+    "Only the two modified scripts were supplied in full. Findings about documentation and tests are grounded in their unified-diff excerpts."
+  ]
+}

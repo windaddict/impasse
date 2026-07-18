@@ -1,0 +1,107 @@
+{
+  "schema_version": "1.0",
+  "reconciliation_id": "rc-host-independence-review-20260716-001",
+  "review_id": "host-independence-review-20260716-001",
+  "artifact_revision": {
+    "algorithm": "sha256",
+    "value": "c1c0a8373ddb05d3104ea5d1bdda96f3cee911bba923000feccee499020580b2"
+  },
+  "outcome": "converged",
+  "started_at": "2026-07-16T00:00:00Z",
+  "completed_at": "2026-07-16T00:00:00Z",
+  "rounds_used": 1,
+  "producer": {
+    "backend": "codex-cli"
+  },
+  "items": [
+    {
+      "finding_id": "F001",
+      "state": "resolved",
+      "reviewer_position": "The unknown-host fallback assigns cross_provider to the codex backend, knowingly overstating independence in exactly the undeclared-non-Claude-host case the change exists to fix; the tests lock the unsafe fallback in.",
+      "host_position": "Verified \u2014 and conceded: this was my deliberate backward-compatibility choice, but it is fail-open, and the repo's own precedent (unknown environment refuses self-review) is fail-safe. A positive independence claim requires both sides to be attributable.",
+      "verification": [
+        {
+          "method": "artifact_inspection",
+          "result": "supports",
+          "detail": "independence_tier's final return assigned cross_provider for backend_name == 'codex' on every unmatched host, including 'unknown'; detect_host has no non-Claude auto-detection."
+        }
+      ],
+      "resolution": "Unknown/unrecognized hosts now yield 'undetermined' with a notice telling the driver to set IMPASSE_HOST; the tests now pin that an unattributed host never receives a positive cross-provider claim (e2e included). The legacy suite pins IMPASSE_HOST=claude explicitly instead of relying on the fallback."
+    },
+    {
+      "finding_id": "F002",
+      "state": "resolved",
+      "reviewer_position": "detect_host derives identity from detect_environment, so IMPASSE_ENV=claude_code alone manufactures a Claude host and with it an unearned cross_provider label.",
+      "host_position": "Verified: detect_environment honors IMPASSE_ENV before real markers, and detect_host mapped any Claude surface result to host=claude. A surface-policy override must not become an identity override.",
+      "verification": [
+        {
+          "method": "artifact_inspection",
+          "result": "supports",
+          "detail": "detect_environment returns the forced IMPASSE_ENV value first; detect_host called it and mapped claude_code/chat_sandbox/cowork to 'claude'."
+        },
+        {
+          "method": "command",
+          "result": "supports",
+          "detail": "New regression test: with IMPASSE_ENV=claude_code and no genuine markers, detect_environment() == 'claude_code' but detect_host() == 'unknown' (passes post-fix)."
+        }
+      ],
+      "resolution": "detect_host now inspects the genuine Claude env markers directly and deliberately does not consult detect_environment; documented in the docstring and docs/environments.md."
+    },
+    {
+      "finding_id": "F003",
+      "state": "resolved",
+      "reviewer_position": "review_mode ranks nominal providers, ignoring configured base URLs and backend configurations get_backend would refuse (claude under Bedrock/Vertex), so the pre-flight can report a tier or recommend a backend the actual run contradicts.",
+      "host_position": "Verified: candidates were hardcoded ('codex','OpenAI')/('claude','Anthropic') and availability came only from binary resolution.",
+      "verification": [
+        {
+          "method": "artifact_inspection",
+          "result": "supports",
+          "detail": "review_mode built candidates from constant provider labels; the mode CLI's availability check used resolve_*_command only."
+        }
+      ],
+      "resolution": "review_mode now computes each backend's provider from its configured endpoint env var (malformed/custom endpoints degrade to undetermined, mirroring the run) and excludes claude when CLAUDE_CODE_USE_BEDROCK/VERTEX is set. Tests cover both (gateway endpoint -> undetermined; Bedrock -> claude never recommended)."
+    },
+    {
+      "finding_id": "F004",
+      "state": "resolved",
+      "reviewer_position": "review_mode returned notice=null for same_provider and undetermined selections while the docs claim every step down is disclosed; mode is an independently consumed CLI surface.",
+      "host_position": "Verified: every subprocess-candidate return hardcoded notice None, delegating to review() \u2014 but the mode CLI is its own disclosure surface.",
+      "verification": [
+        {
+          "method": "artifact_inspection",
+          "result": "supports",
+          "detail": "review_mode's candidate return set 'notice': None for all tiers; docs/environments.md promised disclosure for same_provider and undetermined."
+        }
+      ],
+      "resolution": "Extracted one shared lib.independence_notice(tier, host, backend, provider) formatter used by both review() and review_mode(); the pre-flight now carries the notice for downgraded tiers. Tests assert notice presence for same_provider/undetermined selections and absence for cross_provider."
+    },
+    {
+      "finding_id": "F005",
+      "state": "resolved",
+      "reviewer_position": "CLAUDE_CODE_RECOMMENDATION still claims only Claude Code can run a cross-provider reviewer, and the review CLI help still labels codex 'cross-provider' statically \u2014 both contradict the host-relative policy.",
+      "host_position": "Verified: the constant and the --backend/--effort help text (and review()'s docstring) carried Claude-host-static framing.",
+      "verification": [
+        {
+          "method": "artifact_inspection",
+          "result": "supports",
+          "detail": "CLAUDE_CODE_RECOMMENDATION asserted 'only there can it run a cross-provider reviewer (Codex)'; --backend help said 'codex (cross-provider, default) or claude (same-provider fallback)'."
+        }
+      ],
+      "resolution": "Recommendation is now host-aware: Claude(-ish) hosts get a reworded Claude Code recommendation; non-Claude hosts get a capability-framed SUBPROCESS_RECOMMENDATION. CLI help and review()'s docstring now state independence is host-relative. Tests pin the recommendation gating both ways."
+    },
+    {
+      "finding_id": "F006",
+      "state": "resolved",
+      "reviewer_position": "The tests verify the happy-path classification table but not the configuration interactions capable of producing false independence: IMPASSE_ENV inference, invalid hosts, custom endpoints, mode notices, refused backends, unknown-host disclosure.",
+      "host_position": "Verified \u2014 and largely subsumed by the fixes for F001\u2013F005, each of which landed with its own regression test.",
+      "verification": [
+        {
+          "method": "command",
+          "result": "supports",
+          "detail": "Suite grew to 190 checks: IMPASSE_ENV-only inference, unrecognized IMPASSE_HOST, unknown-host e2e disclosure, gateway-endpoint pre-flight, Bedrock exclusion, notice presence/absence per tier, and recommendation gating all pass."
+        }
+      ],
+      "resolution": "Added the adversarial cases enumerated in F001\u2013F005 as regression tests; the unknown-fallback test now asserts the fail-safe behavior instead of enshrining the fail-open one."
+    }
+  ]
+}
