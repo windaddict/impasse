@@ -218,9 +218,13 @@ flowchart TB
 
 For the usual Claude host, genuine independence needs a Codex login; the weaker rungs run on
 Claude alone. The rungs are labeled **relative to the host** driving the protocol (the diagram
-shows the Claude-host case): to a Codex host, the Claude backend is the different-provider rung,
-and the runner computes and discloses the tier accordingly (`IMPASSE_HOST`). Detail:
-[`docs/environments.md`](docs/environments.md).
+shows the Claude-host case): to a Codex host, the Claude backend is the different-provider rung.
+The runner **auto-detects** the common hosts (Claude, Codex, Gemini, Cursor) from their env
+markers — best-effort for Codex, which ships no branded flag — and `IMPASSE_HOST` stays
+authoritative (validated and conflict-checked). Detection is fail-safe: ambiguity or a
+marker/override conflict yields `undetermined`, never an overstated cross-provider claim, and
+env-based detection is trust-floored on the environment's integrity. Detail:
+[`docs/environments.md`](docs/environments.md), [`docs/host-detection.md`](docs/host-detection.md).
 
 ## Install
 

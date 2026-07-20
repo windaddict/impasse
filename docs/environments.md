@@ -13,16 +13,36 @@ same-provider fallback; to a Codex host, the ladder inverts and **`--backend cla
 cross-provider choice**. The runner computes every tier relative to the detected host
 (`independence_tier()`).
 
-Host identity (`detect_host()`): `IMPASSE_HOST` is authoritative
-(`claude | codex | cursor | other`); a Claude host is auto-detected from its **genuine** env
-markers only — deliberately not from `detect_environment()`, whose `IMPASSE_ENV` override is a
-surface-policy knob and must not be able to manufacture a host identity. **A non-Claude host
-adapter MUST export `IMPASSE_HOST`** — a subprocess cannot identify a driver that won't identify
-itself, so an undeclared/unrecognized host is `unknown` and gets `undetermined`, **never a
-positive cross-provider claim** (a human at the CLI can export `IMPASSE_HOST` if the driver is
-known). Hosts that run an operator-selected underlying model (`cursor`, `other`) are likewise
-`undetermined` — provider correlation can't be established in either direction — as is a backend
-routed through an endpoint whose provider can't be attributed (a custom gateway).
+Host identity (`detect_host()` / `host_detection()`): `IMPASSE_HOST` is authoritative
+(`claude | codex | gemini | cursor | other`), and the four common hosts are **auto-detected** from
+genuine, **strict-value** env markers — deliberately not from `detect_environment()`, whose
+`IMPASSE_ENV` override is a surface-policy knob and must not be able to manufacture a host identity:
+
+| Host | Marker (strict value) | Confidence | Provider |
+|---|---|---|---|
+| `claude` | `CLAUDECODE=1` (or a genuine Cowork/chat-sandbox surface marker) | strong | Anthropic |
+| `gemini` | `GEMINI_CLI=1` | strong | Google |
+| `cursor` | `CURSOR_AGENT=1` | — | none (operator-chosen model) |
+| `codex` | `CODEX_SANDBOX=seatbelt` or `CODEX_SANDBOX_NETWORK_DISABLED=1` | **heuristic** | OpenAI |
+
+Detection is **fail-safe**: markers are matched by exact value (an inherited `GEMINI_CLI=0` doesn't
+count); ≥2 attributable markers, or one attributable marker plus `CURSOR_AGENT`, resolve to
+`unknown` (an unordered inherited env set carries no nesting depth, so the driver is genuinely
+ambiguous); and `IMPASSE_HOST` is **validated and conflict-checked** — a nonempty unrecognized value,
+or a value that disagrees with an observed marker, yields `unknown` rather than silently letting a
+weaker marker win. An undeclared/ambiguous host is `unknown` → `undetermined`, **never a positive
+cross-provider claim**. `cursor`/`other` run an operator-selected model, so they too are
+`undetermined` in either direction, as is a backend routed through an unattributable endpoint (a
+custom gateway).
+
+Provenance rides on the result as `host_detection: {method, confidence}`. **Codex is a heuristic:**
+its sandbox-state vars are absent under `--dangerously-bypass-approvals-and-sandbox`, so a
+sandbox-bypassed Codex run is invisible (a safe false-negative → `undetermined`), and when the Codex
+heuristic *does* grant a positive `cross_provider` tier the result carries a **soft
+`independence_notice`** saying so. **Codex users who need a guaranteed label should set
+`IMPASSE_HOST=codex`.** Env markers are unauthenticated inherited strings — the label is only as
+trustworthy as the environment's integrity; see [`host-detection.md`](host-detection.md) for the
+compatibility matrix and the spoofing trust floor.
 
 ## The ladder (strongest → weakest)
 

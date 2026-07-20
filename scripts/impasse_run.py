@@ -485,7 +485,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
 
     manifest = consent.manifest_for_bytes(artifact_bytes)
-    host = lib.detect_host()   # one snapshot up front — every return path reports the host
+    hd = lib.host_detection()  # one snapshot up front — every return path reports the host + provenance
+    host = hd["host"]
     try:
         be = lib.get_backend(backend)
     except (FileNotFoundError, ValueError) as e:
@@ -506,13 +507,18 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     else:
         effort = None
 
-    # Independence is host-relative (lib.independence_tier); the shared formatter names the host
-    # so a downgrade can't read as a property of the backend alone.
-    independence_notice = lib.independence_notice(be.independence, host, be.name, be.provider)
+    # Independence is host-relative. Compute the tier ONCE from this run's single host snapshot (not
+    # be.independence, which get_backend() derived from a SECOND detect_host() call) so host,
+    # confidence, tier, and notice can never disagree within a run (F003). The shared formatter names
+    # the host so a downgrade can't read as a property of the backend alone; the detection confidence
+    # lets a heuristically-detected cross_provider tier carry a soft notice, not a bare positive claim.
+    independence = lib.independence_tier(host, be.provider)
+    independence_notice = lib.independence_notice(
+        independence, host, be.name, be.provider, hd["confidence"])
     # disclosure carried on EVERY return path (success and failure), not just success
-    bmeta = {"backend": be.name, "provider": be.provider, "independence": be.independence,
-             "host": host, "model": model, "effort": effort,
-             "independence_notice": independence_notice}
+    bmeta = {"backend": be.name, "provider": be.provider, "independence": independence,
+             "host": host, "host_detection": {"method": hd["method"], "confidence": hd["confidence"]},
+             "model": model, "effort": effort, "independence_notice": independence_notice}
 
     # The per-run param was validated above; the persisted default is allowlisted on both write
     # (set_default_effort) and read (get_default_effort). So an invalid value here can only come

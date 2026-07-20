@@ -225,27 +225,105 @@ def get_backend(name: str = "codex") -> Backend:
 # surfaces). A host that DOESN'T declare itself gets 'undetermined', never a positive
 # cross-provider claim: a subprocess cannot identify a driver that won't identify itself, so
 # the only fail-safe answer for an unattributed driver is "we don't know".
-KNOWN_HOSTS = ("claude", "codex", "cursor", "other")
+KNOWN_HOSTS = ("claude", "codex", "gemini", "cursor", "other")
 # Hosts attributable to a single model provider. cursor/other run an operator-selected
 # underlying model (a Cursor agent may BE Claude or GPT), so no provider can be attributed.
-_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI"}
+_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI", "gemini": "Google"}
+# Providers that can appear as a REVIEWER BACKEND. Only OpenAI (codex) and Anthropic (claude) ship
+# a backend, so Google is intentionally absent here even though it's a known HOST provider above —
+# adding it would be dead code (independence_tier reads the host provider from _HOST_PROVIDERS).
 _KNOWN_PROVIDERS = ("Anthropic", "OpenAI")
 
 
-def detect_host() -> str:
-    """Best-effort identity of the agent DRIVING the protocol. `IMPASSE_HOST` overrides
-    (authoritative; an unrecognized value is ignored and detection continues). Detection keys
-    off GENUINE Claude surface markers only — deliberately not detect_environment(), whose
-    IMPASSE_ENV override is a surface-policy knob and must not be able to manufacture a host
-    identity (and with it a cross-provider label). Anything else is 'unknown'."""
+# Host markers are matched by STRICT VALUE, not mere presence: env vars are unauthenticated
+# inherited strings, so an inherited GEMINI_CLI=0 or a stray CODEX_SANDBOX=off must NOT count as a
+# host. Codex ships no branded "I am Codex" flag — only sandbox-state vars that signal "running
+# inside Codex's sandbox" and are ABSENT under --dangerously-bypass-approvals-and-sandbox — so codex
+# is a best-effort HEURISTIC (its absence is a safe false-negative), never a strong identity contract.
+_FALSY_MARKER = frozenset({"", "0", "false", "off", "no"})
+
+
+def _affirmatively_set(var: str) -> bool:
+    """A presence-style marker counts only when AFFIRMATIVELY set — a stray inherited '0'/'off'/''
+    must not read as present (strict-value rule; env vars are unauthenticated inherited strings)."""
+    v = os.environ.get(var)
+    return v is not None and v.strip().lower() not in _FALSY_MARKER
+
+
+def _claude_marker() -> bool:
+    # Genuine Anthropic surface markers. CLAUDECODE=1 is the strict primary (empirically the value);
+    # CLAUDE_SURFACE is an allowlist; the remaining flags are presence-style but matched affirmatively
+    # so a falsy inherited value can't manufacture a (strong) Claude identity — the F001 fix.
+    return bool(os.environ.get("CLAUDECODE") == "1"
+                or os.environ.get("CLAUDE_SURFACE") in ("cowork", "chat", "sandbox")
+                or _affirmatively_set("CLAUDE_CODE_ENTRYPOINT")
+                or _affirmatively_set("CLAUDE_COWORK")
+                or _affirmatively_set("CLAUDE_CHAT_SANDBOX"))
+
+
+def _attributable_hosts() -> set:
+    """The set of provider-attributable hosts whose STRICT marker is present — a subset of
+    {claude, codex, gemini}. Cursor is deliberately excluded: it wraps an operator-chosen model,
+    so it names no provider."""
+    hosts = set()
+    if _claude_marker():
+        hosts.add("claude")
+    if os.environ.get("GEMINI_CLI") == "1":
+        hosts.add("gemini")
+    if (os.environ.get("CODEX_SANDBOX") == "seatbelt"
+            or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"):
+        hosts.add("codex")
+    return hosts
+
+
+def host_detection() -> dict:
+    """Identify the agent DRIVING the protocol, WITH detection provenance.
+
+    Returns {"host", "method", "confidence"} where host ∈ KNOWN_HOSTS ∪ {"unknown"},
+    method ∈ {"override", "auto", "none"}, confidence ∈ {"asserted", "strong", "heuristic", "none"}.
+    Fail-safe by construction: marker ambiguity (≥2 attributable, or one attributable + Cursor), an
+    invalid override, or an override that disagrees with an observed marker ALL resolve to
+    "unknown" — never a guessed positive host, and confidence "none" never rides a positive tier.
+
+    Keys off GENUINE host markers only — deliberately NOT detect_environment(), whose IMPASSE_ENV
+    override is a surface-policy knob and must not be able to manufacture a host identity."""
+    A = _attributable_hosts()                       # ⊆ {claude, codex, gemini}
+    cursor = os.environ.get("CURSOR_AGENT") == "1"
+
+    # 1. IMPASSE_HOST override — authoritative, but validated and conflict-checked.
     forced = os.environ.get("IMPASSE_HOST")
-    if forced in KNOWN_HOSTS:
-        return forced
-    if (os.environ.get("CLAUDECODE") == "1" or os.environ.get("CLAUDE_CODE_ENTRYPOINT")
-            or os.environ.get("CLAUDE_COWORK") or os.environ.get("CLAUDE_CHAT_SANDBOX")
-            or os.environ.get("CLAUDE_SURFACE") in ("cowork", "chat", "sandbox")):
-        return "claude"
-    return "unknown"
+    if forced:                                      # nonempty; absent/"" falls through to markers
+        if forced not in KNOWN_HOSTS:
+            # A present-but-invalid override is evidence of operator misconfiguration; refuse rather
+            # than silently continue and let a weaker inherited marker manufacture a positive tier.
+            return {"host": "unknown", "method": "override", "confidence": "none"}
+        if A and A != {forced}:
+            # Override names one host but an observed attributable marker names another — disagree.
+            return {"host": "unknown", "method": "override", "confidence": "none"}
+        return {"host": forced, "method": "override", "confidence": "asserted"}
+
+    # 2. No override — resolve from markers, failing safe on any ambiguity.
+    if len(A) >= 2:
+        return {"host": "unknown", "method": "auto", "confidence": "none"}
+    if len(A) == 1:
+        if cursor:
+            # One attributable marker AND Cursor coexist: an unordered inherited env set carries no
+            # nesting depth, so we cannot tell which agent is the inner driver. Refuse to guess.
+            return {"host": "unknown", "method": "auto", "confidence": "none"}
+        host = next(iter(A))
+        return {"host": host, "method": "auto",
+                "confidence": "heuristic" if host == "codex" else "strong"}
+    if cursor:
+        return {"host": "cursor", "method": "auto", "confidence": "none"}
+    return {"host": "unknown", "method": "auto", "confidence": "none"}
+
+
+def detect_host() -> str:
+    """Best-effort identity of the agent DRIVING the protocol (host string only; see host_detection()
+    for provenance). `IMPASSE_HOST` overrides (authoritative, but a nonempty unrecognized value or one
+    that disagrees with an observed marker yields 'unknown', not a fallthrough). Anything unresolved
+    is 'unknown'."""
+    return host_detection()["host"]
 
 
 def independence_tier(host: str, backend_provider: str) -> str:
@@ -267,10 +345,24 @@ def independence_tier(host: str, backend_provider: str) -> str:
     return "undetermined"
 
 
-def independence_notice(tier: str, host: str, backend_name: str, provider: str) -> str | None:
-    """The mandatory downgrade disclosure for a tier, or None when none is owed
-    (cross_provider). ONE formatter shared by review() and review_mode(), so no surface that
-    reports a downgraded tier can forget the notice that must ride with it."""
+def independence_notice(tier: str, host: str, backend_name: str, provider: str,
+                        confidence: str | None = None) -> str | None:
+    """The mandatory disclosure for a tier, or None when none is owed. ONE formatter shared by
+    review() and review_mode(), so no surface that reports a downgraded — or heuristically-detected —
+    tier can forget the notice that must ride with it.
+
+    `confidence` is the host_detection() confidence. A cross_provider tier owes no *downgrade* notice,
+    but when it rests on a HEURISTIC host detection (today: codex via sandbox-state vars, no branded
+    flag) it carries a SOFT notice so a guessed positive claim can't read as a confirmed one."""
+    if tier == "cross_provider":
+        if confidence == "heuristic":
+            return (
+                f"⚠ Cross-provider label INFERRED from a heuristic: the '{host}' host was detected "
+                f"from a sandbox-state condition, not a branded identity flag (reviewer '{backend_name}' "
+                f"via {provider}). The independence is likely real but not firmly established — a "
+                "sandbox-bypassed run would be undetectable. Set IMPASSE_HOST=" + host + " to confirm it."
+            )
+        return None
     if tier == "same_provider":
         return (
             f"⚠ Same-provider review via {provider} (backend '{backend_name}', host '{host}'): "
@@ -395,7 +487,15 @@ def review_mode(kind: str, *, environment: str | None = None, codex_available: b
     """
     kind = (kind or "").strip().lower()   # normalize so 'Code'/'CODE' can't slip past the code gate
     env = environment or detect_environment()
-    hst = host if host in KNOWN_HOSTS else detect_host()
+    # An explicit --host arg is operator-asserted; otherwise auto-detect WITH provenance so a
+    # heuristically-detected host carries its soft notice here too (this pre-flight is its own
+    # disclosure surface).
+    if host in KNOWN_HOSTS:
+        hd = {"host": host, "method": "override", "confidence": "asserted"}
+    else:
+        hd = host_detection()
+    hst = hd["host"]
+    hdblock = {"method": hd["method"], "confidence": hd["confidence"]}
     # The Claude Code pitch is only apt for a Claude(-ish) host; other hosts get the
     # capability-framed recommendation (their own shell already qualifies).
     surface_rec = CLAUDE_CODE_RECOMMENDATION if hst in ("claude", "unknown") else SUBPROCESS_RECOMMENDATION
@@ -418,23 +518,23 @@ def review_mode(kind: str, *, environment: str | None = None, codex_available: b
     if candidates:
         name, provider, tier = candidates[0]
         return {"mode": name, "tier": tier, "allowed": True,
-                "notice": independence_notice(tier, hst, name, provider),
-                "recommendation": rec, "host": hst,
+                "notice": independence_notice(tier, hst, name, provider, hd["confidence"]),
+                "recommendation": rec, "host": hst, "host_detection": hdblock,
                 "reason": f"strongest available reviewer relative to the {hst} host: "
                           f"{name} ({tier})"}
     # No subprocess reviewer available on this surface.
     if kind == "code":
         return {"mode": "refuse", "tier": None, "allowed": False, "notice": None,
-                "recommendation": surface_rec, "host": hst,
+                "recommendation": surface_rec, "host": hst, "host_detection": hdblock,
                 "reason": "code review needs a runnable reviewer and executable verification, "
                           "which requires a surface that can run one"}
     if self_review_allowed(env):
         return {"mode": "self_review", "tier": "self_review", "allowed": True,
                 "notice": self_review_notice(env), "recommendation": CLAUDE_CODE_RECOMMENDATION,
-                "host": hst,
+                "host": hst, "host_detection": hdblock,
                 "reason": f"no reviewer subprocess in {_ENV_LABELS.get(env, env)}; self-review permitted"}
     return {"mode": "refuse", "tier": None, "allowed": False, "notice": None,
-            "recommendation": surface_rec, "host": hst,
+            "recommendation": surface_rec, "host": hst, "host_detection": hdblock,
             "reason": f"no reviewer subprocess and self-review not permitted in {_ENV_LABELS.get(env, env)}"}
 
 

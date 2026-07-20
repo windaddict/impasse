@@ -285,10 +285,14 @@ host's own context there throws away the independence you actually have. Detail:
   proof. Independence is a **ladder, computed relative to the host**: different provider (for
   this Claude Code adapter: Codex, the default) > same provider, fresh process (`claude -p`) >
   **self-review** (the host model in its own context — the last resort in the chat sandbox /
-  Cowork where no reviewer subprocess can run). The runner auto-detects a Claude host; a
-  non-Claude host driving this protocol must export `IMPASSE_HOST` (`codex|cursor|other`), which
-  inverts the ladder honestly — to a Codex host, `--backend claude` is the cross-provider
-  reviewer. An undeclared host gets `undetermined`, never a positive cross-provider claim.
+  Cowork where no reviewer subprocess can run). The runner **auto-detects** the common hosts
+  (Claude, Codex, Gemini, Cursor) from strict-value env markers — best-effort for Codex, which
+  has no branded flag — and `IMPASSE_HOST` (`claude|codex|gemini|cursor|other`) stays
+  authoritative but is validated and conflict-checked. To a Codex/Gemini host the ladder inverts
+  honestly — `--backend claude` becomes a cross-provider reviewer. Ambiguity, a marker/override
+  conflict, or an unattributable host all get `undetermined`, never a positive cross-provider
+  claim; a positive tier resting on the Codex heuristic carries a soft notice
+  (see `docs/host-detection.md`).
   Each rung down is flagged: the runner emits `independence_notice` for a
   same-provider or undetermined tier; the self-review tier emits an even louder
   `lib.self_review_notice` and is refused for code and outside the sandbox/Cowork. Surface

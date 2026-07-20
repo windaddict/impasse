@@ -5,6 +5,32 @@ All notable changes to Impasse are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Host auto-detection (phase 2 of multi-host support)
+- `detect_host()` now **auto-detects four hosts** from genuine, strict-value env markers, not just
+  Claude: `CLAUDECODE=1` → `claude`, `GEMINI_CLI=1` → `gemini` (new provider **Google**),
+  `CURSOR_AGENT=1` → `cursor`, and `CODEX_SANDBOX=seatbelt` / `CODEX_SANDBOX_NETWORK_DISABLED=1` →
+  `codex`. A non-Claude host no longer has to export `IMPASSE_HOST` to get an honest tier — though it
+  still can, and that remains authoritative.
+- **Fail-safe by construction.** Markers match by exact value (an inherited `GEMINI_CLI=0` doesn't
+  count); ≥2 attributable markers, or one attributable marker plus Cursor, resolve to `unknown`
+  (ambiguous inner-driver — an unordered env set has no nesting depth); and `IMPASSE_HOST` is now
+  **validated and conflict-checked** — a nonempty unrecognized value, or one that disagrees with an
+  observed marker, yields `unknown` instead of silently falling through. *Behavior change:* a nonempty
+  unrecognized `IMPASSE_HOST` previously continued detection; it now returns `unknown`.
+- **`codex` is a heuristic, not a contract.** OpenAI ships no branded host flag; the sandbox-state
+  vars are absent under `--dangerously-bypass-approvals-and-sandbox` (a safe false-negative). New
+  `host_detection: {method, confidence}` provenance rides on `review()`/`mode` results, and a positive
+  `cross_provider` tier resting on the Codex heuristic carries a **soft `independence_notice`** so a
+  guess can't read as a confirmed claim. Guaranteed labeling: `IMPASSE_HOST=codex`.
+- **Trust floor, disclosed.** Env markers are unauthenticated inherited strings; the mitigations
+  eliminate accidental collisions and ambiguity but cannot stop a deliberately/accidentally injected
+  *exact* marker. New [`docs/host-detection.md`](docs/host-detection.md) carries the per-host
+  compatibility matrix (marker, citation, verified version/OS) and the spoofing caveat. The unit
+  suite proves the mapping logic (a 128-cell decision matrix vs an independent truth table); it cannot
+  detect upstream marker drift — a periodic live smoke test is the documented follow-up.
+- Plan of record: [`docs/proposals/multi-host-autodetection.md`](docs/proposals/multi-host-autodetection.md),
+  hardened across three cross-provider Impasse reviews (6 findings → 3 → 0 fail-open paths).
+
 ### Added
 - Schemas: `reviewer-response.v1.json` and `reconciliation-result.v1.json` — the
   reviewer emits observations with anchored evidence; reconciliation records the

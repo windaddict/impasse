@@ -712,12 +712,13 @@ def main() -> int:
         os.environ.pop("IMPASSE_ENV", None)
         os.environ["CLAUDECODE"] = "1"
         check(lib.detect_host() == "claude", "detect_host: genuine Claude Code markers -> claude host")
+        os.environ.pop("CLAUDECODE", None)   # clear the marker before exercising the override alone
         os.environ["IMPASSE_HOST"] = "codex"
         check(lib.detect_host() == "codex", "detect_host: IMPASSE_HOST overrides auto-detection")
         os.environ["IMPASSE_HOST"] = "skynet"
-        check(lib.detect_host() == "claude", "detect_host: unrecognized IMPASSE_HOST ignored, detection continues")
-        os.environ.pop("IMPASSE_HOST", None)
-        os.environ.pop("CLAUDECODE", None)   # back to an undeclared host for the e2e below
+        check(lib.detect_host() == "unknown",
+              "detect_host: nonempty-invalid IMPASSE_HOST -> unknown (refuse, not fallthrough)")
+        os.environ.pop("IMPASSE_HOST", None)   # undeclared host for the e2e below
         check(lib.independence_tier("claude", "OpenAI") == "cross_provider", "tier: claude host + OpenAI reviewer -> cross_provider")
         check(lib.independence_tier("claude", "Anthropic") == "same_provider", "tier: claude host + Anthropic reviewer -> same_provider")
         check(lib.independence_tier("codex", "Anthropic") == "cross_provider", "tier: codex host + Anthropic reviewer -> cross_provider (ladder inverts)")
@@ -804,6 +805,163 @@ def main() -> int:
         with contextlib.redirect_stdout(buf):
             check(run._main(["set-effort"]) == 0 and "backend default" in buf.getvalue(),
                   "set-effort: bare show path works (no persisted value)")
+
+        # === phase 2: strict-value auto-detection of Codex / Gemini / Cursor hosts, with provenance ===
+        _p2markers = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_COWORK", "CLAUDE_SURFACE",
+                      "CLAUDE_CHAT_SANDBOX", "GEMINI_CLI", "CURSOR_AGENT", "CODEX_SANDBOX",
+                      "CODEX_SANDBOX_NETWORK_DISABLED", "IMPASSE_HOST")
+        _p2saved = {k: os.environ.pop(k, None) for k in _p2markers}
+
+        def _p2set(**kw):
+            for k in _p2markers:
+                os.environ.pop(k, None)
+            os.environ.update(kw)
+        try:
+            # single-marker strict-value detection + provenance confidence
+            _p2set(GEMINI_CLI="1")
+            check(lib.host_detection() == {"host": "gemini", "method": "auto", "confidence": "strong"},
+                  "detect: GEMINI_CLI=1 -> gemini/strong")
+            _p2set(CODEX_SANDBOX="seatbelt")
+            check(lib.host_detection() == {"host": "codex", "method": "auto", "confidence": "heuristic"},
+                  "detect: CODEX_SANDBOX=seatbelt -> codex/heuristic (sandbox-state, not a branded flag)")
+            _p2set(CODEX_SANDBOX_NETWORK_DISABLED="1")
+            check(lib.detect_host() == "codex", "detect: CODEX_SANDBOX_NETWORK_DISABLED=1 -> codex")
+            _p2set(CURSOR_AGENT="1")
+            check(lib.host_detection() == {"host": "cursor", "method": "auto", "confidence": "none"},
+                  "detect: CURSOR_AGENT=1 -> cursor/none (not provider-attributable)")
+
+            # strict-value negatives: benign/false values must NOT count as a host. Includes the
+            # Claude surface flags, which are affirmatively-matched, not truthy (F001 in the diff review).
+            for var, val, why in (("GEMINI_CLI", "0", "GEMINI_CLI=0"), ("GEMINI_CLI", "", "GEMINI_CLI empty"),
+                                  ("CODEX_SANDBOX", "1", "CODEX_SANDBOX=1 (value is 'seatbelt')"),
+                                  ("CODEX_SANDBOX", "off", "CODEX_SANDBOX=off"), ("CURSOR_AGENT", "0", "CURSOR_AGENT=0"),
+                                  ("CLAUDE_COWORK", "0", "CLAUDE_COWORK=0"), ("CLAUDE_CHAT_SANDBOX", "off", "CLAUDE_CHAT_SANDBOX=off"),
+                                  ("CLAUDE_CODE_ENTRYPOINT", "0", "CLAUDE_CODE_ENTRYPOINT=0")):
+                _p2set(**{var: val})
+                check(lib.detect_host() == "unknown", f"detect strict-value: {why} -> unknown")
+            # ...but an AFFIRMATIVE Claude surface marker (no CLAUDECODE) still resolves to claude
+            _p2set(CLAUDE_CODE_ENTRYPOINT="cli")
+            check(lib.detect_host() == "claude", "detect: CLAUDE_CODE_ENTRYPOINT=cli (affirmative) -> claude")
+            _p2set(CLAUDE_COWORK="1")
+            check(lib.detect_host() == "claude", "detect: CLAUDE_COWORK=1 -> claude")
+
+            # ambiguity / conflict fail-safe (F001): never guess a driver from an unordered marker set
+            _p2set(CLAUDECODE="1", CURSOR_AGENT="1")
+            check(lib.detect_host() == "unknown", "detect: claude + cursor -> unknown (can't tell inner driver)")
+            _p2set(GEMINI_CLI="1", CODEX_SANDBOX="seatbelt")
+            check(lib.detect_host() == "unknown", "detect: gemini + codex -> unknown (2 attributable)")
+            _p2set(CLAUDECODE="1", GEMINI_CLI="1", CODEX_SANDBOX="seatbelt")
+            check(lib.detect_host() == "unknown", "detect: all three attributable -> unknown")
+
+            # override validation + conflict-check (F002/F003)
+            _p2set(IMPASSE_HOST="gemini")
+            check(lib.host_detection() == {"host": "gemini", "method": "override", "confidence": "asserted"},
+                  "override: IMPASSE_HOST=gemini alone -> gemini/asserted")
+            _p2set(IMPASSE_HOST="gemini", CODEX_SANDBOX="seatbelt")
+            check(lib.detect_host() == "unknown", "override: disagrees with observed marker -> unknown (fail-safe)")
+            _p2set(IMPASSE_HOST="zzinvalid", CLAUDECODE="1")
+            check(lib.detect_host() == "unknown",
+                  "override: nonempty-invalid does NOT fall through to a weaker marker (F002)")
+            _p2set(IMPASSE_HOST="", CLAUDECODE="1")
+            check(lib.detect_host() == "claude", "override: empty string == absent -> markers resolve")
+
+            # Explicit decision-pinning for override + Cursor (operator ruling: Cursor is
+            # non-attributable, so it does NOT contradict an attributable override — the escape hatch
+            # resolves the very claude+cursor ambiguity auto-mode refuses). Hand-written, NOT derived
+            # from the matrix oracle, so the intended behavior is asserted independently (F004).
+            _p2set(IMPASSE_HOST="claude", CURSOR_AGENT="1")
+            check(lib.detect_host() == "claude", "override+cursor: IMPASSE_HOST=claude + CURSOR_AGENT=1 -> claude (honored)")
+            _p2set(IMPASSE_HOST="gemini", CURSOR_AGENT="1")
+            check(lib.detect_host() == "gemini", "override+cursor: IMPASSE_HOST=gemini + CURSOR_AGENT=1 -> gemini (honored)")
+            _p2set(IMPASSE_HOST="cursor", CURSOR_AGENT="1")
+            check(lib.detect_host() == "cursor", "override+cursor: IMPASSE_HOST=cursor + CURSOR_AGENT=1 -> cursor (agrees)")
+            # but an ATTRIBUTABLE marker that disagrees with the override still conflicts, cursor or not
+            _p2set(IMPASSE_HOST="claude", CODEX_SANDBOX="seatbelt", CURSOR_AGENT="1")
+            check(lib.detect_host() == "unknown", "override+cursor: attributable marker disagreeing with override -> unknown")
+
+            # exhaustive matrix: every {A-subset} x {cursor} x {override} cell vs an INDEPENDENT truth fn,
+            # asserting both detect_host output AND that unknown/cursor never yield a positive tier (F003 rev2)
+            def _expected(A, cursor, override):
+                if override:                                    # nonempty
+                    if override not in lib.KNOWN_HOSTS:
+                        return "unknown"
+                    if A and A != {override}:
+                        return "unknown"
+                    return override
+                if len(A) >= 2:
+                    return "unknown"
+                if len(A) == 1:
+                    return "unknown" if cursor else next(iter(A))
+                return "cursor" if cursor else "unknown"
+
+            import itertools
+            _marker_for = {"claude": ("CLAUDECODE", "1"), "gemini": ("GEMINI_CLI", "1"),
+                           "codex": ("CODEX_SANDBOX", "seatbelt")}
+            _attr = ("claude", "gemini", "codex")
+            _subsets = [set(c) for r in range(len(_attr) + 1) for c in itertools.combinations(_attr, r)]
+            _matrix_ok, _cells = True, 0
+            for A in _subsets:
+                for cur in (False, True):
+                    for ov in (None, "", "claude", "codex", "gemini", "cursor", "other", "zzinvalid"):
+                        kw = {}
+                        for h in A:
+                            k, v = _marker_for[h]
+                            kw[k] = v
+                        if cur:
+                            kw["CURSOR_AGENT"] = "1"
+                        if ov is not None:
+                            kw["IMPASSE_HOST"] = ov
+                        _p2set(**kw)
+                        _cells += 1
+                        got = lib.detect_host()
+                        exp = _expected(A, cur, ov or None)
+                        if got != exp:
+                            _matrix_ok = False
+                            print(f"   matrix MISMATCH A={sorted(A)} cursor={cur} override={ov!r}: got {got!r} exp {exp!r}")
+                        if exp in ("unknown", "cursor") and (
+                                lib.independence_tier(got, "OpenAI") == "cross_provider"
+                                or lib.independence_tier(got, "Anthropic") == "cross_provider"):
+                            _matrix_ok = False
+                            print(f"   matrix TIER LEAK A={sorted(A)} cursor={cur} override={ov!r}: host {got!r}")
+            check(_matrix_ok, f"detect_host matrix ({_cells} cells): all match the independent truth table, no positive-tier leak")
+
+            # tier reachability for the new gemini host
+            check(lib.independence_tier("gemini", "OpenAI") == "cross_provider", "tier: gemini host + OpenAI -> cross_provider")
+            check(lib.independence_tier("gemini", "Anthropic") == "cross_provider", "tier: gemini host + Anthropic -> cross_provider")
+
+            # e2e review(): gemini host (strong) + codex backend -> cross_provider, NULL notice, strong provenance
+            _p2set(GEMINI_CLI="1")
+            rg = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", no_record=True)
+            check(rg.get("host") == "gemini" and rg.get("independence") == "cross_provider"
+                  and rg.get("independence_notice") is None
+                  and rg.get("host_detection") == {"method": "auto", "confidence": "strong"},
+                  "review(codex, gemini host): cross_provider, null notice, strong provenance")
+            # e2e review(): codex host (heuristic) + claude backend -> cross_provider WITH the soft notice
+            _p2set(CODEX_SANDBOX="seatbelt")
+            rch = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+            check(rch.get("host") == "codex" and rch.get("independence") == "cross_provider"
+                  and rch.get("host_detection") == {"method": "auto", "confidence": "heuristic"}
+                  and "INFERRED" in (rch.get("independence_notice") or ""),
+                  "review(claude, codex heuristic host): cross_provider carries the soft heuristic notice")
+
+            # review_mode() must ALSO carry the heuristic notice on its own path (F003 rev3)
+            _p2set(CODEX_SANDBOX="seatbelt")
+            m = lib.review_mode("decision", environment="claude_code", codex_available=True, claude_available=True)
+            check(m["host"] == "codex" and m["tier"] == "cross_provider"
+                  and m["host_detection"] == {"method": "auto", "confidence": "heuristic"}
+                  and "INFERRED" in (m["notice"] or ""),
+                  "review_mode: codex heuristic host -> claude cross_provider WITH soft notice")
+            _p2set(CURSOR_AGENT="1")
+            m = lib.review_mode("decision", environment="claude_code", codex_available=True, claude_available=True)
+            check(m["host"] == "cursor" and m["tier"] == "undetermined"
+                  and m["host_detection"]["confidence"] == "none",
+                  "review_mode: cursor host -> undetermined, confidence none")
+        finally:
+            for k in _p2markers:
+                os.environ.pop(k, None)
+            for k, v in _p2saved.items():
+                if v is not None:
+                    os.environ[k] = v
     finally:
         os.environ.pop("IMPASSE_HOST", None)
         os.environ.pop("CLAUDECODE", None)
@@ -849,6 +1007,10 @@ def main() -> int:
     def _spy_m(argv, **kw):
         argvs.append(list(argv))
         return _orig_sup_m(argv, **kw)
+    # A real Codex host does not carry Claude's markers; clear the ambient one so IMPASSE_HOST=codex
+    # is not (correctly) rejected as an override↔marker conflict under phase-2 detection.
+    _claude_ambient = {k: os.environ.pop(k, None) for k in (
+        "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_COWORK", "CLAUDE_SURFACE", "CLAUDE_CHAT_SANDBOX")}
     try:
         run.supervise = _spy_m
         os.environ["IMPASSE_HOST"] = "codex"
@@ -864,6 +1026,9 @@ def main() -> int:
         os.environ.pop("IMPASSE_CODEX_EFFORT", None)
         os.environ["IMPASSE_HOST"] = "claude"   # back to the suite baseline
         os.environ["FAKE_MODE"] = "valid"
+        for _k, _v in _claude_ambient.items():
+            if _v is not None:
+                os.environ[_k] = _v
     check(res_m["ok"] is True and res_m.get("host") == "codex" and res_m.get("effort") == "high"
           and "Same-provider" in (res_m.get("independence_notice") or ""),
           "matrix: codex host + env effort + output retry -> all metadata correct after recovery")
