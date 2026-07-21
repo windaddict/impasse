@@ -17,9 +17,10 @@ runner says so — use `--backend claude` there instead. See `docs/environments.
 ## Resolution
 
 Order: `IMPASSE_CODEX_BIN` / `CODEX_BIN` override → `PATH` → known install locations
-(Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.npm-global/bin`, the macOS desktop app at
-`/Applications/Codex.app/Contents/Resources/codex`, and the Git-Bash `%APPDATA%\npm` shim).
-nvm/fnm installs are on `PATH` in a normal shell; from a stripped non-interactive `PATH`, set
+(Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.npm-global/bin`, the macOS desktop app —
+`/Applications/ChatGPT.app/Contents/Resources/codex` since the bundle rebranded to **ChatGPT.app**,
+and the legacy `/Applications/Codex.app/...` for older installs — and the Git-Bash `%APPDATA%\npm`
+shim). nvm/fnm installs are on `PATH` in a normal shell; from a stripped non-interactive `PATH`, set
 `IMPASSE_CODEX_BIN` rather than let it guess a Node version.
 
 ## Invocation (what the runner does)

@@ -95,6 +95,10 @@ def resolve_codex_command() -> list[str] | None:
         os.path.join(home, ".local/bin/codex"),
         os.path.join(home, ".npm-global/bin/codex"),
         f"{appdata}/npm/codex" if appdata else "",
+        # The Codex desktop app rebranded its bundle to ChatGPT.app (observed 2026-07 on
+        # codex-cli 0.145.0-alpha.18); keep the legacy Codex.app path too for older installs.
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        os.path.join(home, "Applications/ChatGPT.app/Contents/Resources/codex"),
         "/Applications/Codex.app/Contents/Resources/codex",
         os.path.join(home, "Applications/Codex.app/Contents/Resources/codex"),
         "/opt/Codex/codex",
@@ -489,9 +493,13 @@ def review_mode(kind: str, *, environment: str | None = None, codex_available: b
     env = environment or detect_environment()
     # An explicit --host arg is operator-asserted; otherwise auto-detect WITH provenance so a
     # heuristically-detected host carries its soft notice here too (this pre-flight is its own
-    # disclosure surface).
+    # disclosure surface). An explicitly-passed "unknown" is honored authoritatively (NOT re-detected)
+    # so a caller that already snapshotted the host — review()'s `auto` path — gets selection based on
+    # the SAME host it reports (F001); its provenance stays honest (auto/none, not an operator claim).
     if host in KNOWN_HOSTS:
         hd = {"host": host, "method": "override", "confidence": "asserted"}
+    elif host == "unknown":
+        hd = {"host": "unknown", "method": "auto", "confidence": "none"}
     else:
         hd = host_detection()
     hst = hd["host"]

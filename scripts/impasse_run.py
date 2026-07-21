@@ -472,21 +472,35 @@ def _fail(code, message, kind, notice, manifest, termination=None, retryable=Non
     return r
 
 
-def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "codex",
+def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "auto",
            schema_path: str | None = None, approve_send: str | None = None,
            effort: str | None = None, model: str | None = None, wall_timeout: float = 300.0,
            idle_timeout: float = 300.0, no_record: bool = False, raw: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
-    `backend` selects the reviewer ('codex', the default, or 'claude'); its independence tier is
-    computed relative to the detected host, and any downgraded tier (same_provider/undetermined)
-    carries an `independence_notice` the host must surface."""
+    `backend` selects the reviewer: 'auto' (the default) picks the most host-independent AVAILABLE
+    backend for the detected host (to a Claude host, 'codex'; to a Codex host, 'claude'), or force
+    'codex'/'claude' explicitly. The tier is computed relative to the detected host, and any
+    downgraded tier (same_provider/undetermined) carries an `independence_notice` the host surfaces."""
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
 
     manifest = consent.manifest_for_bytes(artifact_bytes)
     hd = lib.host_detection()  # one snapshot up front — every return path reports the host + provenance
     host = hd["host"]
+    # F002: 'auto' selects the most host-independent AVAILABLE backend, mirroring the `mode`
+    # pre-flight (review_mode) — so a bare review on a Codex host picks the cross-provider `claude`
+    # backend instead of the same-provider `codex` default. review_mode already accounts for
+    # availability, endpoint attribution, and the Bedrock/Vertex refusal; we pass the host snapshot
+    # so selection and the reported tier agree. The result tier is still computed below from `host`.
+    if backend == "auto":
+        sel = lib.review_mode(kind, codex_available=bool(lib.resolve_codex_command()),
+                              claude_available=bool(lib.resolve_claude_command()), host=host)
+        if sel["mode"] not in ("codex", "claude"):
+            msg = "no reviewer backend available (install codex or the claude CLI): " + sel["reason"]
+            return {**_fail("backend_error", msg, kind, msg, manifest), "host": host,
+                    "host_detection": {"method": hd["method"], "confidence": hd["confidence"]}}
+        backend = sel["mode"]
     try:
         be = lib.get_backend(backend)
     except (FileNotFoundError, ValueError) as e:
@@ -696,10 +710,10 @@ def _main(argv=None) -> int:
     rv.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     rv.add_argument("--instruction-file", required=True)
     rv.add_argument("--artifact-file", required=True)
-    rv.add_argument("--backend", default="codex", choices=["codex", "claude"],
-                    help="reviewer backend (default codex). Independence is computed relative to "
-                         "the host: to a Claude host codex is cross-provider; to a Codex host "
-                         "claude is. See docs/environments.md.")
+    rv.add_argument("--backend", default="auto", choices=["auto", "codex", "claude"],
+                    help="reviewer backend (default 'auto': pick the most host-independent available "
+                         "backend — to a Claude host codex, to a Codex host claude). Force 'codex' or "
+                         "'claude' to override. See docs/environments.md.")
     rv.add_argument("--schema", default=None)
     rv.add_argument("--approve-send", default=None)
     rv.add_argument("--effort", default=None, choices=sorted(_ALLOWED_EFFORT),

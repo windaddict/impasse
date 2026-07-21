@@ -286,6 +286,35 @@ def main() -> int:
         r = run.supervise(["bash", "-c", "yes | head -c 5000"], max_output_bytes=1000, wall_timeout=10, idle_timeout=5)
         check(r.stdout_truncated is True and len(r.stdout) == 1000, "supervise: output truncated at max_output_bytes")
 
+    # --- resolver finds the codex binary in the rebranded ChatGPT.app bundle ---
+    # (The Codex desktop app moved its binary to ~/Applications/ChatGPT.app/.../codex.) Fake the
+    # HOME-relative bundle, strip PATH + overrides so only the known-locations branch can match.
+    _rz_home, _rz_path = os.environ.get("HOME"), os.environ.get("PATH")
+    _rz_ov = {k: os.environ.pop(k, None) for k in ("IMPASSE_CODEX_BIN", "CODEX_BIN")}
+    _rz_dir = os.path.join(tmp, "resolver-home")
+    try:
+        _rz_bin = os.path.join(_rz_dir, "Applications/ChatGPT.app/Contents/Resources/codex")
+        os.makedirs(os.path.dirname(_rz_bin), exist_ok=True)
+        with open(_rz_bin, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(_rz_bin, 0o755)
+        os.environ["HOME"] = _rz_dir
+        os.environ["PATH"] = os.path.join(tmp, "no-such-bin")   # ensure `which codex` misses
+        # On a machine WITH a real /Applications/ChatGPT.app the absolute path matches first; without
+        # one, our HOME-relative fake matches. Either proves the ChatGPT.app branch resolves.
+        _rz = lib.resolve_codex_command()
+        check(_rz is not None and _rz[0].endswith("ChatGPT.app/Contents/Resources/codex"),
+              "resolve_codex_command: finds the binary in the rebranded ChatGPT.app bundle")
+    finally:
+        for _k, _v in (("HOME", _rz_home), ("PATH", _rz_path)):
+            if _v is None:
+                os.environ.pop(_k, None)   # was absent -> remove the temp value, don't leak it
+            else:
+                os.environ[_k] = _v
+        for _k, _v in _rz_ov.items():
+            if _v is not None:
+                os.environ[_k] = _v
+
     # --- review() end-to-end via a fake codex backend ---
     fake = os.path.join(tmp, "fake-codex")
     with open(fake, "w") as f:
@@ -739,7 +768,9 @@ def main() -> int:
         check(rc["ok"] and rc.get("independence") == "cross_provider" and rc.get("independence_notice") is None,
               "review(claude, codex host): cross-provider, no downgrade notice")
         check(rc.get("host") == "codex", "review: result reports the host")
-        rx = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+        # force --backend codex: the same-provider path we're asserting is now the NON-default
+        # under a codex host (auto would pick claude — see the F002 bare-review tests below)
+        rx = run.review(kind="code", instruction="review", artifact_bytes=b"code", backend="codex", no_record=True)
         check(rx.get("independence") == "same_provider" and "Same-provider" in (rx.get("independence_notice") or ""),
               "review(codex, codex host): same-provider notice fires (was mislabeled cross before)")
         os.environ["IMPASSE_HOST"] = "cursor"
@@ -944,6 +975,46 @@ def main() -> int:
                   and "INFERRED" in (rch.get("independence_notice") or ""),
                   "review(claude, codex heuristic host): cross_provider carries the soft heuristic notice")
 
+            # F002: the DEFAULT backend is host-aware ('auto'). A BARE review (no --backend) on a
+            # Codex host must auto-select the cross-provider claude backend, not the same-provider codex.
+            _p2set(CODEX_SANDBOX="seatbelt")
+            ra = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", no_record=True)
+            check(ra.get("ok") and ra.get("host") == "codex" and ra.get("backend") == "claude"
+                  and ra.get("independence") == "cross_provider",
+                  "F002: bare review on a codex host auto-selects the claude (cross-provider) backend")
+            # ...and on a Claude host the default still resolves to codex (unchanged behavior)
+            _p2set(CLAUDECODE="1")
+            rcl = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", no_record=True)
+            check(rcl.get("ok") and rcl.get("host") == "claude" and rcl.get("backend") == "codex"
+                  and rcl.get("independence") == "cross_provider",
+                  "F002: bare review on a claude host auto-selects codex (unchanged)")
+            # an explicit --backend still overrides auto (force same-provider if the operator insists)
+            _p2set(CODEX_SANDBOX="seatbelt")
+            rfx = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="codex", no_record=True)
+            check(rfx.get("backend") == "codex" and rfx.get("independence") == "same_provider",
+                  "F002: explicit --backend codex overrides auto (same-provider, honestly labeled)")
+
+            # F002 availability (the fail-open guard): when the cross-provider backend is UNavailable,
+            # auto must DEGRADE honestly to the same-provider one — never fake cross_provider — and with
+            # NO backend it must fail closed, carrying the host + provenance (exercises the new branch).
+            _orig_rc, _orig_rcl = lib.resolve_codex_command, lib.resolve_claude_command
+            try:
+                _p2set(CODEX_SANDBOX="seatbelt")   # codex host; IMPASSE_CODEX_BIN fake still runnable
+                lib.resolve_claude_command = lambda: None   # cross-provider (claude) backend unavailable
+                rdeg = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", no_record=True)
+                check(rdeg.get("ok") and rdeg.get("backend") == "codex"
+                      and rdeg.get("independence") == "same_provider"
+                      and "Same-provider" in (rdeg.get("independence_notice") or ""),
+                      "F002: codex host, only codex available -> auto degrades to same_provider (no false cross)")
+                lib.resolve_codex_command = lambda: None     # now NEITHER backend available
+                rnone = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", no_record=True)
+                check(rnone.get("ok") is False and rnone.get("failure", {}).get("code") == "backend_error"
+                      and rnone.get("host") == "codex"
+                      and rnone.get("host_detection") == {"method": "auto", "confidence": "heuristic"},
+                      "F002: no backend available -> auto fails closed, carrying host + provenance")
+            finally:
+                lib.resolve_codex_command, lib.resolve_claude_command = _orig_rc, _orig_rcl
+
             # review_mode() must ALSO carry the heuristic notice on its own path (F003 rev3)
             _p2set(CODEX_SANDBOX="seatbelt")
             m = lib.review_mode("decision", environment="claude_code", codex_available=True, claude_available=True)
@@ -1019,7 +1090,9 @@ def main() -> int:
             os.remove(counter)
         os.environ["FAKE_MODE"] = "badjson_then_ok"
         os.environ["FAKE_COUNTER"] = counter
-        res_m = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+        # force --backend codex: this matrix asserts the codex argv/effort/retry path, which under a
+        # codex host is no longer the auto default (auto picks claude — the F002 change)
+        res_m = run.review(kind="code", instruction="review", artifact_bytes=b"code", backend="codex", no_record=True)
     finally:
         run.supervise = _orig_sup_m
         os.environ.pop("FAKE_COUNTER", None)
