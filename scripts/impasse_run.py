@@ -495,7 +495,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     # so selection and the reported tier agree. The result tier is still computed below from `host`.
     if backend == "auto":
         sel = lib.review_mode(kind, codex_available=bool(lib.resolve_codex_command()),
-                              claude_available=bool(lib.resolve_claude_command()), host=host)
+                              claude_available=bool(lib.resolve_claude_command()), detection=hd)
         if sel["mode"] not in ("codex", "claude"):
             msg = "no reviewer backend available (install codex or the claude CLI): " + sel["reason"]
             return {**_fail("backend_error", msg, kind, msg, manifest), "host": host,

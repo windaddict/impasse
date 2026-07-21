@@ -57,7 +57,11 @@ class Backend:
     destination_id: str  # normalized endpoint consent is keyed on, e.g. "https://api.openai.com"
     endpoint: str        # the raw configured endpoint
     command: list[str]   # argv to invoke, e.g. ["/path/to/codex"]
-    independence: str = "cross_provider"  # tier RELATIVE to the detected host — see independence_tier()
+    # Advisory tier relative to the host get_backend() detected AT CONSTRUCTION. review() does NOT
+    # trust this field — it recomputes the tier once from its own single host snapshot so host/tier/
+    # notice can't drift (see impasse_run.review). Consumers wanting the authoritative label per run
+    # should compute independence_tier(host, provider) themselves. (integration-review F004)
+    independence: str = "cross_provider"  # see independence_tier()
 
 
 def _resolve_from_env(*names: str) -> list[str] | None:
@@ -254,29 +258,35 @@ def _affirmatively_set(var: str) -> bool:
     return v is not None and v.strip().lower() not in _FALSY_MARKER
 
 
-def _claude_marker() -> bool:
-    # Genuine Anthropic surface markers. CLAUDECODE=1 is the strict primary (empirically the value);
-    # CLAUDE_SURFACE is an allowlist; the remaining flags are presence-style but matched affirmatively
-    # so a falsy inherited value can't manufacture a (strong) Claude identity — the F001 fix.
-    return bool(os.environ.get("CLAUDECODE") == "1"
-                or os.environ.get("CLAUDE_SURFACE") in ("cowork", "chat", "sandbox")
-                or _affirmatively_set("CLAUDE_CODE_ENTRYPOINT")
-                or _affirmatively_set("CLAUDE_COWORK")
-                or _affirmatively_set("CLAUDE_CHAT_SANDBOX"))
+def _claude_confidence() -> str | None:
+    # Returns the confidence of a Claude-host detection, or None if no marker. STRONG only from the
+    # strict, empirically-confirmed primary (CLAUDECODE=="1") or the CLAUDE_SURFACE allowlist. The
+    # remaining surface flags are presence-style — an arbitrary inherited value ("garbage") satisfies
+    # them, so they must NOT mint a STRONG cross-provider claim (integration-review F001): a stray
+    # CLAUDE_CODE_ENTRYPOINT on an actual Codex host would otherwise yield a SILENT false cross_provider.
+    # They contribute HEURISTIC instead, so any resulting positive tier carries the soft notice.
+    if os.environ.get("CLAUDECODE") == "1" or os.environ.get("CLAUDE_SURFACE") in ("cowork", "chat", "sandbox"):
+        return "strong"
+    if (_affirmatively_set("CLAUDE_CODE_ENTRYPOINT") or _affirmatively_set("CLAUDE_COWORK")
+            or _affirmatively_set("CLAUDE_CHAT_SANDBOX")):
+        return "heuristic"
+    return None
 
 
-def _attributable_hosts() -> set:
-    """The set of provider-attributable hosts whose STRICT marker is present — a subset of
-    {claude, codex, gemini}. Cursor is deliberately excluded: it wraps an operator-chosen model,
-    so it names no provider."""
-    hosts = set()
-    if _claude_marker():
-        hosts.add("claude")
+def _attributable_hosts() -> dict:
+    """Provider-attributable hosts whose marker is present, mapped to detection CONFIDENCE
+    ('strong'|'heuristic') — a subset of {claude, codex, gemini}. gemini is strict→strong; codex is a
+    sandbox-state HEURISTIC (no branded flag); claude is strong from its strict primary, heuristic from
+    a presence-style surface flag. Cursor is excluded: it wraps an operator-chosen model, no provider."""
+    hosts = {}
+    cc = _claude_confidence()
+    if cc:
+        hosts["claude"] = cc
     if os.environ.get("GEMINI_CLI") == "1":
-        hosts.add("gemini")
+        hosts["gemini"] = "strong"
     if (os.environ.get("CODEX_SANDBOX") == "seatbelt"
             or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"):
-        hosts.add("codex")
+        hosts["codex"] = "heuristic"
     return hosts
 
 
@@ -286,12 +296,17 @@ def host_detection() -> dict:
     Returns {"host", "method", "confidence"} where host ∈ KNOWN_HOSTS ∪ {"unknown"},
     method ∈ {"override", "auto", "none"}, confidence ∈ {"asserted", "strong", "heuristic", "none"}.
     Fail-safe by construction: marker ambiguity (≥2 attributable, or one attributable + Cursor), an
-    invalid override, or an override that disagrees with an observed marker ALL resolve to
-    "unknown" — never a guessed positive host, and confidence "none" never rides a positive tier.
+    invalid override, or an override that disagrees with an observed *attributable* marker ALL resolve
+    to "unknown" — never a guessed positive host, and confidence "none" never rides a positive tier.
+    (An `IMPASSE_HOST` override is honored alongside a bare `CURSOR_AGENT`: Cursor is non-attributable
+    — it names no provider — so it cannot contradict the override's provider claim, and the override
+    is exactly the operator's tool for resolving the Cursor-ambiguity auto-mode refuses to guess.
+    Operator decision 2026-07-20.)
 
     Keys off GENUINE host markers only — deliberately NOT detect_environment(), whose IMPASSE_ENV
     override is a surface-policy knob and must not be able to manufacture a host identity."""
-    A = _attributable_hosts()                       # ⊆ {claude, codex, gemini}
+    conf = _attributable_hosts()                    # {host: confidence} ⊆ {claude, codex, gemini}
+    A = set(conf)
     cursor = os.environ.get("CURSOR_AGENT") == "1"
 
     # 1. IMPASSE_HOST override — authoritative, but validated and conflict-checked.
@@ -315,8 +330,7 @@ def host_detection() -> dict:
             # nesting depth, so we cannot tell which agent is the inner driver. Refuse to guess.
             return {"host": "unknown", "method": "auto", "confidence": "none"}
         host = next(iter(A))
-        return {"host": host, "method": "auto",
-                "confidence": "heuristic" if host == "codex" else "strong"}
+        return {"host": host, "method": "auto", "confidence": conf[host]}
     if cursor:
         return {"host": "cursor", "method": "auto", "confidence": "none"}
     return {"host": "unknown", "method": "auto", "confidence": "none"}
@@ -472,7 +486,8 @@ def _configured_provider(env_var: str, default: str) -> str | None:
 
 
 def review_mode(kind: str, *, environment: str | None = None, codex_available: bool = False,
-                claude_available: bool = False, host: str | None = None) -> dict:
+                claude_available: bool = False, host: str | None = None,
+                detection: dict | None = None) -> dict:
     """The single policy entry point: pick the strongest HONEST review mode for this environment,
     the available backends, and the host, and carry the mandatory disclosure. Capability-first,
     env-gated, host-relative.
@@ -491,12 +506,14 @@ def review_mode(kind: str, *, environment: str | None = None, codex_available: b
     """
     kind = (kind or "").strip().lower()   # normalize so 'Code'/'CODE' can't slip past the code gate
     env = environment or detect_environment()
-    # An explicit --host arg is operator-asserted; otherwise auto-detect WITH provenance so a
-    # heuristically-detected host carries its soft notice here too (this pre-flight is its own
-    # disclosure surface). An explicitly-passed "unknown" is honored authoritatively (NOT re-detected)
-    # so a caller that already snapshotted the host — review()'s `auto` path — gets selection based on
-    # the SAME host it reports (F001); its provenance stays honest (auto/none, not an operator claim).
-    if host in KNOWN_HOSTS:
+    # Provenance precedence: an explicit `detection` snapshot (from a caller that already ran
+    # host_detection — review()'s `auto` path) is used VERBATIM, so its method/confidence (e.g. a
+    # heuristic Codex host) survive rather than being laundered to 'asserted' (integration-review F003).
+    # Else an explicit --host arg is operator-asserted; else auto-detect. An explicitly-passed "unknown"
+    # is honored authoritatively (NOT re-detected) so selection matches the host the caller reports.
+    if detection is not None:
+        hd = detection
+    elif host in KNOWN_HOSTS:
         hd = {"host": host, "method": "override", "confidence": "asserted"}
     elif host == "unknown":
         hd = {"host": "unknown", "method": "auto", "confidence": "none"}

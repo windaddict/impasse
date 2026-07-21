@@ -870,11 +870,36 @@ def main() -> int:
                                   ("CLAUDE_CODE_ENTRYPOINT", "0", "CLAUDE_CODE_ENTRYPOINT=0")):
                 _p2set(**{var: val})
                 check(lib.detect_host() == "unknown", f"detect strict-value: {why} -> unknown")
-            # ...but an AFFIRMATIVE Claude surface marker (no CLAUDECODE) still resolves to claude
+            # ...but an AFFIRMATIVE Claude surface marker (no CLAUDECODE) still resolves to claude —
+            # yet only at HEURISTIC confidence, NOT strong (integration-review F001): a presence-style
+            # flag accepts any value, so a stray one must not mint a SILENT strong cross_provider.
+            _p2set(CLAUDECODE="1")
+            check(lib.host_detection() == {"host": "claude", "method": "auto", "confidence": "strong"},
+                  "detect: CLAUDECODE=1 -> claude/STRONG (strict primary)")
             _p2set(CLAUDE_CODE_ENTRYPOINT="cli")
-            check(lib.detect_host() == "claude", "detect: CLAUDE_CODE_ENTRYPOINT=cli (affirmative) -> claude")
-            _p2set(CLAUDE_COWORK="1")
-            check(lib.detect_host() == "claude", "detect: CLAUDE_COWORK=1 -> claude")
+            check(lib.host_detection() == {"host": "claude", "method": "auto", "confidence": "heuristic"},
+                  "detect: stray presence-style CLAUDE_CODE_ENTRYPOINT -> claude/HEURISTIC (not strong)")
+            _p2set(CLAUDE_CODE_ENTRYPOINT="garbage")
+            check(lib.host_detection()["confidence"] == "heuristic",
+                  "detect: arbitrary presence-style value -> heuristic (F001 fail-open closed)")
+            _p2set(CLAUDE_SURFACE="cowork")
+            check(lib.host_detection()["confidence"] == "strong", "detect: CLAUDE_SURFACE allowlist -> strong")
+            # e2e via AUTO: a heuristic Claude host -> auto selects codex -> cross_provider that CARRIES
+            # the soft notice (composition of F001 detection + auto selection + notice; not silent).
+            _p2set(CLAUDE_CODE_ENTRYPOINT="cli")
+            rh = run.review(kind="decision", instruction="review", artifact_bytes=b"m", no_record=True)
+            check(rh.get("host") == "claude" and rh.get("backend") == "codex"
+                  and rh.get("independence") == "cross_provider"
+                  and "INFERRED" in (rh.get("independence_notice") or ""),
+                  "F001-integration: heuristic Claude host -> auto codex cross_provider WITH soft notice")
+            # F003: review_mode uses a passed detection VERBATIM (heuristic survives, not laundered to asserted)
+            _p2set()  # clear markers; pass detection explicitly
+            m = lib.review_mode("decision", codex_available=True, claude_available=True,
+                                detection={"host": "claude", "method": "auto", "confidence": "heuristic"})
+            check(m["host"] == "claude" and m["tier"] == "cross_provider"
+                  and m["host_detection"] == {"method": "auto", "confidence": "heuristic"}
+                  and "INFERRED" in (m["notice"] or ""),
+                  "F003: review_mode preserves a passed heuristic detection (soft notice, not laundered)")
 
             # ambiguity / conflict fail-safe (F001): never guess a driver from an unordered marker set
             _p2set(CLAUDECODE="1", CURSOR_AGENT="1")
