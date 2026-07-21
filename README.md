@@ -248,9 +248,25 @@ git clone https://github.com/windaddict/impasse ~/src/impasse
 bash ~/src/impasse/scripts/install-codex.sh   # symlinks into ~/.codex/skills/impasse
 ```
 
-Then ask your host to use Impasse — e.g. "Use Impasse to review this decision memo" (Claude Code), or
-`$impasse` / by description (Codex). One clone can serve both hosts (symlink it into each skills dir);
-they share a host-agnostic config dir.
+**Invoke it through your host** — there is no separate `impasse` binary; it runs inside the agent:
+
+- **Claude Code** — the `/impasse` slash command, or just ask ("Use Impasse to review this decision memo").
+- **OpenAI Codex** — `$impasse`, or ask by description.
+
+(Power users can call the helpers directly: `python3 <skill-dir>/scripts/impasse_run.py review …` — see
+[`SKILL.md`](SKILL.md). That's what the host runs under the hood.)
+
+One clone can serve **both** hosts at once — symlink it into each skills dir (`~/.claude/skills/impasse`
+and `~/.codex/skills/impasse`); they share one host-agnostic config dir (consent, records, settings).
+
+**Both hosts installed? For a standard install there's usually nothing to configure — Impasse finds
+the backends itself.** Each backend is resolved in this order: an explicit override
+(`IMPASSE_CODEX_BIN` / `CODEX_BIN`, `IMPASSE_CLAUDE_BIN` / `CLAUDE_BIN`) → `PATH` → backend-specific
+known locations (Homebrew, `/usr/local/bin`, `~/.local/bin`, npm-global for both — plus the
+`ChatGPT.app` / `Codex.app` bundle for Codex). So on a Claude host it finds Codex (the cross-provider
+default) and on a Codex host it finds Claude, without you pointing at anything. You only need to set
+an override if a binary lives somewhere nonstandard or your `PATH` is stripped (e.g. an nvm/fnm-managed
+`codex`). Host identity is auto-detected too (`IMPASSE_HOST` overrides).
 
 **Choosing the reviewer model:** by default the backend's own default is used. Ask Claude Code to
 pick one and it presents the options (Codex can't enumerate models, so it's a curated list plus a
