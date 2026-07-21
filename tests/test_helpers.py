@@ -486,7 +486,10 @@ def main() -> int:
     os.environ.pop("ANTHROPIC_BASE_URL", None)
     be_c = lib.get_backend("claude")
     check(be_c.type == "claude-cli" and be_c.provider == "Anthropic", "get_backend('claude'): type + provider")
-    check(be_c.independence == "same_provider" and be_c.destination_id == "https://api.anthropic.com", "get_backend('claude'): same-provider tier + Anthropic destination")
+    # the tier is computed per-run from the host (not cached on Backend — F011); baseline host is claude
+    check(lib.independence_tier("claude", be_c.provider) == "same_provider"
+          and be_c.destination_id == "https://api.anthropic.com",
+          "get_backend('claude'): same-provider tier (claude host) + Anthropic destination")
     for ev in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
         os.environ[ev] = "1"
         routed_ok = False
@@ -496,6 +499,26 @@ def main() -> int:
             routed_ok = True
         os.environ.pop(ev, None)
         check(routed_ok, f"get_backend('claude'): refuses under {ev} (would mis-key consent to Anthropic)")
+    # F001: the codex backend ALWAYS passes --ignore-user-config (config.toml can't reroute data away
+    # from the consented endpoint); IMPASSE_CODEX_RESPECT_CONFIG only opts into --ignore-rules.
+    try:
+        _cbe = lib.get_backend("codex")
+        os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
+        av = run.build_codex_argv(_cbe.command, instruction="i", output_last_message="o")
+        check("--ignore-user-config" in av and "--ignore-rules" in av,
+              "F001: hermetic by default -> --ignore-user-config AND --ignore-rules")
+        os.environ["IMPASSE_CODEX_RESPECT_CONFIG"] = "1"
+        av = run.build_codex_argv(_cbe.command, instruction="i", output_last_message="o")
+        check("--ignore-user-config" in av and "--ignore-rules" not in av,
+              "F001: RESPECT_CONFIG drops ONLY --ignore-rules; --ignore-user-config stays (consent honest)")
+        os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
+        # F008: an explicitly-EMPTY base URL is treated as the default (consistent preflight vs run)
+        os.environ["OPENAI_BASE_URL"] = ""
+        check(lib.get_backend("codex").destination_id == "https://api.openai.com",
+              "F008: empty OPENAI_BASE_URL -> default endpoint (not an empty-string destination)")
+    finally:
+        os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
+        os.environ.pop("OPENAI_BASE_URL", None)
     argv_c = run.build_claude_argv(be_c.command, instruction="LENS")
     check("-p" in argv_c and "LENS" in argv_c and argv_c[argv_c.index("--output-format") + 1] == "text", "build_claude_argv: -p + text output")
     check("--output-last-message" not in argv_c, "build_claude_argv: no output-file (reads stdout)")
@@ -509,7 +532,9 @@ def main() -> int:
     check(argv_x[argv_x.index("-c") + 1] == 'model_reasoning_effort="low"', "build_codex_argv: effort -> -c model_reasoning_effort")
     check("-c" not in run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o"), "build_codex_argv: no effort -> flag omitted (backend default)")
     os.environ["IMPASSE_CODEX_RESPECT_CONFIG"] = "1"
-    check("--ignore-user-config" not in run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o"), "build_codex_argv: IMPASSE_CODEX_RESPECT_CONFIG opts out of hermetic mode")
+    _rc_argv = run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o")
+    check("--ignore-user-config" in _rc_argv and "--ignore-rules" not in _rc_argv,
+          "build_codex_argv: RESPECT_CONFIG drops only --ignore-rules; --ignore-user-config stays (F001)")
     os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
     argv_cm = run.build_claude_argv(["/x/claude"], instruction="I", model="claude-x")
     check(argv_cm[argv_cm.index("--model") + 1] == "claude-x" and argv_cm.index("--model") < argv_cm.index("--disallowed-tools"), "build_claude_argv: --model set, before the trailing --disallowed-tools")
@@ -682,6 +707,16 @@ def main() -> int:
     except ValueError:
         bad_persist = True
     check(bad_persist, "settings: set_default_effort refuses a disallowed value ('minimal')")
+    # F012(core-rev): the LIBRARY setter (not just the CLI) refuses a non-null claude effort — dead
+    # config the runner can't consume — but still allows CLEARING one (legacy migration path).
+    _claude_effort_refused = False
+    try:
+        lib.set_default_effort("claude", "high")
+    except ValueError:
+        _claude_effort_refused = True
+    check(_claude_effort_refused, "F012: set_default_effort refuses a non-null claude write (library level)")
+    lib.set_default_effort("claude", None)   # clearing must NOT raise (migration path)
+    check(True, "F012: set_default_effort(claude, None) clears without error")
     with open(lib._settings_path(), "w") as _sf:
         _sf.write('{"default_effort": {"codex": "minimal"}}')
     check(lib.get_default_effort("codex") is None, "settings: hand-edited invalid effort dropped on read (fail safe)")
@@ -882,8 +917,39 @@ def main() -> int:
             _p2set(CLAUDE_CODE_ENTRYPOINT="garbage")
             check(lib.host_detection()["confidence"] == "heuristic",
                   "detect: arbitrary presence-style value -> heuristic (F001 fail-open closed)")
+            # T2: the OTHER two presence-style Claude flags also resolve claude/heuristic (positive path)
+            for _var in ("CLAUDE_COWORK", "CLAUDE_CHAT_SANDBOX"):
+                _p2set(**{_var: "1"})
+                check(lib.host_detection() == {"host": "claude", "method": "auto", "confidence": "heuristic"},
+                      f"T2: {_var}=1 -> claude/heuristic")
+            # T3: every CLAUDE_SURFACE allowlist value yields strong (not just 'cowork')
+            for _sv in ("cowork", "chat", "sandbox"):
+                _p2set(CLAUDE_SURFACE=_sv)
+                check(lib.host_detection()["confidence"] == "strong", f"T3: CLAUDE_SURFACE={_sv} -> strong")
+            # F007: detect_environment matches presence-style markers AFFIRMATIVELY (not raw truthiness),
+            # so a stray falsy value can't manufacture a cowork/sandbox surface (which would permit self-review)
+            _p2set(CLAUDE_COWORK="0")
+            check(lib.detect_environment() == "unknown", "F007: CLAUDE_COWORK=0 -> unknown env (no false cowork)")
+            _p2set(CLAUDE_CHAT_SANDBOX="off")
+            check(lib.detect_environment() == "unknown", "F007: CLAUDE_CHAT_SANDBOX=off -> unknown env")
+            _p2set(CLAUDE_COWORK="1")
+            check(lib.detect_environment() == "cowork", "F007: CLAUDE_COWORK=1 -> cowork (affirmative still works)")
+            # F003(core-rev): the self-review-gating markers use a STRICT boolean-true allowlist, so an
+            # arbitrary non-falsy value can't manufacture a self-review-eligible surface.
+            _p2set(CLAUDE_COWORK="garbage")
+            check(lib.detect_environment() == "unknown", "F003: CLAUDE_COWORK=garbage -> unknown (not cowork)")
+            _p2set(CLAUDE_CHAT_SANDBOX="true")
+            check(lib.detect_environment() == "chat_sandbox", "F003: CLAUDE_CHAT_SANDBOX=true -> chat_sandbox (allowlist value)")
+            # T4: review_mode honors an explicit host='unknown' verbatim (no silent re-detect to a real host)
+            _p2set()
+            m = lib.review_mode("decision", codex_available=True, claude_available=True, host="unknown")
+            check(m["host"] == "unknown" and m["tier"] == "undetermined",
+                  "T4: review_mode(host='unknown') -> undetermined, not re-detected")
+            # T5: the valid 'other' override host is non-attributable -> undetermined tier
+            check(lib.independence_tier("other", "OpenAI") == "undetermined"
+                  and lib.independence_tier("other", "Anthropic") == "undetermined",
+                  "T5: independence_tier('other', ...) -> undetermined (mixed-model host)")
             _p2set(CLAUDE_SURFACE="cowork")
-            check(lib.host_detection()["confidence"] == "strong", "detect: CLAUDE_SURFACE allowlist -> strong")
             # e2e via AUTO: a heuristic Claude host -> auto selects codex -> cross_provider that CARRIES
             # the soft notice (composition of F001 detection + auto selection + notice; not silent).
             _p2set(CLAUDE_CODE_ENTRYPOINT="cli")
@@ -1155,6 +1221,42 @@ def main() -> int:
 
     check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
     check(res.get("record_path") and "Recorded locally" in (res.get("record_notice") or ""), "run record: result surfaces where it was saved")
+
+    # F002: a recorded run whose reviewer review_id ('r') collides lands in a UNIQUE suffixed dir whose
+    # STORED review_id matches the dir — so a later reconciliation links to THIS record, not another.
+    res2 = run.review(kind="code", instruction="review", artifact_bytes=b"code2")
+    _rid2 = res2.get("run_id")
+    check(_rid2 and _rid2 != "r" and _rid2.startswith("r-")
+          and lib.load_run(_rid2)["reviewer_response"]["review_id"] == _rid2,
+          "F002: reserved run_id is propagated into the stored record (reconciliation links correctly)")
+    lib.forget_run(_rid2)
+
+    # F004: reserve_run_id gives a UNIQUE dir per run so a reused/untrusted review_id can't clobber
+    id1 = lib.reserve_run_id("dup-review-id")
+    id2 = lib.reserve_run_id("dup-review-id")
+    check(id1 == "dup-review-id" and id2 == "dup-review-id-2" and id1 != id2
+          and os.path.isdir(lib._run_dir(id1)) and os.path.isdir(lib._run_dir(id2)),
+          "F004: reserve_run_id disambiguates a colliding review_id (no silent overwrite)")
+    lib.forget_run(id1)
+    lib.forget_run(id2)
+    # F009: a non-positive/non-finite timeout becomes a STRUCTURED failure, not an uncaught traceback
+    rbad = run.review(kind="code", instruction="review", artifact_bytes=b"x", wall_timeout=-5, no_record=True)
+    check(rbad.get("ok") is False and rbad.get("failure", {}).get("code") == "backend_error"
+          and "--wall" in rbad.get("failure", {}).get("message", "")
+          and rbad.get("host_detection") is not None,
+          "F009: bad --wall -> structured backend_error (with provenance), not a traceback")
+    # F010: a get_backend failure path still reports host_detection provenance
+    _saved_cbin = os.environ.pop("IMPASSE_CODEX_BIN", None)
+    _orig_rc2 = lib.resolve_codex_command
+    try:
+        lib.resolve_codex_command = lambda: None
+        rnb = run.review(kind="code", instruction="review", artifact_bytes=b"x", backend="codex", no_record=True)
+        check(rnb.get("ok") is False and rnb.get("host_detection") is not None,
+              "F010: get_backend failure carries host_detection provenance")
+    finally:
+        lib.resolve_codex_command = _orig_rc2
+        if _saved_cbin is not None:
+            os.environ["IMPASSE_CODEX_BIN"] = _saved_cbin
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
     check(res.get("recorded") is False, "run record: --no-record skips persistence")
     check(res.get("record_notice") == "Not recorded (--no-record).", "run record: --no-record notice surfaced")
@@ -1249,6 +1351,44 @@ def main() -> int:
                      "assessment": "approve", "summary": "s", "findings": []})
     check("\x1b" not in report.render(lib.load_run("hdrtest")), "report: terminal escapes in an untrusted review_id are stripped from the header")
     lib.forget_run("hdrtest")
+
+    # --- T1: install-codex.sh safety (drive the bash installer against a throwaway --root) ---
+    import shutil as _sh
+    import subprocess as _sp
+    _installer = os.path.join(os.getcwd(), "scripts", "install-codex.sh")
+    if _sh.which("bash") and os.path.isfile(_installer):
+        _iroot = tempfile.mkdtemp(prefix="impasse-installer-test-")
+
+        def _inst(*args):
+            return _sp.run(["bash", _installer, "--root", _iroot, *args],
+                           capture_output=True, text=True)
+        try:
+            # fresh symlink install + idempotent re-run
+            r1 = _inst()
+            _dest = os.path.join(_iroot, "impasse")
+            check(r1.returncode == 0 and os.path.islink(_dest)
+                  and os.path.realpath(_dest) == os.getcwd(),
+                  "T1 installer: fresh install creates a symlink to the repo")
+            check(_inst().returncode == 0 and "Already installed" in _inst().stdout,
+                  "T1 installer: re-run is idempotent (Already installed)")
+            # REFUSE a physical dir at the destination, leaving it untouched (the core safety guarantee)
+            os.remove(_dest)
+            os.makedirs(_dest)
+            _keep = os.path.join(_dest, "keep.txt")
+            open(_keep, "w").write("precious")
+            r2 = _inst()
+            check(r2.returncode != 0 and "not a symlink" in (r2.stderr + r2.stdout)
+                  and os.path.isfile(_keep),
+                  "T1 installer: refuses a physical dir and leaves it INTACT (never deletes real data)")
+            # --dry-run changes nothing
+            _sh.rmtree(_dest)
+            before = os.path.exists(_dest)
+            check(_inst("--dry-run").returncode == 0 and os.path.exists(_dest) == before,
+                  "T1 installer: --dry-run makes no filesystem change")
+        finally:
+            _sh.rmtree(_iroot, ignore_errors=True)
+    else:
+        check(True, "T1 installer: skipped (bash or installer unavailable)")
 
     print()
     if _fails:

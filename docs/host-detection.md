@@ -7,12 +7,16 @@ markers, how far to trust them, and how drift is managed.
 
 ## Markers (strict value — presence alone never counts)
 
-| Host | Marker rule | Confidence | Verified (agent / version / OS) | Upstream source |
+The **Confidence** column is the value `host_detection()` actually emits (`strong | heuristic | none`),
+not a subjective marker rating — so it matches the runtime `host_detection.confidence` field.
+
+| Host | Marker rule | Emitted confidence | Verified (agent / version / OS) | Upstream source |
 |---|---|---|---|---|
-| `claude` | `CLAUDECODE == "1"` (or a genuine `CLAUDE_CODE_ENTRYPOINT` / Cowork / chat-sandbox surface marker) | strong | Claude Code CLI, observed live in a spawned subprocess, macOS (2026-07) | empirically confirmed |
-| `gemini` | `GEMINI_CLI == "1"` | strong | documented detection hook; not yet live-verified in this repo's harness | Gemini CLI shell-tool docs — geminicli.com/docs/tools/shell |
-| `cursor` | `CURSOR_AGENT == "1"` | medium | documented; `CURSOR_AGENT` was once dropped and re-added in a `cursor-agent` release, so it can be absent on some versions | cursor.com/docs/agent/tools/terminal |
-| `codex` | `CODEX_SANDBOX == "seatbelt"` or `CODEX_SANDBOX_NETWORK_DISABLED == "1"` | **heuristic** | sandbox-state signal, not a host flag; absent under sandbox bypass | openai/codex issues #30356, #5041; developers.openai.com/codex/environment-variables |
+| `claude` | `CLAUDECODE == "1"` **or** `CLAUDE_SURFACE ∈ {cowork,chat,sandbox}` | **strong** | Claude Code CLI, observed live in a spawned subprocess, macOS (2026-07) | empirically confirmed |
+| `claude` | a presence-style surface flag: `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_COWORK` / `CLAUDE_CHAT_SANDBOX` affirmatively set | **heuristic** | these accept any non-falsy value, so they can't mint a *strong* (silent) cross-provider claim — a resulting positive tier carries the soft notice | empirically confirmed |
+| `gemini` | `GEMINI_CLI == "1"` | **strong** | documented detection hook; not yet live-verified in this repo's harness | Gemini CLI shell-tool docs — geminicli.com/docs/tools/shell |
+| `cursor` | `CURSOR_AGENT == "1"` | **none** — non-attributable (operator-chosen model); detected only to sharpen the recommendation, never a positive tier. Marker is documented but was once dropped/re-added in a `cursor-agent` release | cursor.com/docs/agent/tools/terminal |
+| `codex` | `CODEX_SANDBOX == "seatbelt"` **or** `CODEX_SANDBOX_NETWORK_DISABLED == "1"` | **heuristic** | sandbox-state signal, not a host flag; absent under sandbox bypass | openai/codex issues #30356, #5041; developers.openai.com/codex/environment-variables |
 
 **Deliberately not used:** `TERM_PROGRAM=vscode` (shared across the VS Code family — Cursor, VS Code,
 extensions), `CURSOR_TRACE_ID` (unconfirmed), and config *inputs* like `CODEX_HOME`, `GEMINI_API_KEY`,

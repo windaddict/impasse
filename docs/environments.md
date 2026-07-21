@@ -75,8 +75,10 @@ Each step down is disclosed: the runner emits an `independence_notice` for `same
 ## The policy (one source of truth)
 
 `impasse_lib.review_mode(kind, environment=..., codex_available=..., claude_available=...,
-host=...)` returns `{mode, tier, allowed, notice, recommendation, reason, host}` where
-`mode ∈ {codex, claude, self_review, refuse}`. Capability-first (prefer the available subprocess
+host=..., detection=...)` returns `{mode, tier, allowed, notice, recommendation, reason, host,
+host_detection}` where `mode ∈ {codex, claude, self_review, refuse}` and `host_detection` is
+`{method, confidence}`. Pass `detection` (a `host_detection()` record) to use a caller's snapshot
+verbatim — preserving its confidence — instead of re-deriving from `host`. Capability-first (prefer the available subprocess
 backend most independent of the host — `cross_provider > undetermined > same_provider`, ties keep
 codex first for its hermetic OS sandbox), then env-gated (self-review only in
 `chat_sandbox`/`cowork`, and never for `code`). The pre-flight mirrors the actual run: tiers are

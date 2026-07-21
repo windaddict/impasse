@@ -57,11 +57,11 @@ class Backend:
     destination_id: str  # normalized endpoint consent is keyed on, e.g. "https://api.openai.com"
     endpoint: str        # the raw configured endpoint
     command: list[str]   # argv to invoke, e.g. ["/path/to/codex"]
-    # Advisory tier relative to the host get_backend() detected AT CONSTRUCTION. review() does NOT
-    # trust this field — it recomputes the tier once from its own single host snapshot so host/tier/
-    # notice can't drift (see impasse_run.review). Consumers wanting the authoritative label per run
-    # should compute independence_tier(host, provider) themselves. (integration-review F004)
-    independence: str = "cross_provider"  # see independence_tier()
+    # NOTE: the independence TIER is intentionally NOT a Backend field. It is a relation between the
+    # host and this backend's provider, computed per-run from a single host snapshot by the caller
+    # (impasse_run.review) via independence_tier(host, provider) — so host/tier/notice can't drift.
+    # Backend carries only the provider; the tier is never cached on it (was: a vestigial field that
+    # duplicated the computation via a second detect_host() — core-review F011).
 
 
 def _resolve_from_env(*names: str) -> list[str] | None:
@@ -170,14 +170,14 @@ def _provider_label(destination_id: str) -> str:
 
 
 def get_backend(name: str = "codex") -> Backend:
-    """Return a resolved Backend.
+    """Return a resolved Backend (name, provider, destination, command). The independence TIER is NOT
+    a field on the returned object — it is a relation between the host and this backend's provider, so
+    the caller computes it per-run via `independence_tier(host, backend.provider)` (F011).
 
-    The `independence` field is computed RELATIVE to the detected host (see independence_tier):
-    to a Claude host, 'codex' (default) is the cross-provider reviewer and 'claude' the
-    same-provider fallback — a same-provider reviewer shares the host's blind spots, so it buys
-    breadth / an adversarial second pass, NOT independence. To a Codex host the ladder inverts:
-    'claude' is the cross-provider choice. See docs/backends/claude.md and the independence
-    ladder in the Guardrails.
+    Independence is host-relative: to a Claude host, 'codex' (default) is the cross-provider reviewer
+    and 'claude' the same-provider fallback — a same-provider reviewer shares the host's blind spots,
+    so it buys breadth / an adversarial second pass, NOT independence. To a Codex host the ladder
+    inverts: 'claude' is the cross-provider choice. See docs/backends/claude.md and the Guardrails.
     """
     if name == "codex":
         cmd = resolve_codex_command()
@@ -186,15 +186,18 @@ def get_backend(name: str = "codex") -> Backend:
                 "codex CLI not found. Install it (npm i -g @openai/codex, or the Codex "
                 "desktop app), or set CODEX_BIN / IMPASSE_CODEX_BIN."
             )
-        # A custom base URL (Azure, an enterprise gateway, localhost) changes where data
-        # actually goes; normalize it so consent is keyed to the real destination.
-        endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com")
+        # A custom base URL (Azure, an enterprise gateway, localhost) changes where data actually
+        # goes; normalize it so consent is keyed to the real destination. The codex backend always runs
+        # --ignore-user-config so ~/.codex/config.toml can't reroute (F001); OPENAI_BASE_URL is the
+        # authoritative destination on a standard install. A system/managed Codex config layer that
+        # overrides the endpoint below the env var is outside Impasse's visibility — see the codex-
+        # backend routing caveat in docs/security-model.md. An explicitly-empty value -> default (F008).
+        endpoint = os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com"
         destination_id = normalize_destination(endpoint)
         provider = _provider_label(destination_id)
         return Backend(
             name="codex", type="codex-cli", provider=provider,
             destination_id=destination_id, endpoint=endpoint, command=cmd,
-            independence=independence_tier(detect_host(), provider),
         )
     if name == "claude":
         # Claude Code can route to AWS Bedrock / GCP Vertex via these env vars. Then the data does
@@ -212,14 +215,14 @@ def get_backend(name: str = "codex") -> Backend:
             raise FileNotFoundError(
                 "claude CLI not found. Install Claude Code, or set CLAUDE_BIN / IMPASSE_CLAUDE_BIN."
             )
-        # A custom ANTHROPIC_BASE_URL (a gateway/proxy) still keys consent to wherever data goes.
-        endpoint = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        # A custom ANTHROPIC_BASE_URL (a gateway/proxy) still keys consent to wherever data goes; an
+        # explicitly-empty value is treated as the default (matching the pre-flight — F008).
+        endpoint = os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com"
         destination_id = normalize_destination(endpoint)
         provider = _provider_label(destination_id)
         return Backend(
             name="claude", type="claude-cli", provider=provider,
             destination_id=destination_id, endpoint=endpoint, command=cmd,
-            independence=independence_tier(detect_host(), provider),
         )
     raise ValueError(f"unknown backend '{name}' (supported: codex, claude)")
 
@@ -256,6 +259,17 @@ def _affirmatively_set(var: str) -> bool:
     must not read as present (strict-value rule; env vars are unauthenticated inherited strings)."""
     v = os.environ.get(var)
     return v is not None and v.strip().lower() not in _FALSY_MARKER
+
+
+_TRUEISH_MARKER = frozenset({"1", "true", "yes", "on"})
+
+
+def _boolish_true(var: str) -> bool:
+    """A strict boolean-true check (allowlist), for a security-sensitive gate where accepting an
+    arbitrary non-falsy value would be unsafe — e.g. authorizing self-review. Stricter than
+    _affirmatively_set, which is a denylist that would accept 'garbage' (core-review F003)."""
+    v = os.environ.get(var)
+    return v is not None and v.strip().lower() in _TRUEISH_MARKER
 
 
 def _claude_confidence() -> str | None:
@@ -445,11 +459,16 @@ def detect_environment() -> str:
     forced = os.environ.get("IMPASSE_ENV")
     if forced in _ENV_LABELS:
         return forced
-    if os.environ.get("CLAUDECODE") == "1" or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+    # The cowork/chat_sandbox surfaces are the ONLY ones that permit self-review, so their markers use
+    # a STRICT boolean-true allowlist (_boolish_true): an arbitrary CLAUDE_COWORK=garbage must not
+    # authorize self-review (core-review F007/F003) — the fail-safe is 'unknown' (no self-review).
+    # CLAUDE_CODE_ENTRYPOINT gates claude_code (which does NOT permit self-review), so its value marker
+    # stays affirmative-nonfalsy.
+    if os.environ.get("CLAUDECODE") == "1" or _affirmatively_set("CLAUDE_CODE_ENTRYPOINT"):
         return "claude_code"
-    if os.environ.get("CLAUDE_COWORK") or os.environ.get("CLAUDE_SURFACE") == "cowork":
+    if _boolish_true("CLAUDE_COWORK") or os.environ.get("CLAUDE_SURFACE") == "cowork":
         return "cowork"
-    if os.environ.get("CLAUDE_CHAT_SANDBOX") or os.environ.get("CLAUDE_SURFACE") in ("chat", "sandbox"):
+    if _boolish_true("CLAUDE_CHAT_SANDBOX") or os.environ.get("CLAUDE_SURFACE") in ("chat", "sandbox"):
         return "chat_sandbox"
     return "unknown"
 
@@ -657,37 +676,63 @@ def get_default_effort(backend: str) -> str | None:
     return e if e in ALLOWED_EFFORT else None
 
 
+def _settings_lock():
+    """An interprocess lock guarding the settings read-modify-write, so two hosts (e.g. a Claude Code
+    and a Codex host sharing one config dir) can't lose an update via interleaved read-modify-replace
+    (core-review F005). POSIX flock (like the process-group teardown, POSIX-only); a no-op context on
+    platforms without fcntl. Returns a context manager."""
+    ensure_config_dir()
+    lock_path = os.path.join(config_dir(), "settings.lock")
+    try:
+        import fcntl
+    except ImportError:
+        import contextlib
+        return contextlib.nullcontext()
+
+    class _Lock:
+        def __enter__(self):
+            self._fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+            return self
+
+        def __exit__(self, *exc):
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+    return _Lock()
+
+
 def _set_default_setting(key: str, backend: str, value: str | None) -> None:
     """Persist (value set) or clear (value None) a per-backend default under `key`.
     Atomic + fsynced write, 0600 — same discipline as the run-record store. A malformed existing
-    entry is repaired (rebuilt) rather than crashing. Single-writer: the read-modify-replace
-    isn't locked, so two concurrent writes could lose one update — acceptable for a
-    single-user CLI (same assumption as the consent store)."""
-    s = load_settings()
-    dm = s.get(key)
-    dm = dict(dm) if isinstance(dm, dict) else {}
-    if value:
-        dm[backend] = value
-    else:
-        dm.pop(backend, None)
-    s[key] = dm
-    ensure_config_dir()
+    entry is repaired (rebuilt) rather than crashing. The whole read-modify-replace runs under an
+    interprocess lock (F005) so concurrent writers can't lose an update."""
     path = _settings_path()
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(s, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-        fsync_dir(os.path.dirname(path))
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    with _settings_lock():
+        s = load_settings()
+        dm = s.get(key)
+        dm = dict(dm) if isinstance(dm, dict) else {}
+        if value:
+            dm[backend] = value
+        else:
+            dm.pop(backend, None)
+        s[key] = dm
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(s, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            fsync_dir(os.path.dirname(path))
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
 
 def set_default_model(backend: str, model: str | None) -> None:
@@ -697,9 +742,14 @@ def set_default_model(backend: str, model: str | None) -> None:
 
 def set_default_effort(backend: str, effort: str | None) -> None:
     """Persist (effort set) or clear (effort None) the default reasoning effort for a backend.
-    Refuses a value outside ALLOWED_EFFORT — never persist something the runner would reject."""
+    Refuses a value outside ALLOWED_EFFORT — never persist something the runner would reject.
+    Only codex HAS an effort knob, so a non-null write for any other backend is refused at the library
+    level too (not just the CLI — F012); clearing (effort=None) is allowed for any backend so a legacy
+    persisted value can always be removed (migration path)."""
     if effort is not None and effort not in ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(ALLOWED_EFFORT)}")
+    if effort is not None and backend != "codex":
+        raise ValueError(f"only the codex backend has a reasoning-effort knob (got backend={backend!r})")
     _set_default_setting("default_effort", backend, effort)
 
 
@@ -716,8 +766,30 @@ def fsync_dir(path: str) -> None:
         pass
 
 
+def reserve_run_id(review_id: str) -> str:
+    """Atomically reserve a UNIQUE run directory for a new run and return the run_id to use for it.
+    The reviewer sets `review_id` (untrusted, NOT guaranteed unique), and it keys the record dir — so
+    without this, a reviewer that reuses an id, or two concurrent runs (e.g. a Claude host and a Codex
+    host sharing one config dir), would SILENTLY overwrite each other's record (core-review F004). We
+    create the dir with exclusive `os.mkdir` and, on collision, append -2, -3, … until a fresh slot is
+    claimed. Race-safe: mkdir is atomic, so two processes can't both claim the same suffix."""
+    base = _safe_id(review_id)
+    os.makedirs(runs_dir(), exist_ok=True)
+    for i in range(1, 10000):
+        candidate = base if i == 1 else f"{base}-{i}"
+        d = _run_dir(candidate)
+        try:
+            os.mkdir(d, 0o700)
+            return candidate
+        except FileExistsError:
+            continue
+    raise OSError(f"could not reserve a unique run directory for {base!r}")
+
+
 def save_run_doc(run_id: str, name: str, doc: dict) -> str:
-    """Persist one run document (name = 'reviewer-response' | 'reconciliation-result')."""
+    """Persist one run document (name = 'reviewer-response' | 'reconciliation-result').
+    The initial reviewer-response should use a run_id from reserve_run_id() so it can't clobber another
+    run; reconciliation reuses that same run_id to land in the same directory."""
     d = _run_dir(run_id)
     os.makedirs(d, exist_ok=True)
     for path in (runs_dir(), d):

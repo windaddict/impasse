@@ -5,7 +5,64 @@ All notable changes to Impasse are documented here. This project adheres to
 
 ## [Unreleased]
 
-### Host auto-detection (phase 2 of multi-host support)
+### Multi-host support — Impasse now runs turnkey under Claude Code *and* OpenAI Codex
+Both hosts implement the open [Agent Skills standard](https://agentskills.io); one installation serves
+either, because the code is host-relative at runtime (the host is detected per run, never persisted)
+and the shared per-user config dir holds no host-specific state — consent is keyed by *endpoint* (a
+Claude host's OpenAI grant and a Codex host's Anthropic grant coexist), model/effort defaults are
+keyed *per backend*, and run records are keyed by `review_id`.
+
+- **Host-aware default backend.** `review --backend` now defaults to **`auto`**, which selects the
+  most host-independent *available* backend via `review_mode()`: to a Claude host that's `codex`, to a
+  **Codex host** it's `claude` (the ladder inverts). So a bare review on a Codex host gets a genuine
+  cross-provider reviewer instead of a silent same-provider one; when the cross-provider backend is
+  unavailable it degrades honestly to `same_provider` (never a false `cross_provider`), and with no
+  backend it fails closed. Explicit `--backend codex|claude` still forces.
+- **Reviewer hermeticity.** The reviewer subprocess now runs with its CWD set to the run's scratch
+  dir, not the operator's project — so `claude -p` can't pick up the *reviewed* project's
+  `CLAUDE.md`/hooks (an artifact-controlled injection / independence leak), newly load-bearing now
+  that `claude` is the cross-provider reviewer for a Codex host. (Residual, documented: user-global
+  `~/.claude` config — see `docs/backends/claude.md`.)
+- **Backend discovery.** The Codex desktop app rebranded its bundle to `ChatGPT.app`;
+  `resolve_codex_command()` gained that path (legacy `Codex.app` kept). Without it, Impasse couldn't
+  find the backend after the app updated.
+- **Turnkey install + docs.** New `scripts/install-codex.sh` — a **symlink-only** installer (safe by
+  construction: it never deletes real data — it replaces only a verified symlink and refuses a
+  physical destination), which detects the Codex skills root. `SKILL.md` generalized from a
+  Claude-Code-only adapter to a host-neutral one (host-relative backend guidance, per-host consent
+  endpoints, the Codex sandbox-escalation prompt distinguished from Impasse's endpoint consent).
+- **Detection provenance + a closed composition fail-open.** `host_detection()` returns
+  `{method, confidence}`; a positive `cross_provider` tier resting on a *heuristic* detection carries a
+  soft notice. A holistic review of the assembled feature caught a fail-open no per-change review
+  could: a presence-style Claude surface flag (any non-falsy value) had yielded *strong* confidence,
+  so a stray one on a sandbox-bypassed Codex host produced a **silent** false `cross_provider`. Those
+  flags now yield *heuristic* (notice-bearing); only strict `CLAUDECODE=1` / the `CLAUDE_SURFACE`
+  allowlist stay *strong*.
+
+#### Hardening (a full-source cross-provider review of the assembled feature)
+Reviewing the whole thing surfaced latent issues, several pre-existing, now fixed:
+- **Consent boundary:** `IMPASSE_CODEX_RESPECT_CONFIG` (which honors `~/.codex/config.toml`, able to
+  reroute data) now **refuses** unless `OPENAI_BASE_URL` is pinned, so consent is never keyed to a
+  destination the config could silently override. An explicitly-empty base URL is treated as the
+  default (preflight and run now agree).
+- **Audit records:** each run reserves a **unique** record directory (atomic `mkdir`, `-2/-3…` on
+  collision) — a reused or untrusted `review_id`, or two hosts sharing one config dir, can no longer
+  silently overwrite another run's record.
+- **Settings writes** run under an interprocess lock, so concurrent `set-model`/`set-effort` from two
+  hosts can't lose an update. `set-effort` is now codex-only (Claude has no effort knob — was dead
+  config).
+- **Supervisor:** the process-group id is captured before the leader is reaped, so descendant teardown
+  works on a clean exit (previously the post-reap `getpgid` failed silently, leaking strays).
+- **Self-review gate:** `detect_environment()` now matches presence-style Claude markers affirmatively
+  (a stray `CLAUDE_COWORK=0` can't manufacture a sandbox surface that would permit self-review).
+- **Robustness:** a bad `--wall`/`--idle` becomes a structured failure, not a traceback; every early
+  failure path reports host provenance; `Backend.independence` (a vestigial duplicate) removed.
+- Coverage: the bash installer is now driven by the suite (refuse-physical-dir, symlink, idempotent,
+  dry-run); the presence-style/allowlist confidence branches, `review_mode(host="unknown")`, and the
+  `other` host tier are all asserted. **One installation safely serves both a Claude Code and a Codex
+  host** — verified: no host-specific persisted state; consent keyed by endpoint; settings per backend.
+
+#### Host auto-detection (the detection core)
 - `detect_host()` now **auto-detects four hosts** from genuine, strict-value env markers, not just
   Claude: `CLAUDECODE=1` → `claude`, `GEMINI_CLI=1` → `gemini` (new provider **Google**),
   `CURSOR_AGENT=1` → `cursor`, and `CODEX_SANDBOX=seatbelt` / `CODEX_SANDBOX_NETWORK_DISABLED=1` →

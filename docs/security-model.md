@@ -11,6 +11,14 @@ under that provider's terms and retention.
 - **Consent is block-by-default** and keyed to the *normalized endpoint* (`scheme://host:port`),
   not just a provider label — so pointing `OPENAI_BASE_URL` at Azure, a proxy, or localhost
   requires a fresh grant. URLs with embedded credentials are rejected.
+  - **Codex-backend routing caveat.** The endpoint Impasse keys consent to is derived from
+    `OPENAI_BASE_URL` (default `api.openai.com`). The codex backend always runs
+    `--ignore-user-config`, so `~/.codex/config.toml` can't reroute the data — but Impasse cannot see
+    a **system/managed** Codex configuration layer, and relies on Codex honoring the `OPENAI_BASE_URL`
+    env var above it. On a standard personal install this holds and the consent key is the true
+    destination; under a managed Codex deployment that overrides the endpoint below the env var,
+    verify your effective Codex configuration — that layer is outside Impasse's visibility. (The
+    claude backend has the analogous `ANTHROPIC_BASE_URL` basis and the Bedrock/Vertex refusal.)
 - Every run prints a **data-boundary notice** and a **payload manifest** (byte/token estimate
   + a digest of the exact bytes) so the operator approves *what* is sent, not just *where*.
 - Grants live in the platform config dir (`~/.config/impasse`, `~/Library/Application Support/impasse`,

@@ -193,12 +193,15 @@ genuine judgment calls come to you. Each `show` closes with a running tally acro
 
 ## Requirements
 
-- [Claude Code](https://claude.com/claude-code) (the host).
-- The [OpenAI Codex CLI](https://github.com/openai/codex) installed and logged in — the
-  recommended, cross-provider reviewer backend — [`docs/backends/codex.md`](docs/backends/codex.md).
-  **No Codex?** A same-provider **Claude fallback** (`--backend claude`) runs on Claude Code alone,
-  no second vendor account — but it shares the host's blind spots, so it buys breadth, not
-  independence — [`docs/backends/claude.md`](docs/backends/claude.md).
+- A **host**: [Claude Code](https://claude.com/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex)
+  — both implement the open [Agent Skills standard](https://agentskills.io). Independence is computed
+  *relative to your host*, so the two named a **backend** below invert accordingly.
+- At least one **reviewer backend** installed and logged in, ideally the one that *differs* from your
+  host (the cross-provider rung): the **Codex CLI** for a Claude host
+  ([`docs/backends/codex.md`](docs/backends/codex.md)), or the **Claude CLI** for a Codex host
+  ([`docs/backends/claude.md`](docs/backends/claude.md)). `--backend auto` (the default) picks the most
+  independent one available; the same-provider backend still runs as a weaker fallback (breadth, not
+  independence).
 - Python 3 (standard library only — the shipped helpers have no pip dependencies).
 - macOS or Linux. Windows via WSL; native Windows is a [roadmap](docs/windows.md).
 
@@ -228,13 +231,26 @@ env-based detection is trust-floored on the environment's integrity. Detail:
 
 ## Install
 
-Impasse is a Claude Code skill — the repository *is* the skill directory:
+Impasse is an Agent Skill — the repository *is* the skill directory. Install it where your host looks
+for skills:
+
+**Claude Code** — clone into the skills dir:
 
 ```bash
 git clone https://github.com/windaddict/impasse ~/.claude/skills/impasse
 ```
 
-Then ask Claude Code to use Impasse — for example, "Use Impasse to review this decision memo."
+**OpenAI Codex** — clone anywhere, then run the installer (a safe, symlink-only install that detects
+the Codex skills root), and restart Codex:
+
+```bash
+git clone https://github.com/windaddict/impasse ~/src/impasse
+bash ~/src/impasse/scripts/install-codex.sh   # symlinks into ~/.codex/skills/impasse
+```
+
+Then ask your host to use Impasse — e.g. "Use Impasse to review this decision memo" (Claude Code), or
+`$impasse` / by description (Codex). One clone can serve both hosts (symlink it into each skills dir);
+they share a host-agnostic config dir.
 
 **Choosing the reviewer model:** by default the backend's own default is used. Ask Claude Code to
 pick one and it presents the options (Codex can't enumerate models, so it's a curated list plus a

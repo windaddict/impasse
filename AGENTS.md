@@ -7,7 +7,7 @@ contributor guide is [`CLAUDE.md`](CLAUDE.md); the essentials:
 
 ```bash
 python3 tests/test_helpers.py       # stdlib, no pytest
-python3 tests/validate_schemas.py   # needs jsonschema (dev only)
+.venv/bin/python3 tests/validate_schemas.py   # jsonschema lives in the repo-root .venv, not on PATH
 ruff check scripts/ tests/
 ```
 

@@ -71,14 +71,19 @@ def _group_alive(pgid: int) -> bool:
         return True  # EPERM etc. -> assume still there
 
 
-def _kill_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
+def _kill_tree(proc: subprocess.Popen, pgid: int | None = None, grace: float = 5.0) -> None:
     """SIGTERM the process GROUP, poll the group, SIGKILL at grace. POSIX only;
-    otherwise best-effort process-level terminate/kill."""
+    otherwise best-effort process-level terminate/kill.
+
+    `pgid` should be the group id CAPTURED right after Popen (== proc.pid under start_new_session).
+    Pass it explicitly: once proc.wait() has reaped the leader, os.getpgid(proc.pid) fails with ESRCH,
+    so a clean-exit teardown that relied on the lookup couldn't reach surviving descendants (F002)."""
     if _POSIX:
-        try:
-            pgid = os.getpgid(proc.pid)
-        except OSError:
-            pgid = None
+        if pgid is None:
+            try:
+                pgid = os.getpgid(proc.pid)
+            except OSError:
+                pgid = None
         if pgid is not None:
             try:
                 os.killpg(pgid, signal.SIGTERM)
@@ -129,6 +134,10 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
         )
     except (OSError, ValueError) as e:
         return RunResult("spawn_error", None, b"", str(e).encode(), False, False, False, 0.0)
+    # Capture the process-group id NOW, while the leader is alive: start_new_session makes the child a
+    # group leader, so its PGID == proc.pid. Saved here, teardown works even after proc.wait() reaps the
+    # leader (when os.getpgid would fail with ESRCH) — F002.
+    _pgid = proc.pid if _POSIX else None
 
     out = bytearray()
     err = bytearray()
@@ -199,8 +208,20 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
             break
         time.sleep(0.2)
 
+    # Tear down the process group ONLY on the abnormal (timeout/idle) path. There the loop broke while
+    # the leader was still ALIVE (poll() returned None that iteration), so the captured pgid (proc.pid)
+    # is valid and killpg targets the real group. On a CLEAN exit we must NOT signal: proc.poll() in the
+    # loop above already REAPED the leader (waitpid/WNOHANG), freeing its pid — signaling the stale pgid
+    # then would risk hitting a recycled group (F005). ACCEPTED TRADEOFF: a rare descendant that outlives
+    # a cleanly-exited leader is therefore NOT terminated here; the bounded reader joins below only stop
+    # it from HANGING the supervisor (they time out and set reader_err) — they do not end the descendant's
+    # life (F009). Group-scoped only either way: a descendant that calls setpgid/setsid escapes this
+    # teardown (F006 — a known limitation, not full-tree containment). See F002 for the up-front pgid.
     if termination != "completed":
-        _kill_tree(proc)
+        try:
+            _kill_tree(proc, _pgid)
+        except OSError:
+            pass
 
     try:
         proc.wait(timeout=10)
@@ -213,14 +234,6 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             termination = "termination_failed"
-
-    # Always tear down the process group, even on a clean leader exit: codex exec / claude -p
-    # shouldn't outlive their leader, but a stray descendant that kept a pipe open would block the
-    # reader joins and leak. Idempotent — swallow "group already gone".
-    try:
-        _kill_tree(proc)
-    except OSError:
-        pass
 
     # Bound EVERY join (both readers + the stdin writer): a descendant holding a pipe open must
     # never hang the supervisor. A finite bound is harmless on the fast clean path — EOF is prompt
@@ -255,12 +268,18 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
         "--sandbox", "read-only", "--color", "never",
         "--skip-git-repo-check", "--ephemeral",
     ]
-    # Hermetic by default: ignore ~/.codex/config.toml (so a custom base_url/provider there can't
-    # reroute data away from the destination the operator consented to) and repo AGENTS.md rules
-    # (so an artifact's own repository can't inject instructions into the read-only reviewer).
-    # Verified auth survives --ignore-user-config. Opt out with IMPASSE_CODEX_RESPECT_CONFIG=1.
+    # --ignore-user-config is UNCONDITIONAL and NOT opt-outable: ~/.codex/config.toml can select a
+    # model_provider/base_url that reroutes data away from the endpoint consent is keyed to (F001).
+    # Ignoring user config makes OPENAI_BASE_URL the authoritative destination ON A STANDARD INSTALL —
+    # a system/managed Codex config layer that overrides the endpoint below the env var is outside
+    # Impasse's visibility (routing caveat in docs/security-model.md). Verified auth survives it; set a
+    # custom endpoint via OPENAI_BASE_URL, not config.toml.
+    argv += ["--ignore-user-config"]
+    # --ignore-rules (repo AGENTS.md, an instruction-injection surface — not a data-routing one) is
+    # hermetic by default; IMPASSE_CODEX_RESPECT_CONFIG=1 opts INTO project rules at the operator's own
+    # prompt-injection risk. It does NOT affect data routing or consent.
     if not os.environ.get("IMPASSE_CODEX_RESPECT_CONFIG"):
-        argv += ["--ignore-user-config", "--ignore-rules"]
+        argv += ["--ignore-rules"]
     if model:
         argv += ["-m", model]
     if effort:
@@ -488,6 +507,13 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     manifest = consent.manifest_for_bytes(artifact_bytes)
     hd = lib.host_detection()  # one snapshot up front — every return path reports the host + provenance
     host = hd["host"]
+    hdblock = {"method": hd["method"], "confidence": hd["confidence"]}
+    # Validate operator-supplied timeouts here so bad CLI input (a negative or non-finite --wall/--idle)
+    # becomes a structured failure, not an uncaught ValueError from supervise() deep in the run (F009).
+    for _label, _val in (("wall", wall_timeout), ("idle", idle_timeout)):
+        if not (isinstance(_val, (int, float)) and math.isfinite(_val) and _val > 0):
+            _m = f"--{_label} must be a positive finite number (got {_val!r})"
+            return {**_fail("backend_error", _m, kind, _m, manifest), "host": host, "host_detection": hdblock}
     # F002: 'auto' selects the most host-independent AVAILABLE backend, mirroring the `mode`
     # pre-flight (review_mode) — so a bare review on a Codex host picks the cross-provider `claude`
     # backend instead of the same-provider `codex` default. review_mode already accounts for
@@ -499,12 +525,14 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         if sel["mode"] not in ("codex", "claude"):
             msg = "no reviewer backend available (install codex or the claude CLI): " + sel["reason"]
             return {**_fail("backend_error", msg, kind, msg, manifest), "host": host,
-                    "host_detection": {"method": hd["method"], "confidence": hd["confidence"]}}
+                    "host_detection": hdblock}
         backend = sel["mode"]
     try:
         be = lib.get_backend(backend)
     except (FileNotFoundError, ValueError) as e:
-        return {**_fail("backend_error", str(e), kind, str(e), manifest), "host": host}
+        # host_detection rides on this early-failure path too (F010: every return reports provenance)
+        return {**_fail("backend_error", str(e), kind, str(e), manifest), "host": host,
+                "host_detection": hdblock}
 
     # Model precedence: per-run --model > IMPASSE_{CODEX,CLAUDE}_MODEL env > persisted default
     # (settings.json via `set-model`) > the backend's own default.
@@ -521,9 +549,9 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     else:
         effort = None
 
-    # Independence is host-relative. Compute the tier ONCE from this run's single host snapshot (not
-    # be.independence, which get_backend() derived from a SECOND detect_host() call) so host,
-    # confidence, tier, and notice can never disagree within a run (F003). The shared formatter names
+    # Independence is host-relative. Compute the tier ONCE from this run's single host snapshot (the
+    # tier is never cached on Backend — F011) so host, confidence, tier, and notice can never disagree
+    # within a run (integration-review F003). The shared formatter names
     # the host so a downgrade can't read as a property of the backend alone; the detection confidence
     # lets a heuristically-detected cross_provider tier carry a soft notice, not a bare positive claim.
     independence = lib.independence_tier(host, be.provider)
@@ -668,7 +696,16 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         record_notice = (("Not recorded (raw mode)." if raw else "Not recorded (--no-record).")
                          if skip_record else None)
         if run_id and not skip_record:
+            reserved = None   # set only AFTER reserve_run_id returns, so cleanup can't touch a pre-existing run
             try:
+                # reserve a UNIQUE dir first so an untrusted/duplicate review_id can't overwrite
+                # another run's record (F004); the reserved id is what we report and reconcile against.
+                reserved = lib.reserve_run_id(run_id)
+                run_id = reserved
+                # Propagate the reserved id INTO the stored document (F002): reconciliation keys its
+                # save off the document's review_id, so the record's review_id must equal the dir name,
+                # or a later reconciliation would land in the wrong directory.
+                parsed["review_id"] = run_id
                 p = lib.save_run_doc(run_id, "reviewer-response", parsed)
                 recorded = True
                 record_path = p   # the full file path, not just the directory
@@ -678,7 +715,15 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                     f"`impasse_report.py prune --older-than N` to clean up old records."
                 )
             except OSError:
-                pass
+                # A failure AFTER a successful reservation: remove only the dir WE reserved (never the
+                # reviewer-supplied original id, which could be a pre-existing run — F007) and report
+                # that the content wasn't persisted rather than silently claiming success.
+                if reserved is not None:
+                    try:
+                        lib.forget_run(reserved)
+                    except OSError:
+                        pass
+                record_notice = "Recording failed (the reviewed content was NOT persisted)."
         return {
             "ok": True, "kind": kind, "termination": result.termination,
             "duration_s": round(result.duration_s, 2), "raw": raw,
@@ -741,7 +786,10 @@ def _main(argv=None) -> int:
     sm.add_argument("--backend", default="codex", choices=["codex", "claude"])
     sm.add_argument("model", nargs="?", default=None, help="model name to persist; omit to show the current default")
     sm.add_argument("--clear", action="store_true", help="clear the persisted default for this backend")
-    se = sub.add_parser("set-effort", help="persist (or show/clear) the default reasoning effort for a backend")
+    se = sub.add_parser("set-effort", help="persist (or show/clear) the default reasoning effort (codex only)")
+    # Only codex has a reasoning-effort knob, so set_default_effort refuses a non-null non-codex WRITE
+    # (F012). We still expose `claude` here so a legacy persisted claude effort can be CLEARED
+    # (`set-effort --backend claude --clear`) — the library allows effort=None for any backend (F008).
     se.add_argument("--backend", default="codex", choices=["codex", "claude"])
     se.add_argument("effort", nargs="?", default=None, choices=sorted(_ALLOWED_EFFORT),
                     help="effort to persist; omit to show the current default")
