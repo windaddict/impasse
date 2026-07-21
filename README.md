@@ -37,8 +37,10 @@ then to you if neither side can win.
 The Codex path, consent gate, and schemas are implemented and tested; verify → reconcile →
 escalate is **directed by the host skill, not enforced in code** — a review is only as good as the
 host's adherence to the protocol (see Guardrails). Dogfooding it on its own source caught a real
-shipping bug before release. It pins to a fast-moving alpha of the Codex CLI and is best-effort —
-expect rough edges.
+shipping bug before release. It **integrates against** the Codex CLI — discovering and invoking the
+Codex binary resolvable in your environment (`PATH`, known install locations, or a `*_BIN` override) —
+so behavior is best-effort and version-sensitive (the `docs/backends/codex.md` observations are from a
+specific fast-moving alpha and aren't durable); expect rough edges.
 
 ## Example
 
@@ -283,21 +285,27 @@ findings are **unverified** — the host hasn't checked them — so use the full
 
 Reviewing an artifact sends its content to a third-party provider. Impasse **blocks by
 default** until you approve the destination, and shows a payload manifest so you approve *what*
-is sent, not just *where*:
+is sent, not just *where*. **Grant the endpoint your host's cross-provider backend actually uses** —
+the blocked run's manifest names it:
 
 ```bash
-python3 scripts/impasse_consent.py grant https://api.openai.com --backend-type codex-cli
+# Claude host (cross-provider reviewer = codex):
+python3 scripts/impasse_consent.py grant https://api.openai.com  --backend-type codex-cli
+# Codex host (cross-provider reviewer = claude):
+python3 scripts/impasse_consent.py grant https://api.anthropic.com --backend-type claude-cli
 ```
 
-Consent is keyed to the normalized endpoint (a custom `OPENAI_BASE_URL` needs its own grant),
-stored `0600` in your platform config dir. **Don't send secrets or regulated data without
+Consent is keyed to the normalized endpoint (a custom `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` needs
+its own grant), stored `0600` in your platform config dir. **Don't send secrets or regulated data without
 authorization.** See [`docs/security-model.md`](docs/security-model.md).
 
 ## Structured output
 
-Reviews and reconciliations are JSON, validated against
+Reviews and reconciliations are JSON, shaped by
 [`schemas/reviewer-response.v1.json`](schemas/reviewer-response.v1.json) and
-[`schemas/reconciliation-result.v1.json`](schemas/reconciliation-result.v1.json). Domain
+[`schemas/reconciliation-result.v1.json`](schemas/reconciliation-result.v1.json). At runtime the
+runner parses the JSON and checks the required top-level fields; **full JSON-Schema validation runs in
+CI (`tests/validate_schemas.py`) or is the host's job**, not the hot path. Domain
 generality comes from an evidence *anchor* union (`file_range | text_quote | section |
 structured_path | generic`) plus an optional external-source citation — see the worked
 [`schemas/examples/`](schemas/examples/).
@@ -345,8 +353,9 @@ with read-only and adversarial **code** review, an optional review gate, and del
 tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
 (decisions, documents, research, data, and code) that verifies each finding and reconciles the
 two models, escalating only what they can't settle rather than returning the review to triage.
-It uses the Codex CLI as its cross-provider reviewer, with a same-provider Claude fallback
-(`claude -p`) for users without Codex — breadth, not independence; the protocol is backend-neutral.
+Its cross-provider reviewer is whichever backend differs from your host — Codex for a Claude host,
+Claude for a Codex host — chosen by `--backend auto`; the same-provider backend is a weaker fallback
+(breadth, not independence). The protocol is backend- and host-neutral.
 
 ## Repository layout
 
@@ -360,8 +369,9 @@ tests/                schema validation + helper tests (CI)
 
 ## Audit trail & reports
 
-Every run is recorded — the reviewer's findings, and (once you save it) the reconciliation —
-under your config dir, and `scripts/impasse_report.py show <review_id>` renders it: the
+Non-raw reviews are recorded by default — the reviewer's findings, and (once you save it) the
+reconciliation — under your config dir (skipped by `--raw` and `--no-record`; a recording failure is
+surfaced, never silent). `scripts/impasse_report.py show <review_id>` renders a recorded run: the
 **reviewer↔host back-and-forth** on each finding, the **decision** made, a **tally** (raised /
 resolved / accepted / rejected / escalated), and the questions escalated to you. `list` shows
 past runs (flagging which still have open escalations); `forget` deletes one. `open` surfaces

@@ -173,16 +173,37 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    treat `--wall` as the real bound. **Scale `--wall` by effort/size:** low/medium ≈ 300s; **high
    effort or a large artifact ≈ 600s+**; xhigh can exceed 30 min of silence and still complete.
    A `timeout` failure usually means the wall was too short for the effort, not that the run hung.
-   **Mind the host's own command cap:** Claude Code's shell tool kills foreground commands at
-   10 min regardless of `--wall`. For any `--wall` ≥ ~550s, run the review **in the background**
-   (Claude Code: `run_in_background`) and collect the JSON when it finishes — never let the host's
-   cap masquerade as a reviewer timeout.
+   **Mind the host's own command cap — it is host-specific and often SHORTER than `--wall`.** The
+   reviewer subprocess reasons silently for minutes; if the host's shell/exec harness kills the
+   command first, an **interrupted run returns no findings — never read that as approval.** Give the
+   command the time it needs via your host's own mechanism:
+   - **Claude Code** kills foreground commands at 10 min. For any `--wall` ≥ ~550s, run the review
+     **in the background** (`run_in_background`) and collect the JSON when it finishes.
+   - **Codex:** in one observed Codex-hosted run, execution was cut off *before* the default 300 s
+     wall (the cap, and even whether it was a fixed command cap, are Codex-version-specific and not
+     established here). Treat Codex's command lifetime as possibly shorter than the wall: run the
+     review with the **longest execution window Codex offers** — its background/detached
+     execution or longest-timeout option, if any — and do **not** interrupt a silently-reasoning
+     reviewer. If Codex can't hold the command open long enough, the review must fit *within* its cap:
+     reduce runtime with lower **`--effort`** or a smaller artifact — **not** by lowering `--wall`,
+     which only makes Impasse abandon the reviewer sooner, not the host hold the command longer — or
+     run it from a host that can keep a long command alive (Claude Code, in the background).
+   - **Any host:** if the command is killed **without Impasse returning a `failure`** (a harness
+     timeout, a cancellation, a termination signal → no JSON at all), that's the HOST interrupting, and
+     the empty result is **not a review** — never read it as approval. A *returned* `failure` (e.g.
+     `timeout`, `rate_limited`) is the runner's own classification — read the `code`, don't assume a
+     host interruption.
 
-   **Raw mode (`--raw`).** For a fast, low-stakes check on your own workspace, `--raw` returns the
-   reviewer's findings and **skips the whole verify → reconcile → escalate protocol** (and doesn't
-   record). Present them directly (`impasse_report.py findings <result.json>`) — but say plainly they
-   are **UNVERIFIED**: the host hasn't checked them and the reviewer is sometimes confidently wrong.
-   Use the full protocol (verify each finding, reconcile, escalate) for anything that matters.
+   **Raw mode (`--raw`) — throwaway self-checks ONLY, never a review you report.** `--raw` returns
+   the reviewer's findings and **skips the entire verify → reconcile → escalate protocol AND records
+   nothing**. Use it only for a fast, low-stakes look at your OWN work: you may inspect the findings
+   privately (`impasse_report.py findings <result.json>`), but they are **UNVERIFIED** (the host
+   hasn't checked them; the reviewer is sometimes confidently wrong). For **any review whose result
+   you hand back to the operator** — an audit, a "review this before I ship," anything they'll rely on
+   — use the **FULL protocol**: it verifies each finding, reconciles, escalates, and **persists a run
+   record**. **Never present a raw run — or an interrupted one — to the operator as a completed or
+   approved review;** an incomplete run is evidence of nothing. If the operator needs a result, run
+   the full protocol.
 
    **Model.** Precedence: `--model <name>` (this run) > `IMPASSE_{CODEX,CLAUDE}_MODEL` env >
    persisted default (`impasse_run.py set-model --backend codex <name>`) > the backend's default.
