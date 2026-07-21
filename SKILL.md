@@ -28,12 +28,15 @@ separate, experimental, opt-in capability (`docs/delegate-mode.md`).
 ## Roles (backend-neutral vocabulary)
 
 - **operator** — the human who owns the decision and receives the escalated deadlocks.
-- **host** — the agent driving Impasse (here: Claude Code, following this file).
-- **reviewer** — the AI evaluating the artifact. The recommended **backend** is the OpenAI
-  Codex CLI — a *different* provider from the host, which is the whole point
-  (`docs/backends/codex.md`). A same-provider **Claude fallback** (`--backend claude`,
-  `docs/backends/claude.md`) exists for users without Codex; it's weaker — it shares the host's
-  blind spots — so it buys breadth, not independence. See the ladder in Guardrails.
+- **host** — the agent driving Impasse by following this file (a shell-capable Agent Skills host —
+  Claude Code or OpenAI Codex). Independence is computed *relative to the host*.
+- **reviewer** — the AI evaluating the artifact. The recommended choice is the **cross-provider**
+  backend *relative to your host* — `--backend auto` picks it: to a **Claude host** that's the
+  OpenAI **Codex CLI** (`docs/backends/codex.md`); to a **Codex host** it's the **Claude CLI**
+  (`docs/backends/claude.md`). A *different* provider from the host is the whole point. The
+  *same-provider* backend for your host (Claude on a Claude host, Codex on a Codex host) still runs,
+  but it's weaker — it shares the host's blind spots — so it buys breadth, not independence, and
+  carries a disclosure notice. See the ladder in Guardrails.
 - **artifact** — what's under review: a decision memo, an essay, a research write-up, a
   dataset, a code change. Its `kind` is chosen explicitly, never silently auto-detected.
 
@@ -82,39 +85,66 @@ falsifiable claims. Escalate those as judgment calls (`value_or_priority_tradeof
 operator's to make. And don't let the *host* settle by fiat: an evidence-less refutation is an
 `unverified_refutation` deadlock, not a rejection.
 
-## Running it (Claude Code host adapter)
+## Running it (host adapter)
 
 The scripts enforce the safety-critical parts in code — **consent, invocation limits, and
 basic response validation** — so any host applies them the same way. Verification,
-reconciliation, and escalation are directed by this skill (the host).
+reconciliation, and escalation are directed by this skill (the host). **Tested hosts: Claude Code and
+OpenAI Codex** (both implement the [open Agent Skills standard](https://agentskills.io)); the run
+steps below are shared. Beyond loading the skill, it needs a real shell with **Python 3**, common
+coreutils, and an installed reviewer backend CLI (`codex` and/or `claude`) — an Agent Skills host
+without those can't run the review path.
 
-Resolve the skill root first — Claude Code runs from the operator's project, not the skill
-directory, so use absolute paths:
+**Resolve the skill root (`IMPASSE_ROOT`) — the directory that contains this `SKILL.md`, i.e. the
+skill you just loaded** — to an absolute path (the scripts also self-locate their own bundled schema,
+so `--schema` is optional). How you obtain that path is host-specific:
 
-```bash
-IMPASSE_ROOT="$HOME/.claude/skills/impasse"   # or the host's skill-root variable, if it has one
-```
+- **Claude Code:** `IMPASSE_ROOT="${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/impasse}"` — Claude Code
+  exports `${CLAUDE_SKILL_DIR}` for exactly this.
+- **Codex:** Codex surfaces the skill's absolute path in your available-skills context — use that
+  path directly (a typical install is `~/.codex/skills/impasse`; use the path Codex gives you rather
+  than hardcoding, and if it isn't exposed, fall back to the install location).
+- **Other Agent Skills hosts:** use the host's skill-directory mechanism if it has one; otherwise
+  resolve the absolute path of the directory holding the `SKILL.md` that triggered. Not every
+  standard-compatible host exposes a skill-root variable.
 
 First, **check the mode** — `python3 "$IMPASSE_ROOT/scripts/impasse_run.py" mode --kind <kind>`
-reports the strongest honest reviewer for this surface (Codex → Claude fallback → self-review →
-refuse; see "Environment & fallback"). Then:
+reports the strongest honest reviewer relative to *your* host (to a Claude host: Codex →
+Claude-fallback → self-review → refuse; to a **Codex host the ladder inverts** — the `claude`
+backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOST` overrides). Then:
 
 1. **Consent (block-by-default).** Sending the artifact means it leaves the machine for a
    third-party provider. The runner blocks until the operator approves the destination and
    sees a payload manifest. If blocked, show the operator the notice + manifest and ask them
    to approve — then either pass `--approve-send <endpoint>` for this run or record a
-   persistent grant (the endpoint URL is the destination):
+   persistent grant. **Grant the exact destination the blocked run reports** in its manifest (the
+   runner derives it from the backend's base-URL env — `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` — so
+   a gateway/proxy changes it). With the **defaults**, the `codex` backend → `https://api.openai.com`
+   and the `claude` backend → `https://api.anthropic.com`. On a **Codex host the cross-provider
+   reviewer is `claude`**, so (at the default endpoint) grant Anthropic:
    ```bash
-   python3 "$IMPASSE_ROOT/scripts/impasse_consent.py" grant <endpoint-url> --backend-type codex-cli
+   # Codex host (cross-provider = claude backend):
+   python3 "$IMPASSE_ROOT/scripts/impasse_consent.py" grant https://api.anthropic.com --backend-type claude-cli
+   # Claude host (cross-provider = codex backend):
+   python3 "$IMPASSE_ROOT/scripts/impasse_consent.py" grant https://api.openai.com --backend-type codex-cli
    ```
+   **On Codex, this is a SEPARATE gate from the sandbox prompt.** When the reviewer subprocess runs,
+   Codex's own sandbox may prompt to escalate (network/exec). That prompt authorizes *running the
+   command* — it is **not** an egress firewall and it typically shows only the command (e.g.
+   `claude -p …` / `codex exec …`), not the network destination; approving it does not verify or
+   restrict where traffic goes. Impasse's consent gate is what authorizes the *destination* (the
+   endpoint in its payload manifest). So: approve the sandbox prompt only if the **command** is the
+   expected reviewer invocation, prefer the narrowest one-shot approval, and rely on Impasse's own
+   manifest/notice — not the sandbox prompt — to confirm the endpoint.
 2. **Write the reviewer instruction** to a file (template below), and the artifact to a file.
-3. **Run the supervised review:**
+3. **Run the supervised review** (`--backend` defaults to `auto` — the most host-independent
+   available backend; omit it unless you must force one. `--schema` is optional; the runner
+   self-locates its bundled schema):
    ```bash
    python3 "$IMPASSE_ROOT/scripts/impasse_run.py" review \
      --kind <code|document|decision|research|data|other> \
      --instruction-file <instr.txt> --artifact-file <artifact> \
-     --schema "$IMPASSE_ROOT/schemas/reviewer-response.v1.json" \
-     [--backend codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 300] [--idle 300]
+     [--backend auto|codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 300] [--idle 300]
    ```
    It returns JSON: on success, `response` is the reviewer's **untrusted** structured output;
    on failure, a `failure` with a `code`
@@ -129,11 +159,14 @@ refuse; see "Environment & fallback"). Then:
    unchanged re-run may also fit, especially near the bound). The runner surfaces `rate_limited` /
    `auth_error` for you to handle: tell the
    operator the real cause and **offer** recovery — wait and retry, switch model (`--model`), or run
-   the same-provider `--backend claude` fallback *with its independence disclosure*. Never silently
-   downgrade to the fallback. `--backend` defaults to `codex` (cross-provider **for this Claude
-   Code host**, recommended); `--backend claude` is the same-provider fallback for users without Codex — it
-   returns an `independence_notice` you **must** surface, and its consent is keyed to
-   `https://api.anthropic.com`, not the OpenAI endpoint (grant it separately).
+   the *same-provider* backend fallback *with its independence disclosure*. Never silently downgrade
+   to a same-provider fallback. `--backend` defaults to **`auto`**, which selects the most
+   host-independent *available* backend **relative to the detected host** — to a Claude host that is
+   `codex` (cross-provider), to a Codex host it is `claude` (cross-provider). Forcing the
+   *same-provider* backend for your host (`codex` on a Codex host, `claude` on a Claude host) returns
+   an `independence_notice` you **must** surface, and each backend keys consent to its own endpoint
+   (`codex` → `https://api.openai.com`; `claude` → `https://api.anthropic.com`) — grant the one your
+   selected backend uses.
 
    **Timeouts.** The reviewer reasons **silently server-side** and streams nothing for minutes — a
    quiet gap is *not* a hang, and `--idle` can't tell the two apart, so keep `--idle ≈ --wall` and
@@ -251,14 +284,16 @@ never answered. When you use Impasse, it's good practice to:
 
 ## Environment & fallback
 
-The reviewer backends are subprocesses (`codex exec`, `claude -p`), so they need a real shell —
-which makes **Claude Code the best (and, for real independence, the required) environment.** On
-other surfaces the tool degrades along the ladder. Pick the strongest honest mode with
+The reviewer backends are subprocesses (`codex exec`, `claude -p`), so they need a real shell with an
+installed backend CLI — **the tested hosts are Claude Code and OpenAI Codex.** Surfaces that can't
+spawn a subprocess (or lack a backend) degrade along the ladder. Pick the strongest honest mode with
 `lib.review_mode(kind, ...)` (CLI: `impasse_run.py mode --kind <kind>`) — capability-first,
-env-gated:
+env-gated, host-relative:
 
-- **Claude Code** — resolve and run a backend: Codex (cross-provider, default) or the Claude
-  fallback. Today, the only surface that runs a reviewer subprocess — so the only one that yields
+- **A host with a shell (Claude Code or Codex)** — resolve and run a backend. To a **Claude host**,
+  Codex is the cross-provider reviewer (Claude the same-provider fallback); to a **Codex host** the
+  ladder inverts — the `claude` backend is cross-provider. `--backend auto` picks the most
+  host-independent available one. These surfaces run a real reviewer subprocess, so they yield
   genuine independence.
 - **Claude chat sandbox / Claude Cowork** — no reviewer subprocess can run. When `review_mode`
   returns `self_review`, the host may perform the review **itself, in a fresh reasoning pass** —
@@ -266,12 +301,14 @@ env-gated:
   independent opinion and that agreement is near-zero evidence); (b) **refuse `kind=code`**
   (verification there needs to run tests — impossible); and (c) recommend Claude Code for a real
   review.
-- **Self-review not permitted** (Claude Code with no backend installed, or an unknown surface) —
+- **Self-review not permitted** (a shell host with no backend installed, or an unknown surface) —
   `review_mode` returns `refuse`: don't fake a review; tell the operator to install a backend or
-  move to Claude Code.
+  move to a host that can run one.
 
-Never self-review when a real backend is available, and never in Claude Code — degrading to the
-host's own context there throws away the independence you actually have. Detail: `docs/environments.md`.
+Never self-review when a real backend is available, and never on a shell host (Claude Code / Codex) —
+degrading to the host's own context there throws away the independence you actually have. Detail:
+`docs/environments.md`. **Installing under Codex:** `bash "$IMPASSE_ROOT/scripts/install-codex.sh"`
+(idempotent; detects the skills root), then restart Codex and invoke with `$impasse` or by description.
 
 ## Guardrails
 
@@ -282,8 +319,8 @@ host's own context there throws away the independence you actually have. Detail:
 - **Independence is limited, not guaranteed.** Two models can share training data and
   correlated blind spots; a different provider *reduces* correlation, it doesn't eliminate it.
   Treat Impasse as a second opinion, not an adjudication oracle. Agreement is evidence, not
-  proof. Independence is a **ladder, computed relative to the host**: different provider (for
-  this Claude Code adapter: Codex, the default) > same provider, fresh process (`claude -p`) >
+  proof. Independence is a **ladder, computed relative to the host**: different provider (the
+  `auto` default — Codex for a Claude host, Claude for a Codex host) > same provider, fresh process >
   **self-review** (the host model in its own context — the last resort in the chat sandbox /
   Cowork where no reviewer subprocess can run). The runner **auto-detects** the common hosts
   (Claude, Codex, Gemini, Cursor) from strict-value env markers — best-effort for Codex, which
@@ -319,5 +356,6 @@ with read-only and adversarial **code** review, an optional review gate, and del
 tasks. Impasse is a different layer: a **domain-general** review-and-reconciliation protocol
 (decisions, documents, research, data, and code) that **verifies each finding and reconciles
 the two models**, escalating only what they can't settle rather than returning the review to
-triage. It uses the Codex CLI as its cross-provider reviewer, with a same-provider Claude fallback
-(`claude -p`) for users without Codex — breadth, not independence; the protocol is backend-neutral.
+triage. Its cross-provider reviewer is whichever backend differs from your host — the Codex CLI for a
+Claude host, the Claude CLI for a Codex host — with the same-provider backend as a weaker fallback
+(breadth, not independence). The protocol is backend- and host-neutral.
