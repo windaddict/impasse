@@ -69,6 +69,19 @@ observations, not a durable API):
   tool `Task`). Verified on 2.1.197: under this config the reviewer's attempts to `Read` a local
   file and to `WebFetch` are both blocked, yet it still answers from stdin. **Caveat:** do not run
   this backend under an override that weakens the permission gate.
+- **Runs in a scratch dir, not your project (F003).** The reviewer subprocess is launched with its
+  CWD set to the run's own throwaway scratch directory (under the impasse config dir), **not** the
+  operator's project directory. This matters because `claude -p` discovers a project's `CLAUDE.md`
+  and `.claude/` hooks by walking up from CWD — and here the "project" is the *artifact under
+  review*, whose instructions are untrusted. Running in scratch keeps the reviewed artifact's own
+  `CLAUDE.md`/hooks out of the reviewer, closing an artifact-controlled prompt-injection /
+  independence-leak vector. This became load-bearing when a Codex host made `claude` the
+  *cross-provider* reviewer. **Residual:** CWD isolation does not neutralize your **user-global**
+  `~/.claude/CLAUDE.md` / `~/.claude/settings.json` hooks, which `claude -p` loads regardless of
+  CWD — but those are *your own* config, not artifact-controlled, so they are an independence/noise
+  consideration, not an injection vector. If you need the reviewer fully clean of user-global
+  context, run it under a scratch `CLAUDE_CONFIG_DIR`. The codex backend is unaffected (its
+  `--ignore-user-config --ignore-rules` already excludes config and `AGENTS.md`).
 - **No reasoning-effort knob.** There is no `model_reasoning_effort` equivalent; a configured
   effort (`--effort`, `IMPASSE_CLAUDE_EFFORT`, or a persisted `set-effort` default) is ignored
   for this backend.

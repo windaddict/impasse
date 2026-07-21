@@ -569,7 +569,14 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 return _f("timeout", f"backend wall_timeout after {wall_timeout:.0f}s")
             if out_last is not None:
                 open(out_last, "w").close()   # truncate — never read a prior attempt's stale content
-            result = supervise(argv, input_bytes=artifact_bytes,
+            # Run the reviewer in the run's own scratch dir, NOT the operator's project CWD (F003):
+            # the reviewer needs no project files (artifact is on stdin), and a project CWD would let
+            # `claude -p` load that project's CLAUDE.md / .claude hooks — an artifact-controlled
+            # injection + independence-leak vector, newly load-bearing now that `claude` is the
+            # cross-provider reviewer for a Codex host. Closes the PROJECT (artifact-controlled) vector;
+            # user-global ~/.claude config is the operator's own (not artifact-controlled) — see the
+            # residual note in docs/backends/claude.md. Codex is unaffected (hermetic via --ignore-rules).
+            result = supervise(argv, input_bytes=artifact_bytes, cwd=scratch,
                                wall_timeout=remaining, idle_timeout=min(idle_timeout, remaining))
             if result.termination == "spawn_error":
                 return _f("backend_error", result.stderr.decode("utf-8", "replace")[-800:])

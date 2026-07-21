@@ -1035,6 +1035,26 @@ def main() -> int:
     check(len(argvs) == 2 and argvs[0] == argvs[1] and 'model_reasoning_effort="high"' in argvs[0],
           "matrix: the retry re-runs the IDENTICAL argv (effort/model resolved once, not per attempt)")
 
+    # F003: the reviewer subprocess must run in the run's scratch dir, NOT the operator's project CWD
+    # (else `claude -p` could load the reviewed project's CLAUDE.md/hooks — artifact-controlled bleed).
+    _cwds = []
+    _orig_sup_c = run.supervise
+
+    def _spy_cwd(argv, **kw):
+        _cwds.append(kw.get("cwd"))
+        return _orig_sup_c(argv, **kw)
+    _proc_cwd = os.getcwd()
+    _cfg_dir = lib.ensure_config_dir()
+    try:
+        run.supervise = _spy_cwd
+        run.review(kind="code", instruction="review", artifact_bytes=b"code", backend="claude", no_record=True)
+    finally:
+        run.supervise = _orig_sup_c
+        os.environ["FAKE_MODE"] = "valid"
+    check(len(_cwds) == 1 and _cwds[0] is not None and _cwds[0] != _proc_cwd
+          and os.path.realpath(_cwds[0]).startswith(os.path.realpath(_cfg_dir)),
+          "F003: reviewer runs in a scratch dir under the config dir, not the operator's project CWD")
+
     check(lib.load_run("r")["reviewer_response"] is not None, "run record: reviewer-response is loadable")
     check(res.get("record_path") and "Recorded locally" in (res.get("record_notice") or ""), "run record: result surfaces where it was saved")
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
