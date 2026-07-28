@@ -47,6 +47,17 @@ _POSIX = os.name == "posix"
 _ALLOWED_EFFORT = frozenset(lib.ALLOWED_EFFORT)  # single source of truth in impasse_lib
 _MAX_FINAL = 2_000_000
 _MAX_INPUT = 4_000_000
+# The reviewer response schema is embedded in the instruction so the reviewer knows the required
+# output shape (see compose_full_instruction). It ships with the skill, so when the caller omits
+# --schema the runner self-locates the bundled copy (SKILL.md documents this) — the schema is NOT
+# optional to the reviewer: with none embedded, a compliant reviewer returns prose and the run
+# fails invalid_response. Resolved relative to this script: scripts/ -> ../schemas/.
+# realpath (not abspath) so a symlink of this script itself still anchors to the real repo — same
+# resolution the sys.path insert above relies on.
+_BUNDLED_SCHEMA_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+    "schemas", "reviewer-response.v1.json")
+_MAX_SCHEMA = 1_000_000   # embedded in the instruction; bound an operator/broken-install file
 
 
 @dataclass
@@ -579,14 +590,37 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
 
     scratch = tempfile.mkdtemp(prefix="impasse-run-", dir=lib.ensure_config_dir())
     try:
-        schema_text = None
-        if schema_path:
-            try:
-                with open(schema_path, encoding="utf-8") as f:
-                    schema_text = f.read()
-            except OSError as e:
-                # explicitly requested but unreadable -> fail loudly, don't silently drop the schema
-                return _f("backend_error", f"schema file unreadable: {schema_path} ({e})")
+        # --schema is optional: an explicit path overrides, otherwise self-locate the bundled schema
+        # (SKILL.md contract). The schema is mandatory to the reviewer — with none embedded it returns
+        # prose and the run fails invalid_response — so a missing/empty/corrupt copy is a broken
+        # install, not a silent no-schema run. Use `is not None` (not truthiness) so an explicit
+        # --schema "" still fails against the OPERATOR's path rather than falling back to bundled.
+        explicit = schema_path is not None
+        schema_src = schema_path if explicit else _BUNDLED_SCHEMA_PATH
+        _who = "schema file" if explicit else "bundled reviewer schema"
+
+        def _schema_fail(detail):  # every schema defect is a structured backend_error, never a traceback
+            hint = "" if explicit else "; reinstall the skill or pass --schema explicitly"
+            return _f("backend_error", f"{_who} unusable: {schema_src} ({detail}){hint}")
+        try:
+            with open(schema_src, "rb") as f:
+                schema_raw = f.read(_MAX_SCHEMA + 1)
+        except OSError as e:
+            return _schema_fail(e)
+        if len(schema_raw) > _MAX_SCHEMA:
+            return _schema_fail(f"exceeds the {_MAX_SCHEMA}-byte bound")
+        try:
+            schema_text = schema_raw.decode("utf-8")   # bytes-first so non-UTF-8 is caught here, not deep in read()
+        except UnicodeDecodeError as e:
+            return _schema_fail(f"not valid UTF-8: {e}")
+        # A blank or non-object schema is truthy-empty: compose_full_instruction would append nothing
+        # and silently reproduce the prose failure this fix exists to prevent — reject it here instead.
+        try:
+            parsed_schema = json.loads(schema_text)
+        except json.JSONDecodeError as e:
+            return _schema_fail(f"not valid JSON: {e}")
+        if not isinstance(parsed_schema, dict) or not parsed_schema:
+            return _schema_fail("not a non-empty JSON object")
         full_instruction = compose_full_instruction(instruction, schema_text)
 
         out_last = None
