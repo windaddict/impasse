@@ -36,6 +36,10 @@ for i, a in enumerate(argv):
 mode = os.environ.get("FAKE_MODE", "valid")
 time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
 
+echo = os.environ.get("FAKE_ECHO_INSTR")   # capture the instruction (argv[-1]) so a test can assert what was embedded
+if echo and argv:
+    open(echo, "w", encoding="utf-8").write(argv[-1])
+
 cf_all = os.environ.get("FAKE_COUNT_ALL")   # counts EVERY invocation (proves retry behavior)
 if cf_all:
     n_all = 0
@@ -350,6 +354,141 @@ def main() -> int:
     os.environ["FAKE_EXIT"] = "0"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] is False and res["failure"]["code"] == "invalid_response", "review: no final message -> invalid_response")
+
+    # --- schema resolution: bundled self-location + loud failure on a bad/missing schema ---
+    # SKILL.md promises `--schema` is optional because the runner self-locates its bundled schema.
+    # With NONE embedded a compliant reviewer returns prose and the run fails invalid_response, so the
+    # fallback must (a) actually embed the bundled schema and (b) fail LOUD on a broken/invalid copy
+    # rather than degrade to a silent no-schema run.
+    os.environ["FAKE_MODE"] = "valid"
+    os.environ["FAKE_EXIT"] = "0"
+    # the self-located path is ABSOLUTE (module-derived, not cwd-relative) and points at the shipped schema
+    check(os.path.isabs(run._BUNDLED_SCHEMA_PATH) and os.path.isfile(run._BUNDLED_SCHEMA_PATH)
+          and run._BUNDLED_SCHEMA_PATH.endswith(os.path.join("schemas", "reviewer-response.v1.json")),
+          "schema: bundled path self-locates (absolute, module-derived) to the shipped schema")
+    # the instruction-capture hook reads argv[-1]; prove that IS the instruction the runner builds (else
+    # a flag-order change would make the embedding assertions below silently check the wrong string).
+    _argv = run.build_codex_argv(["codex"], instruction="INSTR_SENTINEL", output_last_message="x")
+    check(_argv[-1] == "INSTR_SENTINEL", "schema: build_codex_argv puts the instruction last (argv[-1] capture is valid)")
+
+    echo_path = os.path.join(tmp, "echo-instr.txt")
+    _prev_echo = os.environ.get("FAKE_ECHO_INSTR")
+    try:
+        os.environ["FAKE_ECHO_INSTR"] = echo_path
+        bundled_text = open(run._BUNDLED_SCHEMA_PATH, encoding="utf-8").read()
+        # (a) omitted --schema embeds the ENTIRE bundled schema text (not just an incidental $id token),
+        # plus the JSON directive and the caller's lens. Full-text match: a regressed embedding fails this.
+        res = run.review(kind="code", instruction="MY_LENS", artifact_bytes=b"code", schema_path=None, no_record=True)
+        sent = open(echo_path, encoding="utf-8").read()
+        check(res["ok"] is True and bundled_text in sent
+              and "Return ONLY a JSON object" in sent and "MY_LENS" in sent,
+              "schema: omitted --schema embeds the FULL bundled schema text into the instruction")
+        # (b) an explicit --schema is actually READ AND EMBEDDED, not ignored in favour of bundled: a
+        # unique sentinel in the explicit file must appear in what was sent (would pass vacuously otherwise).
+        good_schema = os.path.join(tmp, "good.schema.json")
+        with open(good_schema, "w") as f:
+            f.write('{"type": "object", "title": "EXPLICIT_SENTINEL_SCHEMA"}')
+        res = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path=good_schema, no_record=True)
+        sent = open(echo_path, encoding="utf-8").read()
+        check(res["ok"] is True and "EXPLICIT_SENTINEL_SCHEMA" in sent,
+              "schema: an explicit --schema is read AND embedded (not silently ignored for bundled)")
+    finally:
+        if _prev_echo is None:
+            os.environ.pop("FAKE_ECHO_INSTR", None)
+        else:
+            os.environ["FAKE_ECHO_INSTR"] = _prev_echo
+
+    # bad EXPLICIT schema -> structured backend_error labelled "schema file", no reinstall hint (operator's path)
+    def _schema_case(fname, content, needle, *, binary=False):
+        p = os.path.join(tmp, fname)
+        with open(p, "wb" if binary else "w") as f:
+            f.write(content)
+        r = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path=p, no_record=True)
+        ok = (r["ok"] is False and r["failure"]["code"] == "backend_error"
+              and "schema file" in r["failure"]["message"] and needle in r["failure"]["message"]
+              and "reinstall the skill" not in r["failure"]["message"])
+        check(ok, f"schema: explicit {fname} -> structured backend_error ({needle!r})")
+
+    _schema_case("empty.json", "", "not valid JSON")               # empty file -> would embed nothing
+    _schema_case("notjson.json", "not json", "not valid JSON")
+    _schema_case("badutf8.json", b"\xff\xfe", "not valid UTF-8", binary=True)   # non-UTF-8 (not an OSError)
+    _schema_case("emptyobj.json", "{}", "not a non-empty JSON object")          # empty object -> the emptiness clause
+    _schema_case("emptyarr.json", "[]", "not a non-empty JSON object")          # falsy non-object
+    _schema_case("arr.json", "[1]", "not a non-empty JSON object")              # TRUTHY non-object -> proves the isinstance clause
+    _schema_case("scalar.json", "42", "not a non-empty JSON object")            # truthy non-object scalar
+
+    # size bound: a schema EXACTLY at _MAX_SCHEMA bytes is accepted; one byte over is rejected. Pinning both
+    # sides of the boundary proves the bound's value — a plain unbounded read would pass the over-bound case.
+    _orig_max_schema = run._MAX_SCHEMA
+    try:
+        at_payload = '{"k":"' + ("a" * 10) + '"}'
+        run._MAX_SCHEMA = len(at_payload.encode("utf-8"))
+        at_bound = os.path.join(tmp, "at-bound.json")
+        with open(at_bound, "w") as f:
+            f.write(at_payload)
+        res = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path=at_bound, no_record=True)
+        check(res["ok"] is True, "schema: a schema exactly at the _MAX_SCHEMA byte bound is accepted")
+        over_bound = os.path.join(tmp, "over-bound.json")
+        with open(over_bound, "w") as f:
+            f.write(at_payload + " ")   # one byte over
+        res = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path=over_bound, no_record=True)
+        check(res["ok"] is False and res["failure"]["code"] == "backend_error"
+              and "exceeds the" in res["failure"]["message"],
+              "schema: one byte over _MAX_SCHEMA is rejected (bounded read)")
+    finally:
+        run._MAX_SCHEMA = _orig_max_schema
+
+    # explicit empty-string path must fail against the OPERATOR's path, NOT silently fall back to bundled
+    res = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path="", no_record=True)
+    check(res["ok"] is False and res["failure"]["code"] == "backend_error"
+          and "schema file" in res["failure"]["message"] and "reinstall the skill" not in res["failure"]["message"],
+          "schema: explicit --schema '' fails against the operator path (not treated as omission)")
+
+    # a BROKEN bundled schema (broken install) fails loud, labelled "bundled reviewer schema" + reinstall hint
+    # + the specific defect — for BOTH a missing file and a corrupt one (the bundled branch, not the explicit one).
+    _orig_bundled = run._BUNDLED_SCHEMA_PATH
+    try:
+        run._BUNDLED_SCHEMA_PATH = os.path.join(tmp, "does-not-exist.json")
+        res = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path=None, no_record=True)
+        check(res["ok"] is False and res["failure"]["code"] == "backend_error"
+              and "bundled reviewer schema" in res["failure"]["message"]
+              and "reinstall the skill" in res["failure"]["message"],
+              "schema: MISSING bundled schema -> loud backend_error, bundled-labelled + reinstall hint")
+        corrupt_bundled = os.path.join(tmp, "corrupt-bundled.json")
+        with open(corrupt_bundled, "w") as f:
+            f.write("not json")
+        run._BUNDLED_SCHEMA_PATH = corrupt_bundled
+        res = run.review(kind="code", instruction="review", artifact_bytes=b"code", schema_path=None, no_record=True)
+        check(res["ok"] is False and res["failure"]["code"] == "backend_error"
+              and "bundled reviewer schema" in res["failure"]["message"]
+              and "reinstall the skill" in res["failure"]["message"]
+              and "not valid JSON" in res["failure"]["message"],
+              "schema: CORRUPT bundled schema -> bundled-labelled + reinstall hint + specific defect")
+    finally:
+        run._BUNDLED_SCHEMA_PATH = _orig_bundled
+
+    # integration: the REAL CLI with --schema OMITTED, run from a FOREIGN cwd, must self-locate + succeed
+    # (proves the user-facing path — the skill omits --schema — resolves the schema regardless of cwd).
+    import subprocess as _subprocess
+    _instr_f = os.path.join(tmp, "cli-instr.txt")
+    _art_f = os.path.join(tmp, "cli-art.txt")
+    with open(_instr_f, "w") as f:
+        f.write("review")
+    with open(_art_f, "w") as f:
+        f.write("code")
+    _run_py = os.path.join(HERE, "..", "scripts", "impasse_run.py")
+    _cli = _subprocess.run(
+        [sys.executable, _run_py, "review", "--kind", "code", "--backend", "codex", "--no-record",
+         "--approve-send", "https://api.openai.com",
+         "--instruction-file", _instr_f, "--artifact-file", _art_f],
+        cwd=os.path.dirname(tmp), capture_output=True, text=True,
+        env={**os.environ, "FAKE_MODE": "valid", "FAKE_EXIT": "0"})
+    try:
+        _cli_out = run.json.loads(_cli.stdout)
+    except Exception:
+        _cli_out = {"ok": None}
+    check(_cli_out.get("ok") is True,
+          "schema: real CLI with --schema omitted, from a foreign cwd, self-locates the bundled schema and succeeds")
 
     # --- backend error classification + transient-retry recovery (limits / outages) ---
     _orig_sleep = run.time.sleep
