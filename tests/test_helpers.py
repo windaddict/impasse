@@ -1462,6 +1462,144 @@ def main() -> int:
     deleted3, _k = report.prune(1, include_open=True)
     check("old-open" in deleted3, "housekeeping: prune --include-open removes even open runs")
 
+    # --- escalations view: GUARANTEE full deadlock context BEFORE the operator decides (symmetric with `show`) ---
+    esc_rev = {"schema_version": "1.0", "review_id": "esc-run", "findings": [
+        {"id": "F001", "severity": "high", "category": "correctness", "claim": "CLAIM_TEXT_UNIQUE",
+         "evidence": [{"anchor": {"type": "file_range", "path": "anchor_a.py", "line_start": 1, "line_end": 2},
+                       "observation": "EVIDENCE_OBS_UNIQUE", "grounding": "artifact_observed"}]},
+        {"id": "F002", "severity": "low", "category": "style", "claim": "RESOLVED_CLAIM", "evidence": []},
+        {"id": "F003", "severity": "medium", "category": "x", "claim": "HISTORIC_ESC_CLAIM", "evidence": []}]}
+
+    def _esc_item(fid, state, **kw):
+        it = {"finding_id": fid, "state": state}
+        it.update(kw)
+        return it
+
+    def _deadlock(fid="F001", q="OPERATOR_Q_UNIQUE?"):
+        esc = {"dispute_kind": "value_or_priority_tradeoff", "stop_reason": "operator_authority_required"}
+        if q is not None:
+            esc["operator_question"] = q
+        return _esc_item(fid, "deadlocked", reviewer_position="REVIEWER_POS_UNIQUE",
+                         host_position="HOST_POS_UNIQUE", escalation=esc)
+
+    esc_rec = {"schema_version": "1.0", "reconciliation_id": "y", "review_id": "esc-run",
+               "outcome": "deadlocked", "items": [
+                   _deadlock(),
+                   _esc_item("F002", "resolved", resolution="already decided"),
+                   # a RESOLVED item that still carries historical escalation data must NOT re-appear:
+                   _esc_item("F003", "resolved", resolution="ruled",
+                             escalation={"dispute_kind": "x", "stop_reason": "y", "operator_question": "OLD_Q?"})]}
+    _e = report.render_escalations(esc_rec, esc_rev)
+    check(all(t in _e for t in ("CLAIM_TEXT_UNIQUE", "anchor_a.py:1-2", "EVIDENCE_OBS_UNIQUE",
+              "REVIEWER_POS_UNIQUE", "HOST_POS_UNIQUE", "OPERATOR_Q_UNIQUE?", "ESCALATED")),
+          "escalations: renders full deadlock context (claim, evidence anchor, both positions, question)")
+    check(not any(t in _e for t in ("already decided", "RESOLVED_CLAIM", "HISTORIC_ESC_CLAIM", "OLD_Q?")),
+          "escalations: shows ONLY pending deadlocks — resolved items (even ones with old escalation data) are excluded")
+    check("nothing needs you" in report.render_escalations(
+        {"review_id": "r", "items": [{"finding_id": "F001", "state": "resolved"}]}, esc_rev),
+        "escalations: no deadlocks -> 'nothing needs you'")
+    # sanitize UNTRUSTED text across every field a finding/item contributes (claim, position, question)
+    _e3 = report.render_escalations(
+        {"review_id": "r", "items": [_deadlock(q="q\x1b[0m?") | {"reviewer_position": "p\x1b[31mos"}]},
+        {"findings": [{"id": "F001", "claim": "c\x1b[1mlaim", "severity": "high"}]})
+    check("\x1b" not in _e3, "escalations: sanitizes terminal escapes in untrusted finding/item text")
+
+    # _escalation_problems is the guarantee: it must flag EVERY way full context could be missing.
+    check(report._escalation_problems(esc_rec, esc_rev) == [], "escalations: a fully-populated deadlock has no problems")
+
+    def _one(rec, rev):   # at least one problem flagged
+        return len(report._escalation_problems(rec, rev)) >= 1
+
+    def _mk(items):
+        return {"review_id": "esc-run", "items": items}
+    check(_one(_mk([_deadlock()]), None), "escalations problem: missing reviewer-response (e.g. --no-record run)")
+    check(_one(_mk([_deadlock(fid="NOPE")]), esc_rev), "escalations problem: deadlock finding_id has no matching finding")
+    check(_one(_mk([_deadlock(fid="F002")]), esc_rev), "escalations problem: matched finding has no anchored evidence")
+    check(_one(_mk([_deadlock(q=None)]), esc_rev), "escalations problem: deadlock missing operator_question")
+    check(_one(_mk([_deadlock() | {"reviewer_position": ""}]), esc_rev), "escalations problem: deadlock missing a position")
+    check(_one(_mk([_deadlock() | {"reviewer_position": "\x1b"}]), esc_rev),
+          "escalations problem: a control-char-only position is blank once rendered")
+    check(_one({"review_id": None, "items": [_deadlock()]}, esc_rev), "escalations problem: missing/non-string review_id")
+    check(_one(_mk([_deadlock()]), {"review_id": "OTHER", "findings": esc_rev["findings"]}),
+          "escalations problem: the loaded reviewer-response is for a different review_id")
+    check(_one(_mk([_deadlock(), _deadlock()]), esc_rev), "escalations problem: duplicate finding_id across items")
+    check(_one(_mk([{"finding_id": "F001", "state": "deadlock"}]), esc_rev),  # typo'd state
+          "escalations problem: an unrecognized state (could silently hide an escalation)")
+    check(_one(_mk([_deadlock()]), {"review_id": "esc-run", "findings": 5}),
+          "escalations problem: reviewer-response findings is not a list (total, no crash)")
+    check(report._escalation_problems(_mk([_esc_item("F002", "resolved", resolution="x")]), esc_rev) == [],
+          "escalations: an all-resolved reconciliation is problem-free (nothing to decide)")
+    # evidence must render to REAL anchored content, not merely be dict-shaped (an empty/blank anchor is hollow)
+    check(_one(_mk([_deadlock(fid="F9")]),
+               {"review_id": "esc-run", "findings": [{"id": "F9", "claim": "c", "evidence": [{"anchor": {}, "observation": "obs"}]}]}),
+          "escalations problem: evidence anchor is empty/unrenderable")
+    check(_one(_mk([_deadlock(fid="F9")]),
+               {"review_id": "esc-run", "findings": [{"id": "F9", "claim": "c", "evidence": [{"anchor": {"type": "file_range", "path": "p"}, "observation": ""}]}]}),
+          "escalations problem: evidence observation is blank")
+    # totality: malformed shapes yield problems, never a raise
+    check(_one(_mk([{"finding_id": "F1", "state": ["not", "a", "string"]}]), esc_rev),
+          "escalations problem: an unhashable item state is flagged, not crashed (validator stays total)")
+    check(report._escalation_problems("not a dict", esc_rev) == ["reconciliation is not an object"],
+          "escalations: a non-dict reconciliation is total (no crash)")
+    # duplicate finding id in the reviewer-response itself -> ambiguous which the deadlock means
+    _rev_dup = {"review_id": "esc-run", "findings": [
+        {"id": "F1", "claim": "a", "evidence": [{"anchor": {"type": "file_range", "path": "p", "line_start": 1}, "observation": "o"}]},
+        {"id": "F1", "claim": "b", "evidence": [{"anchor": {"type": "file_range", "path": "q", "line_start": 2}, "observation": "o2"}]}]}
+    check(_one(_mk([_deadlock(fid="F1")]), _rev_dup), "escalations problem: duplicate finding id in the reviewer-response")
+
+    def _good_rev_for(rid):   # a complete, single, matching finding — everything valid except review_id
+        return {"review_id": rid, "findings": [{"id": "F1", "claim": "c",
+                "evidence": [{"anchor": {"type": "file_range", "path": "p", "line_start": 1}, "observation": "o"}]}]}
+    # review_id association is DECISIVE on its own: identical rec/finding, only the response's own review_id differs
+    check(report._escalation_problems(_mk([_deadlock(fid="F1")]), _good_rev_for("esc-run")) == [],
+          "escalations: matching review_id + complete finding -> no problems (de-confounds the mismatch test)")
+    check(_one(_mk([_deadlock(fid="F1")]), _good_rev_for("OTHER")),
+          "escalations problem: same complete finding but the response's own review_id differs -> rejected")
+    # a non-string (unhashable) severity must not crash the renderer
+    check("F1" in report.render_escalations(_mk([_deadlock(fid="F1")]),
+          {"review_id": "esc-run", "findings": [{"id": "F1", "claim": "c", "severity": ["oops"],
+           "evidence": [{"anchor": {"type": "file_range", "path": "p", "line_start": 1}, "observation": "o"}]}]}),
+          "escalations: a non-string severity renders without crashing")
+    # positions stored INSIDE the escalation object (schema-permitted) are accepted AND rendered
+    _pos_esc = {"finding_id": "F001", "state": "deadlocked",
+                "escalation": {"dispute_kind": "x", "stop_reason": "y", "operator_question": "q?",
+                               "reviewer_position": "RP_IN_ESC", "host_position": "HP_IN_ESC"}}
+    check(report._escalation_problems(_mk([_pos_esc]), esc_rev) == [],
+          "escalations: positions inside the escalation object are accepted (schema-valid placement)")
+    check(all(t in report.render_escalations(_mk([_pos_esc]), esc_rev) for t in ("RP_IN_ESC", "HP_IN_ESC")),
+          "escalations: renders positions that live in the escalation object")
+
+    # CLI dispatch: a fully-populated draft renders + exit 0; every incomplete/bad input -> exit 2 (never a partial view)
+    lib.save_run_doc("esc-run", "reviewer-response", esc_rev)
+    def _esc_cli(rec_obj):
+        p = os.path.join(tmp, "esc-cli.json")
+        with open(p, "w") as f:
+            _json.dump(rec_obj, f)
+        ob, eb = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(ob), contextlib.redirect_stderr(eb):
+            rc = report._main(["escalations", p])
+        return rc, ob.getvalue(), eb.getvalue()
+    _rc, _outp, _errp = _esc_cli(esc_rec)
+    check(_rc == 0 and "CLAIM_TEXT_UNIQUE" in _outp and "OPERATOR_Q_UNIQUE?" in _outp,
+          "escalations CLI: fully-populated draft -> exit 0 + full context (reviewer-response loaded by review_id)")
+    # a refusal writes the diagnostic to STDERR and prints NOTHING to stdout (no partial view can leak)
+    _rc2, _out2, _err2 = _esc_cli({"review_id": "esc-run", "items": [_deadlock(q=None)]})
+    check(_rc2 == 2 and _out2 == "" and "refusing to present a partial view" in _err2,
+          "escalations CLI: a deadlock missing its question -> exit 2, diagnostic on stderr, empty stdout")
+    check(_esc_cli({"review_id": "no-such-run", "items": [_deadlock()]})[0] == 2,
+          "escalations CLI: no recorded reviewer-response for the review_id -> exit 2")
+    check(_esc_cli({"review_id": "esc-run", "items": [123, "nope"]})[0] == 2,
+          "escalations CLI: non-dict items -> exit 2, not a traceback")
+    # untrusted malformed reviewer data (unhashable finding id) must fail controlled, not traceback
+    lib.save_run_doc("bad-rev", "reviewer-response", {"schema_version": "1.0", "review_id": "bad-rev",
+                     "findings": [{"id": ["not", "hashable"], "claim": "x"}]})
+    check(_esc_cli({"review_id": "bad-rev", "items": [_deadlock()]})[0] == 2,
+          "escalations CLI: malformed reviewer-response (unhashable id) -> exit 2, not a crash")
+    _badf = os.path.join(tmp, "not-rec.json")
+    with open(_badf, "w") as f:
+        f.write('{"hello": "world"}')
+    check(report._main(["escalations", _badf]) == 2, "escalations CLI: a non-reconciliation file -> exit 2")
+
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
     check("/" not in lib._safe_id("a/b/../../etc"), "safe_id: path separators collapsed")

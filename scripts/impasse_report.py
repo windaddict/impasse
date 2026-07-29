@@ -51,7 +51,15 @@ def _wrap(label: str, text: str, cont: str = "     ") -> str:
     return textwrap.fill(_clean(text), width=96, initial_indent=label, subsequent_indent=cont)
 
 
+def _safe_get(mapping: dict, key, default):
+    """`mapping.get` that never raises on an unhashable (malformed, non-string) key from untrusted
+    reviewer output — a JSON array/object where a string was expected returns `default`, not TypeError."""
+    return mapping.get(key, default) if isinstance(key, str) else default
+
+
 def _anchor_desc(anchor: dict) -> str:
+    if not isinstance(anchor, dict):   # untrusted reviewer output — a non-dict anchor must not crash the render
+        return "?"
     t = anchor.get("type")
     if t == "file_range":
         loc = anchor.get("path", "")
@@ -73,30 +81,60 @@ def _anchor_desc(anchor: dict) -> str:
     return t or "?"
 
 
+def _item_position(item: dict, key: str):
+    """A reconciliation item's position, from the item or (schema-permitted) its escalation object."""
+    v = item.get(key)
+    if isinstance(v, str) and v:
+        return v
+    esc = item.get("escalation")
+    return esc.get(key) if isinstance(esc, dict) else None
+
+
+def _renders_nonblank(v) -> bool:
+    """True iff `v` is a string that still has content AFTER `_clean` strips control chars — so a
+    required field that is only terminal-escape bytes (blank once cleaned) does not pass as present."""
+    return isinstance(v, str) and _clean(v).strip() != ""
+
+
+def _has_anchored_evidence(evidence) -> bool:
+    """True iff at least one evidence entry RENDERS as real anchored evidence: a dict whose anchor is a
+    dict that yields a genuine locator (not blank/'?') AND a non-blank observation. A dict-shaped but
+    empty anchor (`{}`) or a blank observation is hollow context — it must not pass as full context."""
+    if not isinstance(evidence, list):
+        return False
+    return any(isinstance(e, dict) and isinstance(e.get("anchor"), dict)
+               and _anchor_desc(e["anchor"]).strip() not in ("", "?")
+               and _renders_nonblank(e.get("observation"))
+               for e in evidence)
+
+
 def _render_finding(f: dict, item: dict | None) -> list[str]:
     lines = []
-    sev = SEVERITY.get(f.get("severity"), _clean(f.get("severity", "?")))
-    state = STATE.get((item or {}).get("state"), "🔎 raised (not yet reconciled)")
+    sev = _safe_get(SEVERITY, f.get("severity"), _clean(f.get("severity", "?")))
+    state = _safe_get(STATE, (item or {}).get("state"), "🔎 raised (not yet reconciled)")
     cat = _clean(f.get("category", ""))
     lines.append(f"{_clean(f.get('id', '?'))}  {sev}  {state}" + (f"  · {cat}" if cat else ""))
     lines.append(_wrap("  🔎 Reviewer: ", f.get("claim", "")))
     for ev in f.get("evidence", []):
+        if not isinstance(ev, dict):   # untrusted reviewer output — a non-dict entry must not crash the render
+            continue
         desc = _anchor_desc(ev.get("anchor", {}))
         obs = ev.get("observation", "")
         grounding = ev.get("grounding", "")
         lines.append(_wrap("  📌 Evidence: ", f"{desc} — {obs} [{grounding}]"))
-        if ev.get("external_source"):
-            src = ev["external_source"]
+        src = ev.get("external_source")
+        if isinstance(src, dict):
             lines.append(_wrap("     ↗ source: ", src.get("uri") or src.get("title") or "external source"))
     if item:
-        vers = item.get("verification") or []
+        vers = [v for v in (item.get("verification") or []) if isinstance(v, dict)]
         if vers:
-            checks = " · ".join(f"{_clean(v.get('method'))} {VRESULT.get(v.get('result'), _clean(v.get('result')))}" for v in vers)
+            checks = " · ".join(f"{_clean(v.get('method'))} {_safe_get(VRESULT, v.get('result'), _clean(v.get('result')))}" for v in vers)
             lines.append(f"  🧪 Verified: {checks}")
             for v in vers:
                 if v.get("detail"):
                     lines.append(_wrap("     ", v["detail"]))
-        rp, hp = item.get("reviewer_position"), item.get("host_position")
+        # positions may sit on the item or (schema-permitted) inside the escalation — show either
+        rp, hp = _item_position(item, "reviewer_position"), _item_position(item, "host_position")
         if rp or hp:
             lines.append("  🗣️ Back-and-forth:")
             if rp:
@@ -200,6 +238,121 @@ def render_findings(response: dict) -> str:
     return "\n".join(out)
 
 
+_RECOGNIZED_STATES = frozenset({"accepted", "rejected", "resolved", "deadlocked", "withdrawn"})
+
+
+def _escalation_problems(rec: dict, rev: dict | None) -> list:
+    """Return the reasons the escalations view CANNOT show full context for every pending decision —
+    empty means safe to render. This is the guarantee behind the feature: the operator must never be
+    prompted with a partial view (a bare question, or a deadlock whose claim/evidence isn't on disk),
+    which is exactly the defect it fixes. So a deadlock missing its finding context (claim + anchored
+    evidence), positions, or question — an item with an UNRECOGNIZED state (a typo that would silently
+    hide an escalation), a duplicate finding_id, or a reviewer-response that isn't the one for this
+    review — is a hard error, not something a hollow render papers over. TOTAL: never raises, even on
+    malformed input; reviewer findings are UNTRUSTED. Required text is judged AFTER `_clean`, so a
+    control-char-only value (blank once rendered) counts as missing."""
+    problems = []
+    if not isinstance(rec, dict):
+        return ["reconciliation is not an object"]
+    items = rec.get("items")
+    if not isinstance(items, list):
+        return ["reconciliation 'items' is not a list"]
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            problems.append(f"item[{i}] is not an object")
+        elif not (isinstance(it.get("state"), str) and it["state"] in _RECOGNIZED_STATES):
+            # isinstance guard first: a non-string (e.g. a JSON list) is unhashable and would raise
+            # on the set membership test — this function must stay total.
+            problems.append(f"item[{i}] (finding {it.get('finding_id')!r}) has an unrecognized state "
+                            f"{it.get('state')!r} — a real escalation could be silently hidden")
+    # finding_ids must be unique (JSON Schema can't enforce it — the runner/CI must): a duplicate
+    # would render the same decision twice and inflate the count.
+    seen = {}
+    for it in items:
+        fid = it.get("finding_id") if isinstance(it, dict) else None
+        if isinstance(fid, str):
+            seen[fid] = seen.get(fid, 0) + 1
+    problems += [f"duplicate finding_id {k!r} across items" for k, n in sorted(seen.items()) if n > 1]
+    opens = _open_escalations(rec)
+    if not opens:
+        return problems   # nothing to decide (or only the structural problems above)
+    rid = rec.get("review_id")
+    if not (isinstance(rid, str) and rid):
+        problems.append("review_id is missing/not a string, so the reviewer-response (finding claims + "
+                        "evidence) can't be located")
+    findings = {}
+    if isinstance(rev, dict):
+        if rev.get("review_id") != rid:   # the loaded record must be THIS review's, not a crossed one
+            problems.append(f"reviewer-response review_id {rev.get('review_id')!r} does not match the "
+                            f"reconciliation's {rid!r} — refusing to show another review's findings")
+        revf = rev.get("findings")
+        if isinstance(revf, list):
+            dup_fids = set()
+            for f in revf:
+                if isinstance(f, dict) and isinstance(f.get("id"), str):
+                    if f["id"] in findings:   # duplicate reviewer finding id: can't tell which the deadlock means
+                        dup_fids.add(f["id"])
+                    findings[f["id"]] = f
+            problems += [f"reviewer-response has a duplicate finding id {k!r} — ambiguous which the "
+                         "deadlock refers to" for k in sorted(dup_fids)]
+        else:
+            problems.append("reviewer-response 'findings' is not a list")
+    elif rev is None:
+        problems.append(f"reviewer-response not found for review_id {rid!r} — run the FULL protocol so "
+                        "the findings are recorded, or point at the correct review_id")
+    else:
+        problems.append("reviewer-response is malformed (not an object)")
+    for it in opens:
+        fid = it.get("finding_id")
+        label = f"deadlock {fid!r}"
+        if not (isinstance(fid, str) and fid):
+            problems.append(f"{label}: finding_id is missing or not a string")
+        elif isinstance(rev, dict):
+            f = findings.get(fid)
+            if f is None:
+                problems.append(f"{label}: no matching finding in the reviewer-response — its claim/"
+                                "evidence can't be shown")
+            else:
+                if not _renders_nonblank(f.get("claim")):
+                    problems.append(f"{label}: the matched finding has no claim text")
+                if not _has_anchored_evidence(f.get("evidence")):
+                    problems.append(f"{label}: the matched finding has no anchored evidence to show")
+        if not _renders_nonblank(_item_position(it, "reviewer_position")):
+            problems.append(f"{label}: missing reviewer_position")
+        if not _renders_nonblank(_item_position(it, "host_position")):
+            problems.append(f"{label}: missing host_position")
+        esc = it.get("escalation")
+        if not (isinstance(esc, dict) and _renders_nonblank(esc.get("operator_question"))):
+            problems.append(f"{label}: missing escalation.operator_question (the footer promises one)")
+    return problems
+
+
+def render_escalations(rec: dict, rev: dict | None) -> str:
+    """Render, IN FULL, only the items still awaiting the operator — the deadlocks — so they see each
+    escalated issue's evidence and both positions BEFORE being asked to decide, symmetric with how
+    resolved items appear in `show`. `rec` is the (draft or saved) reconciliation the deadlock items
+    live in; `rev` is the reviewer-response holding the finding claims/evidence (its findings are
+    UNTRUSTED — `_render_finding` cleans them). Presentation only, and the sanctioned path is the CLI
+    subcommand, which runs `_escalation_problems` FIRST and refuses a partial view — so this ASSUMES
+    validated input. It does not itself re-validate (a direct importer must run the check), but the
+    shared render helpers are hardened so malformed sub-structures degrade rather than crash."""
+    opens = _open_escalations(rec)
+    review_id = _clean(rec.get("review_id") or (rev or {}).get("review_id") or "?")
+    if not opens:
+        return f"✅ No escalated decisions for '{review_id}' — nothing needs you."
+    findings = {f["id"]: f for f in ((rev or {}).get("findings") or [])
+                if isinstance(f, dict) and isinstance(f.get("id"), str)}
+    out = [f"⚖️  {len(opens)} decision(s) need you — full context before you choose",
+           f"    review: {review_id}",
+           "─" * 78]
+    for it in opens:
+        fid = it.get("finding_id")
+        out += _render_finding(findings.get(fid) or {"id": fid}, it)
+        out.append("─" * 78)
+    out.append("Answer each ❓ question; your ruling becomes that item's resolution.")
+    return "\n".join(out)
+
+
 def lifetime_recap() -> str:
     """A short, honest value recap across every reconciled run on disk — printed at the end of
     a `show` so the operator sees what independent review has surfaced for them. Facts only:
@@ -243,7 +396,7 @@ def _open_escalations(rec: dict) -> list:
     """Items still deadlocked — an escalation the operator hasn't resolved yet. Once the
     operator decides, the host re-saves the reconciliation with that item moved to
     'resolved', so it stops showing as open."""
-    return [it for it in (rec.get("items") or []) if it.get("state") == "deadlocked"]
+    return [it for it in (rec.get("items") or []) if isinstance(it, dict) and it.get("state") == "deadlocked"]
 
 
 def open_runs() -> list:
@@ -286,6 +439,8 @@ def _main(argv=None) -> int:
     s.add_argument("run_id")
     fnd = sub.add_parser("findings", help="render a reviewer-response's raw findings (a review's --raw output)")
     fnd.add_argument("path", help="a reviewer-response JSON file, or a review result JSON (uses its .response)")
+    esc = sub.add_parser("escalations", help="render, IN FULL, the deadlocks awaiting the operator in a (draft) reconciliation — show BEFORE prompting for decisions")
+    esc.add_argument("path", help="a reconciliation-result JSON (draft or saved); its review_id locates the reviewer-response for finding context")
     sr = sub.add_parser("save-reconciliation")
     sr.add_argument("path")
     fg = sub.add_parser("forget")
@@ -356,6 +511,41 @@ def _main(argv=None) -> int:
                   file=sys.stderr)
             return 2
         print(render_findings(resp))
+        return 0
+    if args.cmd == "escalations":
+        try:
+            with open(args.path, encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"cannot read reconciliation file: {e}", file=sys.stderr)
+            return 2
+        if not (isinstance(rec, dict) and isinstance(rec.get("items"), list)):
+            print("not a reconciliation-result (no 'items' list) — expected a reconciliation JSON "
+                  "(draft or saved).", file=sys.stderr)
+            return 2
+        rid = rec.get("review_id")
+        # One boundary around load + validate + render: untrusted/malformed data must yield a
+        # controlled exit 2, never a traceback (the validator is total, but load_run/render can still
+        # raise on storage or degenerate input).
+        try:
+            rev = lib.load_run(rid).get("reviewer_response") if isinstance(rid, str) and rid else None
+            problems = _escalation_problems(rec, rev)
+            if problems:
+                out = None
+            else:
+                out = render_escalations(rec, rev)
+        except Exception as e:
+            print(f"escalations: could not prepare the view: {e}", file=sys.stderr)
+            return 2
+        if out is None:   # refuse to prompt with a partial view — the whole point is full context
+            print("escalations: cannot show full context for every pending decision — refusing to "
+                  "present a partial view:", file=sys.stderr)
+            for p in problems:
+                print(f"  - {p}", file=sys.stderr)
+            print("Populate each deadlock's positions + operator_question and ensure the reviewer-"
+                  "response is recorded under this review_id, then retry.", file=sys.stderr)
+            return 2
+        print(out)
         return 0
     if args.cmd == "save-reconciliation":
         try:
