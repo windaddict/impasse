@@ -224,8 +224,24 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
 4. **Treat `response` as partially validated.** The runner confirms it's JSON with the required
    top-level fields; full schema validation runs in CI (`tests/validate_schemas.py`), not at
    runtime. Don't rely on fields the runner didn't check without validating them yourself.
-5. **Verify, reconcile, and escalate** per the protocol. In Claude Code, put each deadlock's
-   `operator_question` to the operator with `AskUserQuestion`; batch multiple deadlocks.
+5. **Verify, reconcile, and escalate** per the protocol. **Before you prompt the operator to
+   decide anything, show them the full escalated issue(s) — not just the question.** Build the
+   reconciliation with each deadlock's item fully populated (both positions and
+   `escalation.operator_question`, `state: deadlocked`), write it to a file, and render the pending
+   decisions in full:
+   ```bash
+   python3 "$IMPASSE_ROOT/scripts/impasse_report.py" escalations <reconciliation-draft.json>
+   ```
+   This prints each escalated finding with the **same detail `show` gives resolved items** — the
+   reviewer's claim, its anchored evidence, both positions, and the question — so the operator
+   decides with full context, never a bare question stripped of what it's about. **It refuses
+   (non-zero exit) unless it can show full context for every deadlock** — the finding's claim +
+   anchored evidence (so the reviewer-response must be recorded under this `review_id`), both
+   positions, and the `operator_question` — so you cannot accidentally prompt with a partial view;
+   fix the reconciliation and retry. **Paste that rendered output** to
+   the operator. THEN, in Claude Code, put each deadlock's `operator_question` to the operator with
+   `AskUserQuestion` (batch multiple deadlocks). After they answer, move each decided item to
+   `resolved` (their ruling as the `resolution`) and save it (step 6).
 
    **Operator rulings count as escalations regardless of channel.** If an operator ruling
    decides an item's disposition — whether the question traveled through a formal
