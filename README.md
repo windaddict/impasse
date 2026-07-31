@@ -1,16 +1,23 @@
 # Impasse
 
-> **An independent second opinion for any high-stakes call — a decision, an essay, a research
-> claim, a dataset, or code — from a cross-provider AI whose blind spots are *less likely to match* your own.**
+> **Impasse gets you better results from your AI — the first time. It brings in a second AI, from a
+> different company, to pressure-test the work and catch the problems your AI missed, so the result
+> you commit to is one you can trust.**
 
-*Impasse is the reference implementation of **Cross-Lab Adversarial Review (CLAR)** — defined
-below, and written up in [the CLAR essay](https://www.movingavg.com/essays/cross-lab-adversarial-review.html).*
+Why a *second* AI? The one that did the work brings the same blind spots to the check that it brought
+to the work, so a sloppy assumption or a missed edge case can sail straight through. A **rival model
+from a different provider** is less likely to share your AI's blind spots. Think of it as an
+**independent advocate for one thing: the quality of the result you ship.** The second AI challenges
+the work with evidence; then Impasse checks each objection against your actual work, fixes the
+problems that hold up, and brings you the few calls that are genuinely yours to make.
 
-The independent **reviewer never edits your work** — it argues, with evidence. Keeping the critic
-away from the pen is the point: fixes get applied by the host — the AI agent you're already working in (Claude Code or Codex), which
-drives Impasse — or by you, never by the model that's supposed to be checking you. And unlike a plain code reviewer, it doesn't hand you
-a raw list to triage — it **verifies each finding, reconciles the two models, and escalates only
-the genuine disagreement.** You get the verified problems, plus the call(s) that are actually yours.
+The reviewer **never edits your work** — the critic and the editor stay separate: fixes are applied by
+the host you're already working in (Claude Code or Codex, which drives Impasse), or by you, never by
+the model that's supposed to be checking you. And unlike a plain code reviewer, it doesn't hand you a
+raw list to triage.
+
+*Impasse is the reference implementation of **Cross-Lab Adversarial Review (CLAR)** — defined below,
+and written up in [the CLAR essay](https://www.movingavg.com/essays/cross-lab-adversarial-review.html).*
 
 ```mermaid
 flowchart TB
