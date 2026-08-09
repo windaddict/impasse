@@ -1,7 +1,20 @@
-"""Shared, stdlib-only helpers for Impasse: config dir, backend resolution, hashing.
+"""WHAT IT'S FOR: the stdlib-only core Impasse shares across its CLIs — resolves which reviewer
+backend to run and where its data goes (consent keying), decides how independent that reviewer is
+from the host, and persists run records + settings. No third-party deps; ships with the skill.
 
-No third-party dependencies — this ships with the skill. (Schema validation, which
-needs `jsonschema`, is a dev/CI concern under tests/, not a runtime dependency.)
+The real subsystems living here:
+  - config dir + backend resolution — where local state lives, and turning a backend name into a
+    runnable command + its normalized data destination (get_backend / resolve_codex_command /
+    resolve_claude_command / normalize_destination);
+  - host detection + host-relative independence policy — identify the agent DRIVING the protocol
+    and grade a reviewer's independence RELATIVE to it (host_detection / independence_tier /
+    review_mode / the independence_notice disclosure);
+  - the run-record audit trail + a small persisted settings store (reserve_run_id / save_run_doc /
+    list_runs / load_run / forget_run; load_settings + the set/get_default_* accessors);
+  - content hashing for evidence digests and manifests.
+
+(Schema validation, which needs `jsonschema`, is a dev/CI concern under tests/, not a runtime
+dependency.)
 
 POSIX (macOS/Linux) is the supported runtime; Windows is a documented roadmap.
 """

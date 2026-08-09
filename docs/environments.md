@@ -15,25 +15,29 @@ cross-provider choice**. The runner computes every tier relative to the detected
 
 Host identity (`detect_host()` / `host_detection()`): `IMPASSE_HOST` is authoritative
 (`claude | codex | gemini | cursor | other`), and the four common hosts are **auto-detected** from
-genuine, **strict-value** env markers — deliberately not from `detect_environment()`, whose
+**strict-value** env markers — deliberately not from `detect_environment()`, whose
 `IMPASSE_ENV` override is a surface-policy knob and must not be able to manufacture a host identity:
 
 | Host | Marker (strict value) | Confidence | Provider |
 |---|---|---|---|
-| `claude` | `CLAUDECODE=1` (or a genuine Cowork/chat-sandbox surface marker) | strong | Anthropic |
+| `claude` | `CLAUDECODE=1` (or a Cowork/chat-sandbox surface marker) | strong | Anthropic |
 | `gemini` | `GEMINI_CLI=1` | strong | Google |
 | `cursor` | `CURSOR_AGENT=1` | — | none (operator-chosen model) |
 | `codex` | `CODEX_SANDBOX=seatbelt` or `CODEX_SANDBOX_NETWORK_DISABLED=1` | **heuristic** | OpenAI |
 
-Detection is **fail-safe**: markers are matched by exact value (an inherited `GEMINI_CLI=0` doesn't
-count); ≥2 attributable markers, or one attributable marker plus `CURSOR_AGENT`, resolve to
-`unknown` (an unordered inherited env set carries no nesting depth, so the driver is genuinely
-ambiguous); and `IMPASSE_HOST` is **validated and conflict-checked** — a nonempty unrecognized value,
-or a value that disagrees with an observed marker, yields `unknown` rather than silently letting a
-weaker marker win. An undeclared/ambiguous host is `unknown` → `undetermined`, **never a positive
-cross-provider claim**. `cursor`/`other` run an operator-selected model, so they too are
-`undetermined` in either direction, as is a backend routed through an unattributable endpoint (a
-custom gateway).
+Detection is **fail-safe** — three rules, each resolving ambiguity to `unknown` rather than a guess:
+
+- **Strict-value exact match** — a marker counts only at its exact value (an inherited `GEMINI_CLI=0`
+  doesn't count).
+- **≥2 attributable markers, or one plus `CURSOR_AGENT` → `unknown`** — an unordered inherited env set
+  carries no nesting depth, so the driver is ambiguous.
+- **`IMPASSE_HOST` validated and conflict-checked → `unknown`** — a nonempty unrecognized value, or one
+  that disagrees with an observed marker, yields `unknown` rather than silently letting a weaker marker win.
+
+An undeclared/ambiguous host is `unknown` → [`undetermined`](glossary.md) (provider correlation
+unestablished), **never a positive cross-provider claim**. `cursor`/`other` run an operator-selected
+model, so they too are `undetermined` in either direction, as is a backend routed through an
+unattributable endpoint (a custom gateway).
 
 Provenance rides on the result as `host_detection: {method, confidence}`. **Codex is a heuristic:**
 its sandbox-state vars are absent under `--dangerously-bypass-approvals-and-sandbox`, so a

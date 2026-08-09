@@ -225,7 +225,7 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    **Speed (Fast mode).** A separate **codex-only** service-tier knob, **independent of effort**.
    Precedence: `--speed <standard|fast>` (this run) > `IMPASSE_CODEX_SPEED` env > persisted default
    (`impasse_run.py set-speed <standard|fast>`, clear with `--clear`) > **`standard`** (Fast mode
-   **off**, the default). `fast` turns Codex **Fast mode** on — roughly ~1.5× faster serving at a
+   **off**, the default). `fast` turns Codex **Fast mode** on — faster serving at a
    **higher credit cost** — via `-c service_tier="fast" -c features.fast_mode=true`; `standard`/unset
    add nothing. Values are allowlisted at every entry; a bad `IMPASSE_CODEX_SPEED` is a structured
    `backend_error` naming the var, not a traceback. The claude backend has no speed knob — nothing

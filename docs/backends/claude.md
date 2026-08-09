@@ -60,11 +60,14 @@ observations, not a durable API):
   (`stdout_truncated`) rather than trying to parse a cut-off object.
 - **Read-only is fail-closed, and it is NOT a process sandbox.** Unlike codex's
   `--sandbox read-only` (a real OS-level sandbox), the Claude reviewer runs in your normal Claude
-  Code process. Its read-only posture is instead: an **empty allowlist** (`--allowed-tools ""`) so
-  *no* tool is permitted (the artifact is on stdin — the reviewer needs none); `--strict-mcp-config`
-  so no MCP servers load; and a pinned `--permission-mode default` so it can't inherit a permissive
-  ambient mode (`acceptEdits`/`bypassPermissions`) or a `settings.json` that pre-allows network
-  tools. An allowlist fails *closed* as Claude Code adds tools; the `--disallowed-tools` list is
+  Code process. Its read-only posture is three independent controls instead:
+  - an **empty allowlist** (`--allowed-tools ""`) so *no* tool is permitted (the artifact is on
+    stdin — the reviewer needs none);
+  - `--strict-mcp-config` so no MCP servers load;
+  - a pinned `--permission-mode default` so it can't inherit a permissive ambient mode
+    (`acceptEdits`/`bypassPermissions`) or a `settings.json` that pre-allows network tools.
+
+  An allowlist fails *closed* as Claude Code adds tools; the `--disallowed-tools` list is
   defense-in-depth (it also names the exfiltration vectors `WebFetch`/`WebSearch` and the spawn
   tool `Task`). Verified on 2.1.197: under this config the reviewer's attempts to `Read` a local
   file and to `WebFetch` are both blocked, yet it still answers from stdin. **Caveat:** do not run

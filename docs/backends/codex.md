@@ -4,7 +4,8 @@ The reference reviewer backend. Impasse's protocol is backend-neutral; Codex is 
 implementation, alongside the `claude` fallback backend (`docs/backends/claude.md`).
 `scripts/impasse_lib.py` resolves it and `scripts/impasse_run.py` supervises it.
 
-Its independence tier is **host-relative**: to a Claude host (the usual case) it's the
+Its independence tier is **host-relative**: to a Claude [host](../glossary.md) (the agent driving
+Impasse — usually Claude Code) it's the
 `cross_provider` reviewer; to a Codex host (`IMPASSE_HOST=codex`) it's `same_provider` and the
 runner says so — use `--backend claude` there instead. See `docs/environments.md`.
 
@@ -34,7 +35,8 @@ codex exec --json --output-last-message <file> \
   "<reviewer instruction + the reviewer-response schema>"   # artifact piped on stdin, then EOF
 ```
 
-Verified behaviors (on `codex-cli 0.144.0-alpha.4` — re-check with `codex exec --help`, these
+Verified behaviors (on `codex-cli` 0.144.0-alpha.4; the ChatGPT.app rebrand noted above was seen on
+0.145.0-alpha.18 — re-check with `codex exec --help`, these
 are version observations, not a durable API):
 
 - **stdin must reach EOF.** `codex exec` blocks indefinitely if stdin is an open, unwritten
@@ -106,20 +108,20 @@ The argv builder re-checks the allowlist before interpolating into `-c` (defense
 
 ## Fast mode / service tier
 
-A separate codex-only knob, **independent of reasoning effort**: `--speed fast` selects Codex's
-**Fast mode** service tier — roughly ~1.5× faster serving at a **higher credit cost** — by adding
-`-c service_tier="fast" -c features.fast_mode=true`. `standard` (or unset) is the default and adds
-no flags (Fast mode off). Precedence mirrors effort: `--speed` (per run) > `IMPASSE_CODEX_SPEED`
-env > a persisted default (`impasse_run.py set-speed <standard|fast>`, stored in `settings.json`
-beside the model/effort defaults) > `standard`. The two-value allowlist (`standard|fast`) is
-enforced at every entry point — the CLI flag and `set-speed` by argparse choices, `set_default_speed`
-on write, `get_default_speed` again on read (a hand-edited `settings.json` can't smuggle a bad
-value), and the env var at resolution: an invalid `IMPASSE_CODEX_SPEED` fails as a structured
-`backend_error` naming the variable, never a traceback. The argv builder re-checks the allowlist
-before interpolating into `-c` (defense in depth, so a future caller can't inject config syntax).
-The review result reports the resolved value in `speed` (`standard` or `fast`); the claude backend
-has no speed knob — an `IMPASSE_CLAUDE_SPEED` is ignored, never an error, and it reports `speed:
-null`. Speed and effort compose freely (e.g. high effort with fast mode).
+`--speed fast` turns on Codex's **Fast mode** — a higher service tier: meaningfully faster serving
+at a **higher credit cost** — by adding `-c service_tier="fast" -c features.fast_mode=true`.
+`standard` (or unset) adds no flags (Fast mode off). It is **independent of reasoning effort** —
+the two compose freely (e.g. high effort with fast serving). Precedence mirrors effort: `--speed`
+(per run) > `IMPASSE_CODEX_SPEED` env > a persisted default (`impasse_run.py set-speed
+<standard|fast>`, stored in `settings.json` beside the model/effort defaults) > `standard`. The
+review result reports the resolved value in `speed` (`standard` or `fast`); the claude backend has
+no speed knob — an `IMPASSE_CLAUDE_SPEED` is ignored, never an error, and it reports `speed: null`.
+
+Validation: the two-value allowlist (`standard|fast`) is enforced at every entry point (CLI flag,
+`set-speed`, the persisted-value read, and the env var at resolution) and re-checked by the argv
+builder before interpolation into `-c` — exactly the defense-in-depth the effort section describes.
+An invalid `IMPASSE_CODEX_SPEED` fails as a structured `backend_error` naming the variable, never a
+traceback.
 
 ## Failure handling (limits & outages)
 
