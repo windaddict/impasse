@@ -177,7 +177,8 @@ def main() -> int:
     # IMPASSE_CODEX_MODEL or a custom base URL would otherwise break the suite. Standalone
     # process: clear, don't bother restoring.
     for _v in ("IMPASSE_HOST", "IMPASSE_ENV", "IMPASSE_CODEX_MODEL", "IMPASSE_CODEX_EFFORT",
-               "IMPASSE_CLAUDE_MODEL", "IMPASSE_CLAUDE_EFFORT", "IMPASSE_CODEX_RESPECT_CONFIG",
+               "IMPASSE_CLAUDE_MODEL", "IMPASSE_CLAUDE_EFFORT", "IMPASSE_CODEX_SPEED",
+               "IMPASSE_CLAUDE_SPEED", "IMPASSE_CODEX_RESPECT_CONFIG",
                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "OPENAI_BASE_URL",
                "ANTHROPIC_BASE_URL", "FAKE_COUNT_ALL", "FAKE_COUNTER"):
         os.environ.pop(_v, None)
@@ -901,6 +902,127 @@ def main() -> int:
         check(stat.S_IMODE(os.stat(lib._settings_path()).st_mode) == 0o600, "settings: settings.json stays 0600 after generic writes")
     lib.set_default_model("codex", None)
     lib.set_default_effort("codex", None)
+
+    # --- execution speed (Codex Fast mode): a codex-only service-tier knob, mirroring effort ---
+    _sp_fast = run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o", speed="fast")
+    check('service_tier="fast"' in _sp_fast and "features.fast_mode=true" in _sp_fast,
+          "build_codex_argv: speed=fast adds both -c service_tier and -c features.fast_mode")
+    _sp_std = run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o", speed="standard")
+    _sp_none = run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o")
+    check('service_tier="fast"' not in _sp_std and "features.fast_mode=true" not in _sp_std
+          and 'service_tier="fast"' not in _sp_none and "features.fast_mode=true" not in _sp_none,
+          "build_codex_argv: speed=standard/None adds neither fast flag")
+    check(lib.get_default_speed("codex") is None, "settings: no persisted speed by default")
+    # no speed configured -> "standard" (Fast OFF) reported, and no fast flags reach the argv
+    _spd_orig, _spd_cap = run.supervise, {}
+
+    def _spd_spy(argv, **kw):
+        _spd_cap["argv"] = argv
+        return _spd_orig(argv, **kw)
+    run.supervise = _spd_spy
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    run.supervise = _spd_orig
+    check(rm["ok"] and rm.get("speed") == "standard"
+          and 'service_tier="fast"' not in _spd_cap.get("argv", []),
+          "review: no speed configured -> standard (Fast OFF) reported, no fast flags in argv")
+    lib.set_default_speed("codex", "fast")
+    check(lib.get_default_speed("codex") == "fast", "settings: set/get persisted default speed")
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm.get("speed") == "fast", "review: persisted default speed resolves when no flag/env")
+    os.environ["IMPASSE_CODEX_SPEED"] = "standard"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm.get("speed") == "standard", "review: IMPASSE_CODEX_SPEED beats the persisted default")
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", speed="fast", no_record=True)
+    check(rm.get("speed") == "fast", "review: per-run --speed beats env and persisted")
+    os.environ["IMPASSE_CODEX_SPEED"] = "turbo"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm["ok"] is False and rm["failure"]["code"] == "backend_error"
+          and "IMPASSE_CODEX_SPEED" in rm["failure"]["message"],
+          "review: invalid env speed -> structured failure naming the env var")
+    os.environ.pop("IMPASSE_CODEX_SPEED", None)
+    lib.set_default_speed("codex", None)
+    try:
+        lib.set_default_speed("codex", "turbo")
+        _sp_bad = False
+    except ValueError:
+        _sp_bad = True
+    check(_sp_bad, "settings: set_default_speed refuses a disallowed value ('turbo')")
+    # only codex has a service-tier knob: the LIBRARY setter refuses a non-null claude write (dead
+    # config the runner can't consume) but still allows CLEARING one (legacy migration path).
+    _sp_claude_refused = False
+    try:
+        lib.set_default_speed("claude", "fast")
+    except ValueError:
+        _sp_claude_refused = True
+    check(_sp_claude_refused, "F008: set_default_speed refuses a non-null claude write (library level)")
+    lib.set_default_speed("claude", None)   # clearing must NOT raise (migration path)
+    check(True, "F008: set_default_speed(claude, None) clears without error")
+    with open(lib._settings_path(), "w") as _sf:
+        _sf.write('{"default_speed": {"codex": "turbo"}}')
+    check(lib.get_default_speed("codex") is None, "settings: hand-edited invalid speed dropped on read (fail safe)")
+    check(run._main(["set-speed", "--backend", "codex", "fast", "--clear"]) == 2, "set-speed: a speed + --clear together is rejected")
+    check(run._main(["set-speed", "fast"]) == 0 and lib.get_default_speed("codex") == "fast", "set-speed: persists via CLI (and repairs a malformed store)")
+    check(run._main(["set-speed", "--clear"]) == 0 and lib.get_default_speed("codex") is None, "set-speed: --clear via CLI")
+    # a non-null claude speed write is refused by the library — the CLI must surface it as a clean
+    # exit 2, never an uncaught ValueError traceback
+    check(run._main(["set-speed", "--backend", "claude", "fast"]) == 2,
+          "set-speed: a non-null claude write exits 2 cleanly (no traceback)")
+    # the resolved speed must actually reach the codex argv, not just the result metadata
+    _spd_orig2, _spd_cap2 = run.supervise, {}
+
+    def _spd_spy2(argv, **kw):
+        _spd_cap2["argv"] = argv
+        return _spd_orig2(argv, **kw)
+    run.supervise = _spd_spy2
+    os.environ["IMPASSE_CODEX_SPEED"] = "fast"
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    run.supervise = _spd_orig2
+    os.environ.pop("IMPASSE_CODEX_SPEED", None)
+    check(rm.get("speed") == "fast" and 'service_tier="fast"' in _spd_cap2.get("argv", [])
+          and "features.fast_mode=true" in _spd_cap2.get("argv", []),
+          "review: env-resolved speed reaches the codex argv (not just metadata)")
+    # defense in depth: the argv builder itself refuses a non-allowlisted speed (config-syntax payload)
+    _sp_inj = False
+    try:
+        run.build_codex_argv(["/x/codex"], instruction="I", output_last_message="/tmp/o",
+                             speed='fast" injected="1')
+    except ValueError:
+        _sp_inj = True
+    check(_sp_inj, "build_codex_argv: rejects a non-allowlisted speed itself (no config injection)")
+    # claude has no speed knob: an irrelevant IMPASSE_CLAUDE_SPEED (even an invalid one) must
+    # neither fail the run nor be reported as configuration that was applied
+    os.environ["IMPASSE_CLAUDE_SPEED"] = "turbo"
+    rc = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
+    os.environ.pop("IMPASSE_CLAUDE_SPEED", None)
+    check(rc["ok"] is True and rc.get("speed") is None,
+          "review(claude): irrelevant IMPASSE_CLAUDE_SPEED neither fails the run nor reports as applied")
+    # the generic settings writer preserves sibling keys (model + effort) when speed is written
+    lib.set_default_model("codex", "keep-model-3")
+    lib.set_default_effort("codex", "low")
+    lib.set_default_speed("codex", "fast")
+    check(lib.get_default_model("codex") == "keep-model-3" and lib.get_default_effort("codex") == "low"
+          and lib.get_default_speed("codex") == "fast",
+          "settings: speed write preserves the model and effort defaults")
+    lib.set_default_model("codex", None)
+    lib.set_default_effort("codex", None)
+    lib.set_default_speed("codex", None)
+    # speed rides the success-path result metadata alongside model + effort
+    rm = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    check(rm["ok"] and "speed" in rm and "model" in rm and "effort" in rm,
+          "review: speed appears in a successful codex run's result metadata alongside model/effort")
+    # HOST-FACING doc consistency: the operator drives Impasse THROUGH the host AI, so the speed
+    # surface must be documented where the host reads (stdlib file reads, no deps).
+    def _sp_doc(fn):
+        with open(os.path.join(HERE, "..", fn), encoding="utf-8") as _df:
+            return _df.read()
+    _sp_skill = _sp_doc("SKILL.md")
+    _sp_readme = _sp_doc("README.md")
+    _sp_codex = _sp_doc("docs/backends/codex.md")
+    check(all("--speed" in d and "IMPASSE_CODEX_SPEED" in d and "set-speed" in d
+              for d in (_sp_skill, _sp_readme, _sp_codex))
+          and "AskUserQuestion" in _sp_skill and "standard" in _sp_skill and "fast" in _sp_skill
+          and "codex-only" in _sp_skill,
+          "docs: SKILL/README/codex document the --speed / set-speed / IMPASSE_CODEX_SPEED surface")
 
     # --- host-relative independence (IMPASSE_HOST): the tier is a relation, not a backend property ---
     _host_env = {k: os.environ.pop(k, None) for k in (

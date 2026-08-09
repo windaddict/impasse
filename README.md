@@ -374,6 +374,13 @@ run, `scripts/impasse_run.py set-model --backend codex <name>` to persist, or th
 `IMPASSE_CODEX_MODEL` / `IMPASSE_CLAUDE_MODEL` env var. Precedence: flag > env > persisted > default.
 Pinning a model *different* from the host's buys a little extra independence *within* a rung (a different model, same provider).
 
+**Execution speed (Fast mode):** Codex has a **Fast mode** service tier (**codex-only**) that trades
+a **higher credit cost** for faster serving. It's off by default (`standard`). Set it the same way as
+the model: `--speed fast` per run, `scripts/impasse_run.py set-speed fast` to persist (clear with
+`--clear`), or the `IMPASSE_CODEX_SPEED` env var. Precedence: flag > env > persisted > default
+(`standard`). It's **independent of `--effort`**, and — like the model and effort — the host can set
+it for you conversationally ("always use fast mode"). The claude backend has no speed knob.
+
 **Fast checks (`--raw`):** for a quick, low-stakes look at your own work, `review --raw` returns the
 reviewer's findings and skips the verify → reconcile → escalate protocol (and doesn't record). The
 findings are **unverified** — the host hasn't checked them — so use the full protocol when it matters.

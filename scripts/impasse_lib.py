@@ -631,6 +631,11 @@ def _run_dir(run_id: str) -> str:
 # runner (per-run validation) and the settings store (set-effort validation) share one source.
 ALLOWED_EFFORT = ("none", "low", "medium", "high", "xhigh")
 
+# Codex execution-speed / service-tier allowlist. "fast" == Fast mode ON (a higher serving tier at
+# higher credit cost); "standard" is the default (Fast mode OFF). Independent of reasoning effort.
+# Same one-source discipline as ALLOWED_EFFORT: shared by the runner and the set-speed settings store.
+ALLOWED_SPEED = ("standard", "fast")   # codex service tier; "fast" == Fast mode ON. Default OFF.
+
 
 # --- Persisted settings (a small config store, e.g. the operator's default reviewer model) ------
 
@@ -674,6 +679,15 @@ def get_default_effort(backend: str) -> str | None:
     set_default_effort refuses to write one."""
     e = _get_default_setting("default_effort", backend)
     return e if e in ALLOWED_EFFORT else None
+
+
+def get_default_speed(backend: str) -> str | None:
+    """The persisted default execution speed (service tier) for a backend, or None. Lower precedence
+    than a per-run --speed and than IMPASSE_CODEX_SPEED — see impasse_run.review(). A hand-edited
+    value outside ALLOWED_SPEED is dropped here (fail safe on the read path); set_default_speed
+    refuses to write one."""
+    s = _get_default_setting("default_speed", backend)
+    return s if s in ALLOWED_SPEED else None
 
 
 def _settings_lock():
@@ -751,6 +765,19 @@ def set_default_effort(backend: str, effort: str | None) -> None:
     if effort is not None and backend != "codex":
         raise ValueError(f"only the codex backend has a reasoning-effort knob (got backend={backend!r})")
     _set_default_setting("default_effort", backend, effort)
+
+
+def set_default_speed(backend: str, speed: str | None) -> None:
+    """Persist (speed set) or clear (speed None) the default execution speed / service tier for a
+    backend. Refuses a value outside ALLOWED_SPEED — never persist something the runner would reject.
+    Only codex HAS a service-tier/Fast-mode knob, so a non-null write for any other backend is refused
+    at the library level too (not just the CLI); clearing (speed=None) is allowed for any backend so a
+    legacy persisted value can always be removed (migration path)."""
+    if speed is not None and speed not in ALLOWED_SPEED:
+        raise ValueError(f"speed must be one of {sorted(ALLOWED_SPEED)}")
+    if speed is not None and backend != "codex":
+        raise ValueError(f"only the codex backend has a service-tier/Fast-mode knob (got backend={backend!r})")
+    _set_default_setting("default_speed", backend, speed)
 
 
 def fsync_dir(path: str) -> None:

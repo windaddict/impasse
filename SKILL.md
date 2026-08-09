@@ -144,7 +144,7 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    python3 "$IMPASSE_ROOT/scripts/impasse_run.py" review \
      --kind <code|document|decision|research|data|other> \
      --instruction-file <instr.txt> --artifact-file <artifact> \
-     [--backend auto|codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--wall 300] [--idle 300]
+     [--backend auto|codex|claude] [--model <name>] [--approve-send <endpoint>] [--effort none|low|medium|high|xhigh] [--speed standard|fast] [--wall 300] [--idle 300]
    ```
    It returns JSON: on success, `response` is the reviewer's **untrusted** structured output;
    on failure, a `failure` with a `code`
@@ -221,6 +221,31 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    claude backend has no effort knob — nothing resolves for it and any result that reaches backend
    resolution reports `effort: null`. **Scale `--wall` to the resolved effort** (see Timeouts
    above) — raising effort without raising the wall trades findings for timeouts.
+
+   **Speed (Fast mode).** A separate **codex-only** service-tier knob, **independent of effort**.
+   Precedence: `--speed <standard|fast>` (this run) > `IMPASSE_CODEX_SPEED` env > persisted default
+   (`impasse_run.py set-speed <standard|fast>`, clear with `--clear`) > **`standard`** (Fast mode
+   **off**, the default). `fast` turns Codex **Fast mode** on — roughly ~1.5× faster serving at a
+   **higher credit cost** — via `-c service_tier="fast" -c features.fast_mode=true`; `standard`/unset
+   add nothing. Values are allowlisted at every entry; a bad `IMPASSE_CODEX_SPEED` is a structured
+   `backend_error` naming the var, not a traceback. The claude backend has no speed knob — nothing
+   resolves for it and it reports `speed: null`. A codex run always reports the resolved `speed`
+   (`standard` or `fast`) alongside `model` and `effort`. Speed and effort compose freely (e.g. high
+   effort **and** fast mode).
+
+   **Letting the operator choose model / effort / speed interactively.** These three reviewer knobs
+   share one rule: when the operator asks to choose or change any of them (or you offer), the runner
+   can't prompt, so present the options yourself with **`AskUserQuestion`** — for **speed**, offer
+   `standard` vs `fast` and note it is **codex-only** and that `fast` costs more credits; for
+   **effort**, the `none|low|medium|high|xhigh` scale (also codex-only); for **model**, a short
+   curated candidate list plus an "other" free-text choice (Codex has no model-list command; a bad
+   model fails with a clear 400). Then map their answer to scope: a **per-run** request ("review at
+   high effort with fast mode") becomes `--effort` / `--speed` (and `--model`) on **that run**; a
+   **persistent** request ("always use fast mode", "default my reviewer to <model>") becomes the
+   matching **`set-*`** command (`set-speed` / `set-effort` / `set-model`, clear with `--clear`). The
+   precedence is the same for all three — per-run flag > `IMPASSE_*` env > persisted `set-*` default >
+   the backend default — and **effort and speed are codex-only** (the claude backend reports both as
+   `null`).
 4. **Treat `response` as partially validated.** The runner confirms it's JSON with the required
    top-level fields; full schema validation runs in CI (`tests/validate_schemas.py`), not at
    runtime. Don't rely on fields the runner didn't check without validating them yourself.
