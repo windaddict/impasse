@@ -143,3 +143,19 @@ loop) — but they still carry `retryable: true`: as with `rate_limited`, the hi
 is plausible, offer it to the operator", and the failure message names the remedy (shrink the
 artifact, tighten the instruction, lower effort, or re-run unchanged — most plausible near the
 bound). `retryable` is a recoverability hint, not an auto-retry marker.
+
+## Official Codex references
+
+Codex is a fast-moving CLI, so the notes above are version observations, not a durable contract —
+prefer the upstream docs as the source of truth for the controls this backend maps. (The runner runs
+non-interactive and hermetic — `codex exec --ignore-user-config` — so the interactive slash commands
+and `~/.codex/config.toml` persistence those pages also describe do **not** apply to an Impasse run;
+Impasse passes every setting as a `-c` override or `-m`.)
+
+- [Codex CLI](https://developers.openai.com/codex/cli) — the tool overall.
+- [Non-interactive mode (`codex exec`)](https://developers.openai.com/codex/non-interactive-mode) — how the runner invokes it.
+- [Codex models](https://developers.openai.com/codex/models) — model selection (`-m` / `--model`).
+- [Configuration reference](https://developers.openai.com/codex/config-reference) — the `-c` keys the runner sets: `model_reasoning_effort`, `service_tier`, `features.fast_mode`.
+- [Speed / Fast mode](https://developers.openai.com/codex/speed) — the service-tier / Fast-mode behavior behind `--speed fast`.
+- [Codex pricing](https://developers.openai.com/codex/pricing) — the higher credit cost Fast mode trades for speed.
+- [OpenAI model catalog](https://developers.openai.com/api/docs/models) — available models (broader than the Codex selector).
