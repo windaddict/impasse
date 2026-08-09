@@ -1409,6 +1409,39 @@ def main() -> int:
     check("Question for you" in out and "decision(s) need you" in out, "report: shows the escalated question")
     check(any(r["run_id"] == drid for r in lib.list_runs()), "run record: listed by list_runs")
 
+    # --- report credits operator-decided items (issue #5): a resolved item carrying an escalation
+    # object was decided BY the operator, not settled between the models — the tally + footer must say so ---
+    _b_run1 = {"reviewer_response": {}, "reconciliation_result": {"review_id": "b-1", "items": [
+        {"finding_id": "F1", "state": "resolved", "resolution": "Operator chose repair A over B.",
+         "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                        "stop_reason": "operator_authority_required", "operator_question": "A or B?"}},
+        {"finding_id": "F2", "state": "accepted"}]}}
+    _b_out1 = report.render(_b_run1)
+    check("decided by you" in _b_out1 and "you decided" in _b_out1
+          and "Nothing is waiting on you" in _b_out1 and "Nothing needed you" not in _b_out1,
+          "report: operator-decided (resolved + escalation) item is credited, not counted as autonomous")
+    _b_run2 = {"reviewer_response": {}, "reconciliation_result": {"review_id": "b-2", "items": [
+        {"finding_id": "F1", "state": "resolved", "resolution": "host fix"},
+        {"finding_id": "F2", "state": "accepted"}]}}
+    _b_out2 = report.render(_b_run2)
+    check("Nothing needed you — the models settled all 2 between themselves." in _b_out2
+          and "decided by you" not in _b_out2,
+          "report: genuinely-autonomous run still says 'Nothing needed you'")
+    _b_run3 = {"reviewer_response": {}, "reconciliation_result": {"review_id": "b-3", "items": [
+        {"finding_id": "F1", "state": "deadlocked",
+         "escalation": {"dispute_kind": "x", "stop_reason": "y", "operator_question": "q1?"}},
+        {"finding_id": "F2", "state": "resolved", "resolution": "op ruling",
+         "escalation": {"dispute_kind": "z", "stop_reason": "w", "operator_question": "q2?"}}]}}
+    _b_out3 = report.render(_b_run3)
+    # Mixed case: pending deadlock AND an operator-decided item. The footer stays on the pending
+    # branch, but must CREDIT the operator ("you decided 1") — not attribute their ruling to the
+    # models. The footer is the last rendered line; "you decided" appears only there (not the tally).
+    _b_foot3 = _b_out3.splitlines()[-1]
+    check("decision(s) need you" in _b_out3 and "escalated to you" in _b_out3
+          and "decided by you" in _b_out3
+          and "you decided 1" in _b_foot3 and "decision(s) need you" in _b_foot3,
+          "report: a deadlock still takes footer precedence over an operator-decided item")
+
     # --- lifetime recap: aggregate value across reconciled runs (isolated config dir) ---
     recap_dir = tempfile.mkdtemp(prefix="impasse-recap-")
     _prev_cfg = os.environ["IMPASSE_CONFIG_DIR"]

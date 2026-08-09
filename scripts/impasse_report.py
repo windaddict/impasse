@@ -178,11 +178,22 @@ def render(run: dict) -> str:
     by = {"accepted": 0, "rejected": 0, "resolved": 0, "deadlocked": 0, "withdrawn": 0}
     for it in items.values():
         by[it.get("state")] = by.get(it.get("state"), 0) + 1
+    # An operator ruling counts as an escalation regardless of channel (SKILL.md): a resolved item
+    # carrying an escalation object was decided BY the operator, not settled between the two models.
+    # Credit it separately so the tally can't under-report the operator's own involvement (issue #5) —
+    # `pending` is the still-deadlocked work, `resolved_shown` the truly model-settled resolutions.
+    decided_by_you = sum(1 for it in items.values()
+                         if it.get("state") == "resolved" and isinstance(it.get("escalation"), dict))
+    pending = by["deadlocked"]
+    resolved_shown = by["resolved"] - decided_by_you
     out.append("")
-    out.append(
-        f"📊 Decisions: {n} finding(s) raised → ✅ {by['resolved']} resolved · 🤝 {by['accepted']} accepted · "
-        f"❌ {by['rejected']} rejected · ⚖️ {by['deadlocked']} escalated to you"
+    tally = (
+        f"📊 Decisions: {n} finding(s) raised → ✅ {resolved_shown} resolved · 🤝 {by['accepted']} accepted · "
+        f"❌ {by['rejected']} rejected · ⚖️ {pending} escalated to you"
     )
+    if decided_by_you:
+        tally += f" · 🧑‍⚖️ {decided_by_you} decided by you"
+    out.append(tally)
     if rec.get("failure"):
         out.append(f"⚠️ Failure: {rec['failure'].get('code')} — {rec['failure'].get('message')}")
     out.append("─" * 78)
@@ -192,9 +203,15 @@ def render(run: dict) -> str:
         out += _render_finding(f, items.get(f.get("id")))
         out.append("─" * 78)
 
-    esc = by["deadlocked"]
-    if esc:
-        out.append(f"⚖️  {esc} decision(s) need you; the rest the models settled between themselves.")
+    if pending:
+        if decided_by_you:
+            out.append(f"⚖️  {pending} decision(s) need you; you decided {decided_by_you}; "
+                       "the rest the models settled between themselves.")
+        else:
+            out.append(f"⚖️  {pending} decision(s) need you; the rest the models settled between themselves.")
+    elif decided_by_you:
+        out.append(f"✅  Models settled {len(items) - decided_by_you}; you decided {decided_by_you}. "
+                   "Nothing is waiting on you.")
     elif items:
         out.append(f"✅  Nothing needed you — the models settled all {len(items)} between themselves.")
     else:
