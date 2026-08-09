@@ -99,6 +99,55 @@ agree on the same wrong answers well above chance, with the correlation lower �
 CLAR responds to, not its effectiveness.** Cross-lab review buys a discount on shared blind
 spots, not an exemption — which is why agreement stays evidence, not proof.
 
+**A third paper tests a protocol.** *Cross-Model LLM Code Review: Should you use Claude to review
+Codex or vice versa?* (Xiang et al., [arXiv:2607.21656](https://arxiv.org/abs/2607.21656), July
+2026) ran 116 hard and medium coding tasks through six conditions, pairing Claude Opus 4.7 with
+Codex GPT-5.5, and found the pairing asymmetric: Claude reviewing Codex raised the pass rate from
+71.6% to 89.7%, while Codex reviewing Claude *lowered* it from 91.4% to 82.8%. The authors call the
+work exploratory and prompt-sensitive, and specific to these two models. Read at that scope it is
+still a real condition on "the rival needn't be smarter": both models came from different labs, so
+decorrelation was present by construction and did not stop the lower-scoring reviewer from
+degrading the higher-scoring model's work. Decorrelation is not sufficient on its own. Whether it
+delivers what CLAR claims for it — that independent disagreement points at what's worth checking —
+the study doesn't measure; it records final pass rates, not which bugs each model caught.
+
+Its protocol differs from Impasse's in three ways that bear on the result. The study's reviewer
+**emits the final program** — "produce a final corrected solution—either the original if it is
+correct, or an improved version" — so it may leave the draft untouched but alone controls what gets
+submitted; Impasse's reviewer never holds the pen. The study's reviewer **cannot execute anything**
+("do NOT run or test the code; reason purely from code inspection") — static inspection still
+produced the eighteen-point gain in the other direction, but it denies that reviewer any execution
+feedback, where Impasse's host verifies each finding against the artifact with whatever evidence
+and tools apply. And the study has **no evidence requirement and no verification step** — a claimed
+defect goes directly into the submitted program, where Impasse requires anchored evidence, checks
+each finding, and escalates deadlocks instead of applying them. The authors flag two of these
+themselves: static review understates what tool-using agents with sandboxes could achieve, and
+reviewers always emit code with no separate non-intervention action, which may inflate harmful
+rewrites.
+
+Reviewer capability is also less settled than that result alone suggests. *Bigger Isn't Always
+Better* (Kumar et al., [arXiv:2606.15689](https://arxiv.org/abs/2606.15689)) evaluated five models
+on 150 code-review samples and found Claude Haiku 4.5 consistently outscoring the larger Claude
+Sonnet 4.6 — higher F1 (0.365 vs 0.343), 18% higher recall, better qualitative scores on all four
+dimensions, at 3.2× lower cost per review, reproduced on a third-party benchmark. It scores review
+quality directly rather than a reviewer's effect on another model's pass rate, so it doesn't
+contradict Xiang et al. — but between them, **skill at review doesn't track model tier.** Pick your
+reviewer by measuring the pairing you intend to run, not by price or parameter count. The same
+paper found its best model scored F1 0.066 on real pull requests against 0.847 on synthetic bugs, so
+treat every benchmark number here — theirs included — as a poor proxy for field performance.
+
+Whether propose-verify-escalate changes the outcome is **untested**, and the mechanism is a
+reading, not a measurement: the study reports pass rates and does not decompose why the rate fell.
+
+Impasse's approach to separating the critic from the pen and making each finding survive
+verification should *reduce* the damage a wrong call does. It doesn't remove it — a bad finding
+could pass verification and still reach the artifact.
+
+The expectation behind this design is that it does better here. We'd love to see a version of the
+experiment with the reviewer restricted to evidence-backed findings, the host verifying each one,
+and deadlocks escalated rather than silently applied — run by these authors or by anyone else.
+That would settle it.
+
 **Cross-lab vs cross-provider.** "Cross-lab" names the intent — a reviewer trained by a
 *different lab*, which is where the decorrelation comes from. A tool has to select by API
 provider, the practical proxy for lab; the two usually coincide but not always (Azure serves
