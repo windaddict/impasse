@@ -30,6 +30,7 @@ codex exec --json --output-last-message <file> \
   --sandbox read-only --color never --skip-git-repo-check --ephemeral \
   --ignore-user-config --ignore-rules \
   [-m <model>] [-c model_reasoning_effort="low"] \
+  [-c service_tier="fast" -c features.fast_mode=true]   # only when --speed fast (Fast mode ON) \
   "<reviewer instruction + the reviewer-response schema>"   # artifact piped on stdin, then EOF
 ```
 
@@ -102,6 +103,23 @@ means backend default). Higher effort means longer silent server-side reasoning 
 with it (see SKILL.md Timeouts). The claude backend has no effort equivalent: nothing resolves
 for it (an `IMPASSE_CLAUDE_EFFORT` is ignored, never an error) and it reports `effort: null`.
 The argv builder re-checks the allowlist before interpolating into `-c` (defense in depth).
+
+## Fast mode / service tier
+
+A separate codex-only knob, **independent of reasoning effort**: `--speed fast` selects Codex's
+**Fast mode** service tier — roughly ~1.5× faster serving at a **higher credit cost** — by adding
+`-c service_tier="fast" -c features.fast_mode=true`. `standard` (or unset) is the default and adds
+no flags (Fast mode off). Precedence mirrors effort: `--speed` (per run) > `IMPASSE_CODEX_SPEED`
+env > a persisted default (`impasse_run.py set-speed <standard|fast>`, stored in `settings.json`
+beside the model/effort defaults) > `standard`. The two-value allowlist (`standard|fast`) is
+enforced at every entry point — the CLI flag and `set-speed` by argparse choices, `set_default_speed`
+on write, `get_default_speed` again on read (a hand-edited `settings.json` can't smuggle a bad
+value), and the env var at resolution: an invalid `IMPASSE_CODEX_SPEED` fails as a structured
+`backend_error` naming the variable, never a traceback. The argv builder re-checks the allowlist
+before interpolating into `-c` (defense in depth, so a future caller can't inject config syntax).
+The review result reports the resolved value in `speed` (`standard` or `fast`); the claude backend
+has no speed knob — an `IMPASSE_CLAUDE_SPEED` is ignored, never an error, and it reports `speed:
+null`. Speed and effort compose freely (e.g. high effort with fast mode).
 
 ## Failure handling (limits & outages)
 

@@ -45,6 +45,7 @@ import impasse_consent as consent  # noqa: E402
 
 _POSIX = os.name == "posix"
 _ALLOWED_EFFORT = frozenset(lib.ALLOWED_EFFORT)  # single source of truth in impasse_lib
+_ALLOWED_SPEED = frozenset(lib.ALLOWED_SPEED)    # codex service tier / Fast mode; same single source
 _MAX_FINAL = 2_000_000
 _MAX_INPUT = 4_000_000
 # The reviewer response schema is embedded in the instruction so the reviewer knows the required
@@ -259,21 +260,28 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
 
 
 def build_codex_argv(backend_command, *, instruction: str, output_last_message: str,
-                     effort: str | None = None, model: str | None = None) -> list[str]:
+                     effort: str | None = None, model: str | None = None,
+                     speed: str | None = None) -> list[str]:
     """Assemble a read-only `codex exec` review command. The artifact is fed on stdin
     (as context), not as an argv element, so large artifacts don't hit ARG_MAX and
     stdin still reaches EOF.
+
+    `speed` is the codex service tier / Fast mode and is INDEPENDENT of `effort` (reasoning
+    effort): "fast" turns Fast mode on (higher serving tier, higher credit cost); "standard"/None
+    leaves it off. The two knobs compose freely (e.g. high effort + fast mode).
 
     NOTE: we do NOT use `--output-schema`. OpenAI's structured-output mode requires a
     restricted schema (every property in `required`, no oneOf/allOf/if-then/minLength/
     pattern) — the rich reviewer-response schema doesn't qualify. Instead the schema is
     embedded in the instruction (see review()) and the output is validated afterward.
     """
-    # Defense in depth: review() allowlists every effort source (flag/env/persisted), but this
+    # Defense in depth: review() allowlists every effort/speed source (flag/env/persisted), but this
     # helper is the surface that interpolates the value into a codex `-c` config expression — a
     # future direct caller must not be able to smuggle config syntax through it.
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
+    if speed is not None and speed not in _ALLOWED_SPEED:
+        raise ValueError(f"speed must be one of {sorted(_ALLOWED_SPEED)}")
     argv = list(backend_command) + [
         "exec", "--json", "--output-last-message", output_last_message,
         "--sandbox", "read-only", "--color", "never",
@@ -295,6 +303,10 @@ def build_codex_argv(backend_command, *, instruction: str, output_last_message: 
         argv += ["-m", model]
     if effort:
         argv += ["-c", f'model_reasoning_effort="{effort}"']
+    # Fast mode is opt-in and independent of effort: set the service tier AND the feature flag only
+    # when explicitly "fast". "standard"/None add nothing (leave the account/backend default).
+    if speed == "fast":
+        argv += ["-c", 'service_tier="fast"', "-c", "features.fast_mode=true"]
     argv += [instruction]
     return argv
 
@@ -504,7 +516,8 @@ def _fail(code, message, kind, notice, manifest, termination=None, retryable=Non
 
 def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str = "auto",
            schema_path: str | None = None, approve_send: str | None = None,
-           effort: str | None = None, model: str | None = None, wall_timeout: float = 300.0,
+           effort: str | None = None, model: str | None = None, speed: str | None = None,
+           wall_timeout: float = 300.0,
            idle_timeout: float = 300.0, no_record: bool = False, raw: bool = False) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
@@ -514,6 +527,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     downgraded tier (same_provider/undetermined) carries an `independence_notice` the host surfaces."""
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
+    if speed is not None and speed not in _ALLOWED_SPEED:
+        raise ValueError(f"speed must be one of {sorted(_ALLOWED_SPEED)}")
 
     manifest = consent.manifest_for_bytes(artifact_bytes)
     hd = lib.host_detection()  # one snapshot up front — every return path reports the host + provenance
@@ -559,6 +574,15 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                   or lib.get_default_effort("codex"))
     else:
         effort = None
+    # Speed (service tier / Fast mode) precedence mirrors effort: per-run --speed > IMPASSE_CODEX_SPEED
+    # env > persisted default (`set-speed`) > "standard" (Fast mode OFF). Independent of effort. Only
+    # the codex backend HAS this knob — for backends without one (claude), resolve nothing and report
+    # null: an irrelevant IMPASSE_CLAUDE_SPEED must neither fail the run nor masquerade as applied.
+    if be.name == "codex":
+        speed = (speed or os.environ.get("IMPASSE_CODEX_SPEED")
+                 or lib.get_default_speed("codex") or "standard")
+    else:
+        speed = None
 
     # Independence is host-relative. Compute the tier ONCE from this run's single host snapshot (the
     # tier is never cached on Backend — F011) so host, confidence, tier, and notice can never disagree
@@ -571,7 +595,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     # disclosure carried on EVERY return path (success and failure), not just success
     bmeta = {"backend": be.name, "provider": be.provider, "independence": independence,
              "host": host, "host_detection": {"method": hd["method"], "confidence": hd["confidence"]},
-             "model": model, "effort": effort, "independence_notice": independence_notice}
+             "model": model, "effort": effort, "speed": speed, "independence_notice": independence_notice}
 
     # The per-run param was validated above; the persisted default is allowlisted on both write
     # (set_default_effort) and read (get_default_effort). So an invalid value here can only come
@@ -579,6 +603,13 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     if effort is not None and effort not in _ALLOWED_EFFORT:
         msg = (f"IMPASSE_CODEX_EFFORT={effort!r} is not a valid reasoning effort "
                f"(one of {sorted(_ALLOWED_EFFORT)})")
+        return {**_fail("backend_error", msg, kind, msg, manifest), **bmeta}
+    # Same for speed: the per-run param and persisted default are allowlisted on both write
+    # (set_default_speed) and read (get_default_speed), so an invalid resolved codex speed here can
+    # only come from IMPASSE_CODEX_SPEED — a config error, not API misuse: fail structured.
+    if speed is not None and speed not in _ALLOWED_SPEED:
+        msg = (f"IMPASSE_CODEX_SPEED={speed!r} is not a valid execution speed "
+               f"(one of {sorted(_ALLOWED_SPEED)})")
         return {**_fail("backend_error", msg, kind, msg, manifest), **bmeta}
 
     approved, notice = consent.check(be, manifest=manifest, approve_send=approve_send)
@@ -628,7 +659,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             out_fd, out_last = tempfile.mkstemp(prefix="last-", suffix=".txt", dir=scratch)
             os.close(out_fd)
             argv = build_codex_argv(be.command, instruction=full_instruction,
-                                    output_last_message=out_last, effort=effort, model=model)
+                                    output_last_message=out_last, effort=effort, model=model,
+                                    speed=speed)
         elif be.type == "claude-cli":
             argv = build_claude_argv(be.command, instruction=full_instruction, model=model)
         else:
@@ -798,6 +830,10 @@ def _main(argv=None) -> int:
     rv.add_argument("--effort", default=None, choices=sorted(_ALLOWED_EFFORT),
                     help="codex reasoning effort (else IMPASSE_CODEX_EFFORT, else the persisted "
                          "set-effort default, else the codex default; ignored by the claude backend)")
+    rv.add_argument("--speed", default=None, choices=sorted(_ALLOWED_SPEED),
+                    help="codex service tier / Fast mode (else IMPASSE_CODEX_SPEED, else the persisted "
+                         "set-speed default, else standard = Fast OFF; independent of --effort; ignored "
+                         "by the claude backend)")
     rv.add_argument("--model", default=None,
                     help="reviewer model (else IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL, else the backend default)")
     rv.add_argument("--wall", type=float, default=300.0,
@@ -828,6 +864,14 @@ def _main(argv=None) -> int:
     se.add_argument("effort", nargs="?", default=None, choices=sorted(_ALLOWED_EFFORT),
                     help="effort to persist; omit to show the current default")
     se.add_argument("--clear", action="store_true", help="clear the persisted default for this backend")
+    sp = sub.add_parser("set-speed", help="persist (or show/clear) the default execution speed / Fast mode (codex only)")
+    # Only codex has a service-tier/Fast-mode knob, so set_default_speed refuses a non-null non-codex
+    # WRITE. We still expose `claude` here so a legacy persisted claude speed can be CLEARED
+    # (`set-speed --backend claude --clear`) — the library allows speed=None for any backend.
+    sp.add_argument("--backend", default="codex", choices=["codex", "claude"])
+    sp.add_argument("speed", nargs="?", default=None, choices=sorted(_ALLOWED_SPEED),
+                    help="speed to persist ('standard'|'fast'); omit to show the current default")
+    sp.add_argument("--clear", action="store_true", help="clear the persisted default for this backend")
     args = ap.parse_args(argv)
 
     if args.cmd == "set-model":
@@ -858,6 +902,29 @@ def _main(argv=None) -> int:
             print(f"default effort for {args.backend}: {lib.get_default_effort(args.backend) or '(backend default)'}")
         return 0
 
+    if args.cmd == "set-speed":
+        if args.clear and args.speed:
+            print("give a speed to persist OR --clear, not both", file=sys.stderr)
+            return 2
+        if args.clear:
+            lib.set_default_speed(args.backend, None)   # clearing is allowed for any backend (migration)
+            print(f"cleared persisted default speed for {args.backend}")
+        elif args.speed:
+            # Only codex has a Fast-mode/service-tier knob: set_default_speed refuses a non-null write
+            # for any other backend. Surface that as a clean exit 2, not an uncaught traceback.
+            try:
+                lib.set_default_speed(args.backend, args.speed)
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+            print(f"persisted default speed for {args.backend}: {args.speed}")
+        elif args.backend != "codex":
+            # Don't present a speed for a backend that has no such knob — that would read as if it did.
+            print(f"the {args.backend} backend has no speed/Fast-mode knob")
+        else:
+            print(f"default speed for {args.backend}: {lib.get_default_speed(args.backend) or '(standard, Fast off)'}")
+        return 0
+
     if args.cmd == "mode":
         def _avail(resolve):
             try:                       # a bad *_BIN override raises; treat as unavailable, don't crash
@@ -883,7 +950,7 @@ def _main(argv=None) -> int:
             return 1
         result = review(kind=args.kind, instruction=instruction, artifact_bytes=artifact_bytes,
                         backend=args.backend, schema_path=args.schema, approve_send=args.approve_send,
-                        effort=args.effort, model=args.model, wall_timeout=args.wall,
+                        effort=args.effort, model=args.model, speed=args.speed, wall_timeout=args.wall,
                         idle_timeout=args.idle, no_record=args.no_record, raw=args.raw)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
