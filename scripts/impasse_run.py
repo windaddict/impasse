@@ -6,8 +6,9 @@ Runs the reviewer as a subprocess with:
     is what makes `codex exec` hang; and writing on a thread means a backend that
     stops reading stdin can't dodge the timeouts below;
   - a hard WALL timeout AND an IDLE (no-output) timeout;
-  - reliable process-TREE termination (own process group -> SIGTERM -> grace ->
-    SIGKILL, polling the GROUP, not just the leader), then a BOUNDED reap;
+  - process-GROUP termination on an abnormal exit (own process group -> SIGTERM -> grace ->
+    SIGKILL, polling the GROUP, not just the leader) — best-effort, not full-tree containment: a
+    descendant that calls setpgid/setsid escapes the group (F006 limitation) — then a BOUNDED reap;
   - size-capped stdout/stderr capture (avoids pipe-buffer backpressure deadlock);
   - a machine-readable termination reason.
 
@@ -89,7 +90,8 @@ def _kill_tree(proc: subprocess.Popen, pgid: int | None = None, grace: float = 5
 
     `pgid` should be the group id CAPTURED right after Popen (== proc.pid under start_new_session).
     Pass it explicitly: once proc.wait() has reaped the leader, os.getpgid(proc.pid) fails with ESRCH,
-    so a clean-exit teardown that relied on the lookup couldn't reach surviving descendants (F002)."""
+    so a clean-exit teardown that relied on the lookup couldn't reach surviving descendants
+    (crash-safe pgid capture — F002 in the security audit)."""
     if _POSIX:
         if pgid is None:
             try:
@@ -129,6 +131,18 @@ def _kill_tree(proc: subprocess.Popen, pgid: int | None = None, grace: float = 5
 def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 180.0,
               idle_timeout: float = 60.0, max_output_bytes: int = 8_000_000,
               cwd: str | None = None, env: dict | None = None) -> RunResult:
+    """Run ONE reviewer subprocess to completion under a hard wall-clock cap AND an idle
+    (no-output) cap, and return a RunResult describing how it ended.
+
+    Contract: captures size-limited stdout/stderr (each bounded by max_output_bytes, with a
+    truncation flag, so a chatty backend can't deadlock on pipe-buffer backpressure), feeds
+    input_bytes on a SEPARATE stdin thread then closes it (EOF), and on any abnormal exit tears
+    down the subprocess's process GROUP (own process group -> SIGTERM -> grace -> SIGKILL on
+    POSIX; process-level fallback elsewhere) — best-effort, not guaranteed whole-tree containment: a
+    descendant that calls setpgid/setsid escapes the group (F006). It NEVER raises for backend misbehavior — a crash,
+    wall timeout, idle stall, or spawn failure all come back as a RunResult.termination the
+    CALLER classifies (only invalid arguments raise ValueError here).
+    """
     for label, val in (("wall_timeout", wall_timeout), ("idle_timeout", idle_timeout)):
         if not (isinstance(val, (int, float)) and math.isfinite(val) and val > 0):
             raise ValueError(f"{label} must be a positive finite number")
@@ -148,7 +162,7 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
         return RunResult("spawn_error", None, b"", str(e).encode(), False, False, False, 0.0)
     # Capture the process-group id NOW, while the leader is alive: start_new_session makes the child a
     # group leader, so its PGID == proc.pid. Saved here, teardown works even after proc.wait() reaps the
-    # leader (when os.getpgid would fail with ESRCH) — F002.
+    # leader (when os.getpgid would fail with ESRCH) — this is the crash-safe pgid capture, F002.
     _pgid = proc.pid if _POSIX else None
 
     out = bytearray()
@@ -224,11 +238,13 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
     # the leader was still ALIVE (poll() returned None that iteration), so the captured pgid (proc.pid)
     # is valid and killpg targets the real group. On a CLEAN exit we must NOT signal: proc.poll() in the
     # loop above already REAPED the leader (waitpid/WNOHANG), freeing its pid — signaling the stale pgid
-    # then would risk hitting a recycled group (F005). ACCEPTED TRADEOFF: a rare descendant that outlives
-    # a cleanly-exited leader is therefore NOT terminated here; the bounded reader joins below only stop
-    # it from HANGING the supervisor (they time out and set reader_err) — they do not end the descendant's
-    # life (F009). Group-scoped only either way: a descendant that calls setpgid/setsid escapes this
-    # teardown (F006 — a known limitation, not full-tree containment). See F002 for the up-front pgid.
+    # then would risk hitting a recycled group — the reaped leader's pid/group can be reused (no
+    # signal-after-reap — F005). ACCEPTED TRADEOFF: a rare descendant that outlives a cleanly-exited
+    # leader is therefore NOT terminated here; the bounded reader joins below only stop it from HANGING
+    # the supervisor (they time out and set reader_err) — they bound a hang, they do not end the
+    # descendant's life (F009). Group-scoped only either way: a descendant that calls setpgid/setsid
+    # escapes this teardown (F006 — a known limitation, not full-tree containment). See the up-front
+    # pgid capture above (F002) for why the captured group id is what killpg targets on the timeout path.
     if termination != "completed":
         try:
             _kill_tree(proc, _pgid)
@@ -328,8 +344,8 @@ def build_claude_argv(backend_command, *, instruction: str, model: str | None = 
     the instruction is the prompt. The final message is read from STDOUT — `claude -p` has no
     `--output-last-message` file. (Reasoning effort has no Claude analog, so there is no effort
     knob here.) The variadic tool flags come after the fixed flags; `--disallowed-tools` comes
-    last. Read-only is
-    enforced fail-closed — see the note on `_CLAUDE_DENIED_TOOLS` and docs/backends/claude.md.
+    last. Read-only is enforced fail-closed by the empty allowlist + strict-mcp-config; the denylist
+    is defense-in-depth — see the note on `_CLAUDE_DENIED_TOOLS` and docs/backends/claude.md.
     """
     argv = list(backend_command) + [
         "-p", instruction,
@@ -540,7 +556,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         if not (isinstance(_val, (int, float)) and math.isfinite(_val) and _val > 0):
             _m = f"--{_label} must be a positive finite number (got {_val!r})"
             return {**_fail("backend_error", _m, kind, _m, manifest), "host": host, "host_detection": hdblock}
-    # F002: 'auto' selects the most host-independent AVAILABLE backend, mirroring the `mode`
+    # Host-relative 'auto' backend selection (F002): 'auto' picks the most host-independent AVAILABLE
+    # backend, mirroring the `mode`
     # pre-flight (review_mode) — so a bare review on a Codex host picks the cross-provider `claude`
     # backend instead of the same-provider `codex` default. review_mode already accounts for
     # availability, endpoint attribution, and the Bedrock/Vertex refusal; we pass the host snapshot
@@ -711,7 +728,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             # re-spend on blindly and often signal a systematic cause (artifact echoed back, a
             # degenerate loop) — but they stay retryable: true, like rate_limited: the hint
             # means "recovery is plausible, offer it", not "the supervisor will re-spend"; the
-            # message carries the remedy (operator ruling on finding F002, 2026-07-16).
+            # message carries the remedy (operator ruling on the size-bound-retry finding, F002,
+            # 2026-07-16).
             final_bytes = None
             if out_last is not None:            # codex writes the final message to a file
                 try:
@@ -756,7 +774,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         run_id = parsed.get("review_id")
         recorded = False
         record_path = None
-        # raw mode is a fast throwaway (findings only, no verify/reconcile/escalate) — don't record.
+        # raw mode is a throwaway self-check (findings only, no verify/reconcile/escalate) — don't record.
         skip_record = no_record or raw
         # Persistence is a data boundary too: surface where the reviewed content lands locally.
         record_notice = (("Not recorded (raw mode)." if raw else "Not recorded (--no-record).")
@@ -765,10 +783,12 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             reserved = None   # set only AFTER reserve_run_id returns, so cleanup can't touch a pre-existing run
             try:
                 # reserve a UNIQUE dir first so an untrusted/duplicate review_id can't overwrite
-                # another run's record (F004); the reserved id is what we report and reconcile against.
+                # another run's record (unique-run-dir reservation — F004); the reserved id is what we
+                # report and reconcile against.
                 reserved = lib.reserve_run_id(run_id)
                 run_id = reserved
-                # Propagate the reserved id INTO the stored document (F002): reconciliation keys its
+                # Propagate the reserved id INTO the stored document (reserved-id propagation — F002):
+                # reconciliation keys its
                 # save off the document's review_id, so the record's review_id must equal the dir name,
                 # or a later reconciliation would land in the wrong directory.
                 parsed["review_id"] = run_id
@@ -782,7 +802,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 )
             except OSError:
                 # A failure AFTER a successful reservation: remove only the dir WE reserved (never the
-                # reviewer-supplied original id, which could be a pre-existing run — F007) and report
+                # reviewer-supplied original id, which could be a pre-existing run; clean up only our
+                # own reservation — F007) and report
                 # that the content wasn't persisted rather than silently claiming success.
                 if reserved is not None:
                     try:
@@ -843,8 +864,8 @@ def _main(argv=None) -> int:
                          "gap is not a hang; keep this ≈ --wall (it can't distinguish a hang from a long API wait).")
     rv.add_argument("--no-record", action="store_true", help="don't persist the run record")
     rv.add_argument("--raw", action="store_true",
-                    help="fast mode: return the reviewer's UNVERIFIED findings and skip the "
-                         "verify/reconcile/escalate protocol (implies --no-record)")
+                    help="return the reviewer's UNVERIFIED findings and skip the "
+                         "verify/reconcile/escalate protocol (records nothing; implies --no-record)")
     md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
     md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     md.add_argument("--environment", default=None, help="override auto-detection (else IMPASSE_ENV / auto)")

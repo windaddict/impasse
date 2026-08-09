@@ -9,7 +9,7 @@ to the work, so a sloppy assumption or a missed edge case can sail straight thro
 from a different provider** is less likely to share your AI's blind spots. Think of it as an
 **independent advocate for one thing: the quality of the result you ship.** The second AI challenges
 the work with evidence; then Impasse checks each objection against your actual work, fixes the
-problems that hold up, and brings you the few calls that are genuinely yours to make.
+problems that hold up, and brings you the few calls that are yours to make.
 
 The reviewer **never edits your work** — the critic and the editor stay separate: fixes are applied by
 the host you're already working in (Claude Code or Codex, which drives Impasse), or by you, never by
@@ -45,12 +45,15 @@ for one round, then to you if neither side can win.
 **Status: pre-release.** The open implementation of the pattern — named in
 [the CLAR essay](https://www.movingavg.com/essays/cross-lab-adversarial-review.html) and told as a
 field story in [*AI's Second Opinion: When Rival Models Disagree*](https://www.movingavg.com/essays/ai-second-opinion-rival-model.html).
-The Codex path, consent gate, and schemas are implemented and tested; verify → reconcile →
-escalate is **directed by the host skill, not enforced in code** — a review is only as good as the
-host's adherence to the protocol (see [How it works](#how-it-works)). Dogfooding it on its own source caught a real
-shipping bug before release. It drives the Codex CLI it finds on your machine (see Install for how it's located). That CLI is a
-fast-moving alpha, so behavior is best-effort and version-sensitive — the `docs/backends/codex.md`
-observations may go stale. Expect rough edges.
+
+**What's enforced in code:** the Codex review path, the consent gate, and the schemas (tested).
+**What isn't:** verify → reconcile → escalate is directed by the host skill, so a review is only as
+good as the host's adherence to the protocol (see [How it works](#how-it-works)).
+
+Dogfooding it on its own source caught a real shipping bug before release. It drives the Codex CLI
+it finds on your machine (see Install for how it's located). That CLI is a fast-moving alpha, so
+behavior is best-effort and version-sensitive — the `docs/backends/codex.md` observations may go
+stale. Expect rough edges.
 
 ## Example
 
@@ -62,18 +65,19 @@ It runs a cross-provider reviewer, verifies each finding against your artifact, 
 report — the problems worth acting on, the ones the host threw out, and the calls that are yours:
 
 ```text
-📊 Findings: 4 raised → 🤝 2 resolved · ❌ 1 refuted · ⚖️ 1 escalated to you
+📊 Decisions: 4 finding(s) raised → ✅ 2 resolved · 🤝 0 accepted · ❌ 1 rejected · ⚖️ 1 escalated to you
 ──────────────────────────────────────────────────────────────
-F001, F003  🟢       🤝 resolved — host confirmed and fixed both (details elided)
-F002  🟠 high  ❌ refuted
+F001, F003  🟢       ✅ resolved — host confirmed and fixed both (details elided)
+F002  🟠 high  ❌ rejected
   🔎 Reviewer: the go-to-market is undifferentiated.
   ◀ Host:     the memo already concedes the product itself is a commodity and stakes its case on
               distribution — a rediscovered premise, not a gap. Refuted, with the quote.
 F004  🟠 high  ⚖️ ESCALATED — needs your decision
   ❓ Enter Europe to diversify beyond a single market, or protect the nine-month runway?
 ──────────────────────────────────────────────────────────────
+⚖️  1 decision(s) need you; the rest the models settled between themselves.
 📈 Your Impasse record — 9 reviews reconciled
-   31 findings reviewed · 22 resolved · 4 accepted · 3 refuted with evidence · 2 escalated to you
+   31 findings reviewed · 4 accepted · 3 refuted with evidence · 22 resolved · 2 awaiting you
 ```
 
 *Example output. The reviewer never edits your work; the host applies the fixes it verifies, and
@@ -118,8 +122,9 @@ submitted; Impasse's reviewer never holds the pen. The study's reviewer **cannot
 produced the eighteen-point gain in the other direction, but it denies that reviewer any execution
 feedback, where Impasse's host verifies each finding against the artifact with whatever evidence
 and tools apply. And the study has **no evidence requirement and no verification step** — a claimed
-defect goes directly into the submitted program, where Impasse requires anchored evidence, checks
-each finding, and escalates deadlocks instead of applying them. The authors flag two of these
+defect goes directly into the submitted program, where Impasse requires [anchored
+evidence](docs/glossary.md), checks each finding, and escalates [deadlocks](docs/glossary.md)
+instead of applying them. The authors flag two of these
 themselves: static review understates what tool-using agents with sandboxes could achieve, and
 reviewers always emit code with no separate non-intervention action, which may inflate harmful
 rewrites.
@@ -183,7 +188,7 @@ It is **domain-general** — the same protocol reviews:
 **See a second decision reviewed end to end** — a *different* memo (build-vs-buy on payments infrastructure), not code — from rival finding
 to the call that needs a human: [`docs/walkthrough-decision.md`](docs/walkthrough-decision.md).
 
-Full protocol: [`docs/protocol.md`](docs/protocol.md).
+Full protocol: [`docs/protocol.md`](docs/protocol.md). Terms: see the [glossary](docs/glossary.md).
 
 ## What the reviewer checks for
 
@@ -242,7 +247,8 @@ of every event in every conversation:
 
 **Escalation counts are deliberately not reported yet.** An important operational metric is how
 often findings need a human ruling — no reliable historical rate exists. The counting rule only
-recently became channel-independent (an operator ruling that decides a disposition now counts as
+recently became channel-independent (a ruling by the operator — you, the human who owns the
+decision — that decides a disposition now counts as
 an escalation whether it arrived through a formal deadlock or through conversation), and the
 operator attests that more judgment calls reached him than the pre-rule records captured.
 Historical events whose exact wording is no longer recoverable can't be amended in (the rule
@@ -495,7 +501,7 @@ runs with decisions you haven't answered yet; `prune --older-than N` cleans up o
 they're kept `0600` and never committed.
 
 Every `show` closes with a **running recap across your reconciled runs** — findings reviewed,
-resolved, accepted, refuted with evidence, and escalated to you — a plain reminder of what independent
+accepted, refuted with evidence, resolved, and awaiting you — a plain reminder of what independent
 review has surfaced. Deeper longitudinal reporting (trends over time, per-artifact history) is
 still roadmap; each run is fully inspectable on its own.
 

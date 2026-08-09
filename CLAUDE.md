@@ -41,9 +41,12 @@ modes, `FAKE_COUNT_ALL` to count invocations).
 
 ## Changing a schema
 
-Edit `schemas/*.v1.json`, then add/adjust a **positive** example in `schemas/examples/` **and** a
-**negative** fixture in `schemas/examples/invalid/` that proves the new invariant fails.
-`validate_schemas.py` discovers both by filename suffix.
+Edit `schemas/*.v1.json` in place for an additive or invariant-preserving change, then add/adjust
+a **positive** example in `schemas/examples/` **and** a **negative** fixture in
+`schemas/examples/invalid/` that proves the new invariant fails. `validate_schemas.py` discovers
+both by filename suffix. Bump to a new version file (`*.v2.json`) only for a **breaking** change —
+one that would invalidate existing stored records, or make new output that current validators reject
+— never for an in-place additive edit.
 
 ## Layout
 
@@ -51,8 +54,10 @@ Edit `schemas/*.v1.json`, then add/adjust a **positive** example in `schemas/exa
   `impasse_consent` (consent store), `impasse_run` (process supervisor + `review()`), `impasse_report`.
 - `schemas/` — `reviewer-response` + `reconciliation-result` + `examples/` (+ `invalid/`).
 - `docs/` — `protocol`, `security-model`, `environments`, `backends/{codex,claude}`, proposals.
-- Independence ladder: cross-provider (Codex) > same-provider (`claude -p`) > self-review
-  (sandbox/Cowork only, refused for code). Model choice: `--model` / `IMPASSE_{CODEX,CLAUDE}_MODEL`.
+  Project vocabulary: `docs/glossary.md`.
+- Independence backends, strongest first: cross-provider (Codex) > same-provider (`claude -p`) >
+  self-review (sandbox/Cowork only, refused for code). (The full tier enum also has `undetermined`
+  for an unattributable host — see `docs/glossary.md`.) Model choice: `--model` / `IMPASSE_{CODEX,CLAUDE}_MODEL`.
 
 ## Never commit
 

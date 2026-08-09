@@ -37,7 +37,7 @@ record before accepting it:
 - **F001** — confirmed the assumption and the missing risk by reading the record, then **re-ran
   the record's own cost model** under a one-quarter dual-run. Build's margin over Buy narrows
   from 18% to 4% — real, but it doesn't flip.
-- **F002** — confirmed the contradiction: the weights genuinely invert the stated strategic
+- **F002** — confirmed the contradiction: the weights invert the stated strategic
   priority.
 
 ## 3. Reconcile

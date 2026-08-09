@@ -12,9 +12,13 @@ prepared
   → finding_triage        host classifies each finding
   → evidence_verification host checks the evidence against the real artifact/facts
   → host_response         accepted | rejected (with evidence) | contested | resolved
+                          (persisted states: accepted / rejected / resolved / deadlocked / withdrawn)
   → reviewer_rebuttal     one round, on contested findings only
   → resolved | deadlocked
 ```
+
+The reviewer returns [anchored observations](glossary.md) — each tied to a specific locator in the
+artifact (file:line, a quoted span, a section); an unanchored claim can't serve as evidence.
 
 **A rejection needs evidence, or it isn't a rejection.** `rejected` requires at least one
 verification that *contradicts* the finding — the schema enforces this. A refutation resting only

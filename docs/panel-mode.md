@@ -1,7 +1,7 @@
 # Panel mode (proposal — NOT built)
 
 **Status: design proposal.** Nothing here is implemented. This captures the design and, more
-importantly, the constraints that keep panel mode from quietly breaking Impasse's thesis. Run
+importantly, the constraints that keep panel mode from breaking Impasse's thesis. Run
 this proposal through Impasse (`kind=decision`) before building any of it.
 
 ## Motivation
@@ -49,9 +49,9 @@ Notes:
 
 ## Orchestration — this is a Workflow, not the core protocol
 
-Panel mode is a fan-out/synthesize pipeline, which is what the Workflow layer is for. It must feed
-back into the **same** reconciliation machinery so the human still gets verified findings + routed
-deadlocks:
+Panel mode is a fan-out/synthesize pipeline — the job of the **Workflow layer**, a stage layered
+*above* the core one-reviewer protocol. It must feed back into the **same** reconciliation machinery
+so the human still gets verified findings + routed deadlocks:
 
 ```
 select stakeholders  →  fan out: [stakeholder×N, skeptic(Codex), creative, meta]
@@ -87,7 +87,8 @@ gets swamped and the "only deadlocks reach the human" promise breaks.
 ## Relationship to the Claude fallback backend
 
 Panel mode and the [Claude fallback backend](backends/) are independent but complementary: the
-fallback lets Impasse run with no second vendor install (breadth/independence ladder — see the
-Guardrails independence caveat), and panel mode is where a same-provider Claude fleet earns its
+fallback lets Impasse run with no second vendor install (breadth/independence ladder — a
+same-provider fallback reviewer shares the host's blind spots, so it buys breadth, not
+independence), and panel mode is where a same-provider Claude fleet earns its
 keep as *breadth* while a cross-provider skeptic supplies *independence*. Build the fallback
 backend first (smaller, on-thesis); panel mode only if decisions are the proven use.

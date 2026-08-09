@@ -8,7 +8,7 @@ Both are handled deliberately. Report vulnerabilities per `SECURITY.md`.
 Reviewing an artifact means its content **leaves this machine** for the reviewer's provider,
 under that provider's terms and retention.
 
-- **Consent is block-by-default** and keyed to the *normalized endpoint* (`scheme://host:port`),
+- **Consent is block-by-default** and keyed to the *normalized endpoint* (`scheme://host[:port]`),
   not just a provider label — so pointing `OPENAI_BASE_URL` at Azure, a proxy, or localhost
   requires a fresh grant. URLs with embedded credentials are rejected.
   - **Codex-backend routing caveat.** The endpoint Impasse keys consent to is derived from
@@ -43,8 +43,11 @@ under that provider's terms and retention.
   paths, or the instruction.
 - Reasoning-effort values are allowlisted before being passed to the backend.
 - The reviewer runs read-only by default. Wall + idle timeouts and POSIX process-group
-  termination bound it; transient run artifacts (`*.txt`/`*.jsonl`/`*.err`) may contain artifact
-  content and are `.gitignore`d — treat them as sensitive and clean them up.
+  termination bound it; the runner's scratch dir (holding the reviewer's `last-*.txt` output) is
+  removed automatically via `shutil.rmtree` in a `finally` on normal cleanup, so you don't clean it
+  up by hand — though an abrupt kill (`SIGKILL`) or a host crash can leave one behind.
+  The `*.jsonl`/`*.err` run artifacts may contain artifact content and are `.gitignore`d; the
+  persistent sensitive artifacts are the run records (below).
 - **Run records (the audit trail) contain artifact content.** Each run's reviewer-response and
   reconciliation-result are persisted under `config_dir()/runs/<id>/` (`0600` files, `0700`
   dir), never committed. This is deliberate — a governance tool should keep receipts — but it
@@ -59,6 +62,7 @@ it. Impasse is a second opinion, not an adjudication oracle. Agreement is eviden
 
 ## Delegate mode raises the risk
 
-Letting the reviewer edit the artifact is a different trust level — it runs in an isolated
-temporary worktree, never the operator's checkout, and is experimental and opt-in. See
+Letting the reviewer edit the artifact is a different trust level: a separate, experimental, opt-in
+capability that is **not implemented** in the read-only review path in `scripts/`. As designed it
+*would* run in an isolated temporary worktree, never the operator's checkout. See
 `docs/delegate-mode.md`.
