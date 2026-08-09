@@ -38,10 +38,9 @@ flowchart TB
 ```
 
 The reviewer (indigo) proposes; the host (blue) verifies and applies the fixes they agree on; the
-judgment calls come to you. The independent reviewer never edits — the critic and the editor stay
-separate. A refutation only *drops* a finding when the host has contradicting evidence — a host
-disagreement with no evidence isn't a refutation, so it goes back to the reviewer for one round,
-then to you if neither side can win.
+judgment calls come to you. A refutation only *drops* a finding when the host has contradicting
+evidence — a host disagreement with no evidence isn't a refutation, so it goes back to the reviewer
+for one round, then to you if neither side can win.
 
 **Status: pre-release.** The open implementation of the pattern — named in
 [the CLAR essay](https://www.movingavg.com/essays/cross-lab-adversarial-review.html) and told as a
@@ -288,6 +287,22 @@ Impasse performs on *your* work.
   independence).
 - Python 3 (standard library only — the shipped helpers have no pip dependencies).
 - macOS or Linux. Windows via WSL; native Windows is on the [roadmap](docs/windows.md).
+
+### First run — what to expect
+
+- **You need an account with the reviewer's provider.** The cross-provider backend logs in with its
+  own credentials — a ChatGPT account or an OpenAI API key for Codex, a Claude account or an Anthropic
+  key for the Claude CLI (exact plan/entitlement is the provider's to set). That is separate from your
+  host, and reviews spend that provider's tokens.
+- **It costs real tokens.** A small artifact at default effort is typically cents; large inputs or
+  high `--effort` cost more and take longer (a review can run from well under a minute to several,
+  depending on effort and size). It is not free to run.
+- **The first send pauses for consent.** Reviewing sends your artifact to a third-party provider, so
+  the run **blocks the first time** until you approve the destination (see Data boundary & consent).
+  Nothing leaves your machine before you approve it.
+- **What it does to your files.** The reviewer is **read-only** — it never touches your artifact. The
+  *host* applies the fixes it verifies to your working copy for you to review (like any edit your
+  agent makes); the review step itself changes nothing on its own.
 
 ### How independent is it?
 
