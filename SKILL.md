@@ -189,10 +189,12 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
 
    **A `timeout` now tells you where the time went.** It carries a `telemetry` block — the phase
    timeline, whether the backend ever sent a byte (`received_any_bytes`), time to first byte, and
-   the resolved model — plus ranked `recovery` options with exact commands. Use them rather than
-   guessing: `received_any_bytes: false` means the time went to startup, authentication or a
-   provider queue, not to reasoning over the artifact, and re-running with a bigger wall will not
-   help. **A timeout leaves nothing reusable** (`reusable_result: false`) — every recovery option is
+   the resolved model — plus ranked `recovery` options with exact commands. Read
+   `received_any_bytes` for what it is: it says whether the reviewer CLI wrote anything at all, not
+   whether the model was making progress (codex emits a startup event within milliseconds, and
+   other backends buffer to the end). `false` rules out a reviewer that streamed and then stalled;
+   it does not by itself tell you the wall was the problem.
+   **A timeout leaves nothing reusable** (`reusable_result: false`) — every recovery option is
    a full new paid invocation, and the options say which of them change the model or the
    independence tier. Never present a timeout as a passing review.
 

@@ -76,9 +76,10 @@ class RunResult:
     # Timing/liveness evidence, recorded even when the run ends in a timeout — that is the case it
     # exists for. `first_byte_s` is seconds from spawn to the FIRST byte on either stream (None if
     # nothing ever arrived), and `bytes_received` counts every byte read, including bytes discarded
-    # by the capture cap. Together they answer the question a bare "timeout" can't: did the backend
-    # ever start talking? Silence to the wall means queueing/auth/transport; bytes-then-stall means
-    # the model was working. (issue #11)
+    # by the capture cap. EXACTLY what they mean: whether the CLI wrote anything, and when. They do
+    # NOT measure model progress — a backend may emit a session/startup event within milliseconds
+    # (codex does) or buffer everything to the end — and they don't distinguish stdout from stderr.
+    # Useful evidence for a timeout, not a diagnosis of one. (issue #11)
     first_byte_s: float | None = None
     bytes_received: int = 0
 
@@ -153,9 +154,10 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
     CALLER classifies (only invalid arguments raise ValueError here).
 
     It also records LIVENESS evidence on every path, timeouts included: `first_byte_s` (seconds to
-    the first byte on either stream, None if the backend never spoke) and `bytes_received`. A bare
-    "wall_timeout after 605s" can't tell an operator whether the provider was queueing, the CLI
-    failed to authenticate, or the model was reasoning; these two fields can (issue #11).
+    the first byte on either stream, None if the backend never wrote one) and `bytes_received`.
+    These narrow what a bare "wall_timeout after 605s" leaves open — at minimum they separate a
+    reviewer that streamed then stalled from one that wrote nothing at all — but they measure the
+    CLI's output, not the model's progress, so they are evidence rather than a diagnosis (issue #11).
     """
     for label, val in (("wall_timeout", wall_timeout), ("idle_timeout", idle_timeout)):
         if not (isinstance(val, (int, float)) and math.isfinite(val) and val > 0):
@@ -459,7 +461,10 @@ def _claude_envelope(stdout: bytes) -> dict | None:
         return None
     try:
         d = json.loads(s)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError, not just ValueError: this parses UNTRUSTED backend stdout, and Python's
+        # decoder blows the stack on deeply nested JSON. An unparseable envelope must degrade to
+        # "no envelope", never to a traceback out of the review path.
         return None
     if not isinstance(d, dict):
         return None
@@ -525,8 +530,8 @@ def _codex_stream_meta(stdout: bytes) -> dict:
             continue
         try:
             ev = json.loads(line)
-        except ValueError:
-            continue
+        except (ValueError, RecursionError):
+            continue   # untrusted stdout: deeply-nested JSON raises RecursionError, not ValueError
         if not isinstance(ev, dict):
             continue
         tid = ev.get("thread_id")
@@ -1091,8 +1096,12 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
         phases.mark("schema_loaded")
+        # Start the budget BEFORE the version probe. `--wall` is documented as the total cap for the
+        # whole review, and the probe spawns a subprocess that can block for seconds — leaving it
+        # outside would let a review exceed the cap the operator set (issue #11 review, F010).
+        deadline = time.monotonic() + wall_timeout   # ONE wall-clock budget for the whole review
         # The CLI version is metadata, not a gate: a duration is only comparable against the CLI
-        # build that produced it. Resolved once per process (cached), before the clock that matters.
+        # build that produced it. Resolved once per process (cached), and inside the budget above.
         be_version = backend_version(be.command)
         phases.mark("backend_version_resolved")
 
@@ -1100,7 +1109,6 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         parsed = None
         backend_meta = {}    # request id / resolved model / first-token latency, per attempt
         attempt = 0
-        deadline = time.monotonic() + wall_timeout   # ONE wall-clock budget for the whole review
         transient_used = 0   # retries spent on outages (service_unavailable)
         output_used = 0      # retries spent on malformed reviewer output (issue #1)
 
@@ -1141,14 +1149,19 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 backend_name=be.name, model=model, effort=effort, speed=speed,
                 wall_timeout=wall_timeout, recommended_wall=_rec["recommended_wall_s"],
                 artifact_tokens=artifact_tokens, host=host, ctx=recovery_context)
+            # State what was OBSERVED and what it rules out — not a diagnosis the signal can't
+            # support. A byte on stdout/stderr means only that the CLI wrote something: codex emits
+            # a thread-started event within milliseconds, so "bytes arrived" is not evidence the
+            # model made progress, and silence is not proof it didn't (backends buffer differently).
             if tel.get("received_any_bytes") is False:
-                message += (" — the backend produced NO output before the cap, so the time went to "
-                            "startup, authentication or a provider queue, not to reasoning over the "
-                            "artifact")
+                message += (" — the backend wrote nothing to stdout or stderr before the cap. That "
+                            "rules out a reviewer that started streaming and stalled; it does not "
+                            "on its own separate a slow start, an authentication problem, a "
+                            "provider queue, or a model still reasoning silently")
             elif tel.get("ttfb_s") is not None:
-                message += (f" — first output after {tel['ttfb_s']:.1f}s, then "
-                            f"{tel['bytes_received']} byte(s); the backend was responding, so the "
-                            "cap was most likely too short for the work")
+                message += (f" — first output {tel['ttfb_s']:.1f}s in, {tel['bytes_received']} "
+                            "byte(s) total before the cap. The CLI was alive and writing; whether "
+                            "the model was making progress is not something this signal shows")
             _emit_metrics("timeout", failure_code="timeout", termination=termination_kind,
                           ttfb_s=tel.get("ttfb_s"), bytes_received=tel.get("bytes_received"),
                           model_resolved=tel.get("model_resolved"),
@@ -1200,6 +1213,18 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                     f"backend {result.termination} after {result.duration_s:.0f}s",
                     result.termination, result)
             phases.mark(f"attempt_{attempt}_validate_start")
+            # An envelope that declares itself an error is a FAILURE even on a zero exit status.
+            # Exit code and envelope are two independent signals, and the repo's invariant is that a
+            # failure is never reported as success — so trust neither alone. Without this, a
+            # backend that reported is_error while exiting 0 could have its `result` string parsed
+            # as a review and returned ok: True.
+            if result.exit_code == 0 and isinstance(envelope, dict) and envelope.get("is_error"):
+                err0 = _extract_backend_error(result.stdout, result.stderr, parse_jsonl=False,
+                                              envelope=envelope)
+                _emit_metrics("error", failure_code=err0["code"], termination=result.termination,
+                              backend_version=be_version, transient_retries=transient_used,
+                              output_retries=output_used, **_metric_meta(backend_meta, model))
+                return _f(err0["code"], err0["message"], retryable=err0["retryable"])
             if result.exit_code != 0:
                 err = _extract_backend_error(result.stdout, result.stderr,
                                              parse_jsonl=(be.type == "codex-cli"),
@@ -1269,7 +1294,10 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             else:
                 try:
                     parsed = _parse_reviewer_json(final_bytes.decode("utf-8", "replace"))
-                except (json.JSONDecodeError, ValueError) as e:
+                except (json.JSONDecodeError, ValueError, RecursionError) as e:
+                    # RecursionError too: the final message is UNTRUSTED reviewer output, and deeply
+                    # nested JSON blows the decoder's stack. It must classify as invalid_response
+                    # (which is never a pass), not escape as a traceback.
                     problem = f"final message is not valid JSON: {e}"
                 else:
                     if not isinstance(parsed, dict) or "schema_version" not in parsed or not (("findings" in parsed) or ("items" in parsed)):

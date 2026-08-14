@@ -1829,7 +1829,7 @@ def main() -> int:
         _i11_at = _i11_a.get("telemetry") or {}
         check(_i11_a["ok"] is False and _i11_a["failure"]["code"] == "timeout"
               and _i11_at.get("received_any_bytes") is False
-              and "NO output" in _i11_a["failure"]["message"],
+              and "wrote nothing to stdout or stderr" in _i11_a["failure"]["message"],
               "issue #11: silent-to-the-wall timeout reports that the backend produced no output")
         check(_i11_at.get("last_phase", "").startswith("attempt_1")
               and isinstance(_i11_at.get("phases"), dict)
@@ -1845,7 +1845,8 @@ def main() -> int:
         _i11_bt = _i11_b.get("telemetry") or {}
         check(_i11_b["ok"] is False and _i11_bt.get("received_any_bytes") is True
               and _i11_bt.get("ttfb_s") is not None
-              and "first output after" in _i11_b["failure"]["message"],
+              and "first output" in _i11_b["failure"]["message"]
+              and "byte(s) total" in _i11_b["failure"]["message"],
               "issue #11: bytes-then-stall timeout reports time-to-first-byte, not just the cap")
         check(_i11_bt.get("request_id") == "th_fake_1",
               "issue #11: the codex thread id is recovered as the request id")
@@ -2063,6 +2064,132 @@ def main() -> int:
         report._main(["performance"])
     check("No run timings recorded yet" in _i11_eb2.getvalue(),
           "issue #11: an empty timing store reports honestly instead of rendering a hollow table")
+
+    # --- issue #11, round 2: defects the cross-provider review of this change found ---
+    # An Impasse review of the issue-#11 diff (codex, high effort, Fast mode) raised 11 findings;
+    # these pin the ones verified as real.
+
+    # R-F001 (critical): an envelope declaring an error must FAIL even on a zero exit status.
+    # Exit code and envelope are independent signals; "a failure is never reported as success"
+    # means trusting neither alone. Previously the envelope check sat inside `if exit_code != 0`.
+    _r11_prev_mode = os.environ.get("FAKE_CLAUDE_MODE")
+    try:
+        os.environ["FAKE_CLAUDE_MODE"] = "envelope_error"
+        os.environ["FAKE_CLAUDE_EXIT"] = "0"           # error envelope, SUCCESSFUL exit status
+        _r11_a = run.review(kind="decision", instruction="review", artifact_bytes=b"doc",
+                            backend="claude", no_record=True)
+        check(_r11_a["ok"] is False and _r11_a["failure"]["code"] == "rate_limited",
+              "review F001: an is_error envelope fails even when the CLI exits 0")
+    finally:
+        os.environ.pop("FAKE_CLAUDE_EXIT", None)
+        if _r11_prev_mode is None:
+            os.environ.pop("FAKE_CLAUDE_MODE", None)
+        else:
+            os.environ["FAKE_CLAUDE_MODE"] = _r11_prev_mode
+
+    # R-F002 (high): the byte signal must be reported for what it is. A CLI that writes a startup
+    # event immediately (codex does, within ~50ms) makes "bytes arrived" say nothing about model
+    # progress, so the message must not claim the cap was the problem.
+    if os.name == "posix":
+        os.environ["FAKE_MODE"] = "speak_then_hang"
+        _r11_b = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=3, idle_timeout=100, no_record=True)
+        _r11_msg = _r11_b["failure"]["message"]
+        check("not something this signal shows" in _r11_msg
+              and "cap was most likely too short" not in _r11_msg,
+              "review F002: bytes-then-stall states what was observed, not a diagnosis")
+        os.environ["FAKE_MODE"] = "silent_hang"
+        _r11_c = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=2, idle_timeout=100, no_record=True)
+        check("does not on its own separate" in _r11_c["failure"]["message"],
+              "review F002: silence rules out a stall mid-stream, and claims nothing more")
+        os.environ["FAKE_MODE"] = "valid"
+
+    # R-F003 (high): the allowlist must bound VALUES, not just keys — otherwise an unbounded
+    # backend-supplied string (a model name read out of the CLI's own output) lands in the store.
+    _r11_long = "M" * 5000
+    lib.record_metrics({"backend": "codex", "outcome": "completed", "duration_s": 1.0,
+                        "model_resolved": _r11_long, "phases": {"a": 1.0, "bad": "not-a-number"},
+                        "ttfb_s": float("inf"), "findings_count": [1, 2, 3]})
+    _r11_row = lib.load_metrics()[-1]
+    check(len(_r11_row["model_resolved"]) <= 200 and _r11_row["phases"] == {"a": 1.0}
+          and _r11_row.get("ttfb_s") is None and _r11_row.get("findings_count") is None,
+          "review F003: metric values are bounded and type-checked, not just key-filtered")
+
+    # R-F005 (high): history must be matched on effort/speed, which move duration substantially —
+    # a history of --effort low must not size the wall for --effort high.
+    _r11_cfg_prev = os.environ["IMPASSE_CONFIG_DIR"]
+    os.environ["IMPASSE_CONFIG_DIR"] = tempfile.mkdtemp(prefix="impasse-r11-knobs-")
+    try:
+        for _n in range(6):
+            lib.record_metrics({"backend": "codex", "outcome": "completed", "duration_s": 30.0,
+                                "artifact_tokens_est": 5000, "effort": "low", "speed": "standard"})
+        _r11_low = lib.recommend_wall(backend="codex", artifact_tokens=5000, effort="low",
+                                      speed="standard")
+        _r11_high = lib.recommend_wall(backend="codex", artifact_tokens=5000, effort="high",
+                                       speed="standard")
+        check(_r11_low["basis"] == "empirical" and _r11_high["basis"] == "heuristic"
+              and _r11_high["recommended_wall_s"] > _r11_low["recommended_wall_s"],
+              "review F005: a low-effort history does not size a high-effort review")
+    finally:
+        os.environ["IMPASSE_CONFIG_DIR"] = _r11_cfg_prev
+
+    # R-F006 (high): the fit subtracts a fixed base, so runs shorter than it produce a rate of zero.
+    # The recommendation must never fall below a duration actually observed at these settings.
+    _r11_slow = [{"outcome": "completed", "duration_s": 250.0, "artifact_tokens_est": 4000}
+                 for _ in range(6)]
+    _r11_p90 = lib.recommend_wall(backend="claude", artifact_tokens=4000, rows=_r11_slow)
+    check(_r11_p90["recommended_wall_s"] >= 250,
+          "review F006: a zero-rate fit still can't recommend below the observed p90")
+
+    # R-F007 (medium): "comparable" must be bounded on BOTH sides — a timeout on something ten
+    # times larger says nothing about this review and would inflate every estimate.
+    _r11_huge_to = [{"outcome": "timeout", "wall_s": 5000.0, "artifact_tokens_est": 500000,
+                     "duration_s": 5005.0}]
+    check(lib.recommend_wall(backend="claude", artifact_tokens=1000,
+                             rows=_r11_huge_to)["floor_reason"] is None,
+          "review F007: a timeout on a far larger artifact is not treated as comparable")
+    # And when the ceiling clamps below a known-insufficient cap, it must say so rather than imply
+    # a floor it no longer keeps.
+    _r11_clamped = lib.recommend_wall(
+        backend="claude", artifact_tokens=200000,
+        rows=[{"outcome": "timeout", "wall_s": 5400.0, "artifact_tokens_est": 200000,
+               "duration_s": 5405.0}])
+    check(_r11_clamped["recommended_wall_s"] <= 5400
+          and "not expected to be enough" in (_r11_clamped["floor_reason"] or ""),
+          "review F007: a clamped recommendation admits it may not be enough")
+
+    # R-F008 (high): untrusted backend JSON that is deeply nested raises RecursionError, not
+    # ValueError. Every parser on that path must classify it, never let it escape.
+    _r11_deep = ("[" * 200000).encode()
+    check(run._claude_envelope(b'{"a":' + _r11_deep + b"}") is None,
+          "review F008: pathologically nested envelope JSON degrades to 'no envelope'")
+    check(run._codex_stream_meta(b'{"x":' + _r11_deep + b"}\n") == {},
+          "review F008: pathologically nested codex events are skipped, not fatal")
+
+    # R-F009 (medium): a hand-edited or crash-truncated row must not crash the report.
+    _r11_bad_rows = [{"backend": "codex", "model_resolved": "m", "outcome": "completed",
+                      "duration_s": None, "artifact_tokens_est": None, "ttfb_s": "soon"},
+                     {"backend": "codex", "model_resolved": "m", "outcome": "timeout",
+                      "wall_s": "six hundred"}]
+    _r11_rendered = report.render_performance(_r11_bad_rows)
+    check("Impasse performance" in _r11_rendered and "—" in _r11_rendered,
+          "review F009: malformed metric rows render as unknown instead of raising")
+
+    # R-F010 (medium): --wall is documented as the cap for the WHOLE review, so the version probe
+    # must sit inside the budget. With a wall already spent, the run must time out, not overrun it.
+    _r11_vprev = dict(run._VERSION_CACHE)
+    run._VERSION_CACHE.clear()
+    try:
+        _r11_t0 = time.monotonic()
+        _r11_d = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=0.001, idle_timeout=100, no_record=True)
+        check(_r11_d["ok"] is False and _r11_d["failure"]["code"] == "timeout"
+              and time.monotonic() - _r11_t0 < 30,
+              "review F010: the version probe runs inside the wall budget, not before it")
+    finally:
+        run._VERSION_CACHE.clear()
+        run._VERSION_CACHE.update(_r11_vprev)
 
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")

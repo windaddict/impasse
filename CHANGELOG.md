@@ -44,6 +44,15 @@ timeout was never reported as a pass); what was missing was predictability and d
   teardown, recovery-option shape, seed-vs-empirical recommendation, the timeout floor, the metrics
   allowlist (a planted artifact field is dropped), the `IMPASSE_NO_METRICS` opt-out, envelope model
   resolution and its fail-soft fallback, and both new CLI surfaces.
+- **Dogfooded, and it paid.** A cross-provider Impasse review of this change (codex, `--effort high`,
+  Fast mode; 24.9K-token diff, completed in 239s against a 1860s recommended wall) raised **11
+  findings, all verified and fixed here** — among them a genuine failure-as-success path (a claude
+  envelope marked `is_error` was only checked when the exit status was non-zero), an overclaiming
+  timeout message (the byte signal was presented as evidence about model progress, which this run's
+  own telemetry disproves — codex's first byte arrived at 0.053s), a metrics allowlist that bounded
+  keys but not value types or lengths, empirical recommendations pooled across mismatched
+  effort/speed, a `RecursionError` escape on deeply nested untrusted backend JSON, and the version
+  probe sitting outside the wall budget. Run record: `issue-11-adversarial-review`.
 - **Deferred:** the issue's opt-in *supervised chunking* for oversized artifacts changes the protocol
   rather than the runner and is outside its own acceptance criteria — designed, not built, in
   `docs/proposals/supervised-chunking.md`.

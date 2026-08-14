@@ -447,9 +447,15 @@ def render_performance(rows: list) -> str:
         done = [r for r in rs if r.get("outcome") == "completed"]
         timeouts = [r for r in rs if r.get("outcome") == "timeout"]
         errors = [r for r in rs if r.get("outcome") not in ("completed", "timeout")]
-        durs = [r.get("duration_s") for r in done]
-        ttfbs = [r.get("ttfb_s") for r in done if isinstance(r.get("ttfb_s"), (int, float))]
-        toks = [r.get("artifact_tokens_est") for r in done]
+        # Filter to real numbers at the source. A row is a hand-editable file on disk that a crash
+        # can also truncate, so a null or a string where a duration belongs must render as "—",
+        # never raise out of a report the operator ran to diagnose something else.
+        def _nums(rows_, key):
+            return [r.get(key) for r in rows_
+                    if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)]
+        durs = _nums(done, "duration_s")
+        ttfbs = _nums(done, "ttfb_s")
+        toks = _nums(done, "artifact_tokens_est")
         # `model_source` is the honesty flag: "requested" means an alias/flag we sent, which the
         # backend never confirmed — two such rows may be different models pooled under one name.
         srcs = {r.get("model_source") for r in rs}
@@ -463,19 +469,21 @@ def render_performance(rows: list) -> str:
             line += f" · ⚠️ {len(errors)} error"
         out.append(line)
         if done:
+            _ttfb50, _tok50 = lib._percentile(ttfbs, 0.5), lib._percentile(toks, 0.5)
             out.append(f"     duration p50 {_fmt_s(lib._percentile(durs, 0.5))} · "
                        f"p90 {_fmt_s(lib._percentile(durs, 0.9))}"
-                       + (f" · first byte p50 {lib._percentile(ttfbs, 0.5):.1f}s" if ttfbs else "")
-                       + (f" · artifact p50 ~{lib._percentile(toks, 0.5):.0f} tokens" if toks else ""))
-            median_tokens = lib._percentile(toks, 0.5) or 0
-            rec = lib.recommend_wall(backend=backend, artifact_tokens=int(median_tokens),
+                       + (f" · first byte p50 {_ttfb50:.1f}s" if _ttfb50 is not None else "")
+                       + (f" · artifact p50 ~{_tok50:.0f} tokens" if _tok50 is not None else ""))
+            median_tokens = int(_tok50 or 0)
+            rec = lib.recommend_wall(backend=backend, artifact_tokens=median_tokens,
                                      model=None if model == "(backend default)" else model, rows=rs)
-            out.append(f"     → for a ~{int(median_tokens)}-token review: --wall "
+            out.append(f"     → for a ~{median_tokens}-token review: --wall "
                        f"{rec['recommended_wall_s']:.0f}s ({rec['basis']})")
-        if timeouts:
-            worst = max((t.get("wall_s") or 0) for t in timeouts)
-            out.append(f"     ⏰ longest cap already exceeded: {worst:.0f}s — a retry needs more "
-                       "than that, not the same again")
+        _t_walls = [t.get("wall_s") for t in timeouts
+                    if isinstance(t.get("wall_s"), (int, float)) and not isinstance(t.get("wall_s"), bool)]
+        if _t_walls:
+            out.append(f"     ⏰ longest cap already exceeded: {max(_t_walls):.0f}s — a retry needs "
+                       "more than that, not the same again")
         out.append("─" * 78)
     return "\n".join(out)
 
