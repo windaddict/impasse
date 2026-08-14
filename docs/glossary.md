@@ -90,6 +90,29 @@ in a doc rather than re-defining it inline.
   abnormal exit tears down the subprocess's **process group** (best-effort: a descendant that calls
   `setpgid`/`setsid` escapes the group, and one can briefly outlive a clean exit). The reviewer is
   untrusted and can hang or flood output, so it can't run unbounded.
+- **wall / idle** — the two caps the supervisor enforces: **wall** is total elapsed time for the whole
+  review (retries included), **idle** is time with no output. The reviewer reasons silently, so idle
+  can't tell a hang from a long server-side wait — keep `--idle ≈ --wall` and treat wall as the real
+  bound. Blowing the wall discards the entire review; nothing partial is kept.
+- **timing store** *(coined)* — `config_dir()/metrics.jsonl`: one append-only row per run recording
+  duration, payload size, outcome and time-to-first-byte — **no artifact content** (writes are
+  filtered to a field allowlist). Its role is to make the **wall recommendation** reflect this
+  machine's real history instead of a shipped constant. Separate from a **run record** and deleted
+  separately (`impasse_report.py performance --forget`).
+- **wall recommendation / `basis`** *(coined)* — the `--wall` Impasse suggests for a given payload
+  (`impasse_run.py estimate`, and the `wall_advice` block on every result). `basis` states where the
+  number came from and how much to trust it: **heuristic** = a shipped estimate padded for margin,
+  not a measurement of this account; **empirical** = fitted from ≥5 of this machine's own completed
+  runs for that backend+model. It is a recommendation, not a guarantee — no cap can bound a
+  provider-side queue.
+- **phase timeline** *(coined)* — the named, timestamped moments of one review (consent → spawn →
+  first byte → exit → validated), returned as `telemetry.phases`. Its role is to make a timeout say
+  *where* the time went: no bytes before the cap points at startup, authentication or a provider
+  queue, not at the model reasoning over the artifact.
+- **resolved vs requested model** — **requested** is what was asked for (a `--model` alias, or
+  nothing at all for a backend default); **resolved** is the model the backend reports it actually
+  ran. Only the claude backend reports one today, so a codex run shows `model_source: requested`.
+  Keeping them distinct matters because two runs pooled under one alias may be different models.
 
 ## Reviewer controls (codex backend)
 

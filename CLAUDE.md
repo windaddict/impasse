@@ -50,8 +50,9 @@ one that would invalidate existing stored records, or make new output that curre
 
 ## Layout
 
-- `scripts/` — stdlib helpers: `impasse_lib` (config, backends, run records, environment policy),
-  `impasse_consent` (consent store), `impasse_run` (process supervisor + `review()`), `impasse_report`.
+- `scripts/` — stdlib helpers: `impasse_lib` (config, backends, run records, environment policy,
+  the timing store + wall recommendation), `impasse_consent` (consent store), `impasse_run` (process
+  supervisor + `review()` + `estimate`), `impasse_report` (reports + `performance`).
 - `schemas/` — `reviewer-response` + `reconciliation-result` + `examples/` (+ `invalid/`).
 - `docs/` — `protocol`, `security-model`, `environments`, `backends/{codex,claude}`, proposals.
   Project vocabulary: `docs/glossary.md`.
@@ -62,6 +63,8 @@ one that would invalidate existing stored records, or make new output that curre
 ## Never commit
 
 Run records and consent (`runs/`, `consent.json`) hold artifact content — they're gitignored. Don't add them.
+The timing store (`metrics.jsonl`) holds no artifact content, but it lives in the config dir and is
+gitignored too (`*.jsonl`) — don't add it either.
 
 ## Dogfooding
 
@@ -69,7 +72,9 @@ Impasse reviews itself: bundle the scripts as an artifact and run `impasse_run.p
 code --backend codex …`. The cross-provider reviewer has caught real bugs here (path traversal,
 terminal-escape injection, supervisor teardown) — run it before shipping substantial changes.
 Run reviews in the background (`run_in_background`) whenever `--wall` ≥ ~550s — the Claude Code
-shell kills foreground commands at 10 min, which masquerades as a reviewer timeout.
+shell kills foreground commands at 10 min, which masquerades as a reviewer timeout. Size the wall
+with `impasse_run.py estimate --artifact-file <bundle>` rather than guessing; a self-review bundle
+of these scripts is large enough that 300s is not enough.
 
 ## Maintainer note
 

@@ -24,6 +24,7 @@ CLI:
   impasse_run.py review --kind code --instruction-file I.txt --artifact-file A.md \\
       [--schema schemas/reviewer-response.v1.json] [--backend codex|claude] [--model NAME] \\
       [--approve-send DEST] [--effort low] [--wall 300] [--idle 300]
+  impasse_run.py estimate --artifact-file A.md [--backend auto] [--wall 300]  # local; sends nothing
 """
 from __future__ import annotations
 
@@ -72,6 +73,14 @@ class RunResult:
     stderr_truncated: bool
     reader_error: bool
     duration_s: float
+    # Timing/liveness evidence, recorded even when the run ends in a timeout — that is the case it
+    # exists for. `first_byte_s` is seconds from spawn to the FIRST byte on either stream (None if
+    # nothing ever arrived), and `bytes_received` counts every byte read, including bytes discarded
+    # by the capture cap. Together they answer the question a bare "timeout" can't: did the backend
+    # ever start talking? Silence to the wall means queueing/auth/transport; bytes-then-stall means
+    # the model was working. (issue #11)
+    first_byte_s: float | None = None
+    bytes_received: int = 0
 
 
 def _group_alive(pgid: int) -> bool:
@@ -142,6 +151,11 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
     descendant that calls setpgid/setsid escapes the group (F006). It NEVER raises for backend misbehavior — a crash,
     wall timeout, idle stall, or spawn failure all come back as a RunResult.termination the
     CALLER classifies (only invalid arguments raise ValueError here).
+
+    It also records LIVENESS evidence on every path, timeouts included: `first_byte_s` (seconds to
+    the first byte on either stream, None if the backend never spoke) and `bytes_received`. A bare
+    "wall_timeout after 605s" can't tell an operator whether the provider was queueing, the CLI
+    failed to authenticate, or the model was reasoning; these two fields can (issue #11).
     """
     for label, val in (("wall_timeout", wall_timeout), ("idle_timeout", idle_timeout)):
         if not (isinstance(val, (int, float)) and math.isfinite(val) and val > 0):
@@ -159,7 +173,8 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
             cwd=cwd, env=env,
         )
     except (OSError, ValueError) as e:
-        return RunResult("spawn_error", None, b"", str(e).encode(), False, False, False, 0.0)
+        return RunResult("spawn_error", None, b"", str(e).encode(), False, False, False, 0.0,
+                         None, 0)
     # Capture the process-group id NOW, while the leader is alive: start_new_session makes the child a
     # group leader, so its PGID == proc.pid. Saved here, teardown works even after proc.wait() reaps the
     # leader (when os.getpgid would fail with ESRCH) — this is the crash-safe pgid capture, F002.
@@ -171,6 +186,12 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
     err_trunc = {"v": False}
     reader_err = {"v": False}
     last = [time.monotonic()]
+    # Liveness evidence, updated under `lock` alongside `last`: when the FIRST byte arrived on
+    # either stream, and how many bytes were seen in total (counted BEFORE the capture cap, so a
+    # flood still reports its real size). Read on the timeout path to distinguish "the backend
+    # never spoke" from "the backend spoke, then stalled" (issue #11).
+    first_byte = [None]
+    total_bytes = [0]
     lock = threading.Lock()
 
     def reader(stream, buf, trunc):
@@ -181,7 +202,11 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
                 if not chunk:
                     break
                 with lock:
-                    last[0] = time.monotonic()
+                    now_b = time.monotonic()
+                    last[0] = now_b
+                    if first_byte[0] is None:
+                        first_byte[0] = now_b - start
+                    total_bytes[0] += len(chunk)
                     room = max_output_bytes - len(buf)
                     if room > 0:
                         buf += chunk[:room]
@@ -271,8 +296,11 @@ def supervise(argv, input_bytes: bytes | None = None, *, wall_timeout: float = 1
             t.join(timeout=5)
     if t_out.is_alive() or t_err.is_alive():
         reader_err["v"] = True
+    with lock:
+        fb, nbytes = first_byte[0], total_bytes[0]
     return RunResult(termination, proc.returncode, bytes(out), bytes(err),
-                     out_trunc["v"], err_trunc["v"], reader_err["v"], time.monotonic() - start)
+                     out_trunc["v"], err_trunc["v"], reader_err["v"], time.monotonic() - start,
+                     fb, nbytes)
 
 
 def build_codex_argv(backend_command, *, instruction: str, output_last_message: str,
@@ -338,7 +366,8 @@ _CLAUDE_DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "Bash", "WebFetch", "We
 
 
 def build_claude_argv(backend_command, *, instruction: str, model: str | None = None) -> list[str]:
-    """Assemble a headless read-only `claude -p` review (the same-provider fallback backend).
+    """Assemble a headless read-only `claude -p` review (cross-provider to a Codex host; the
+    same-provider fallback to a Claude host).
 
     The artifact is piped on stdin as context (reaches EOF via the supervisor, same as codex);
     the instruction is the prompt. The final message is read from STDOUT — `claude -p` has no
@@ -346,10 +375,18 @@ def build_claude_argv(backend_command, *, instruction: str, model: str | None = 
     knob here.) The variadic tool flags come after the fixed flags; `--disallowed-tools` comes
     last. Read-only is enforced fail-closed by the empty allowlist + strict-mcp-config; the denylist
     is defense-in-depth — see the note on `_CLAUDE_DENIED_TOOLS` and docs/backends/claude.md.
+
+    `--output-format json` (not `text`) wraps the answer in a result envelope carrying the metadata
+    a plain text answer throws away: the RESOLVED model (an alias like `sonnet` doesn't say which
+    version actually ran), time-to-first-token, the session id, and token usage. Impasse could not
+    otherwise report which model produced a review or where a slow run spent its time (issue #11).
+    The reviewer's JSON is then read from the envelope's `result`; a response that isn't a
+    recognizable envelope falls back to treating stdout as the final message, so a CLI that drops
+    or changes the format degrades to the previous behavior instead of failing the run.
     """
     argv = list(backend_command) + [
         "-p", instruction,
-        "--output-format", "text",
+        "--output-format", "json",
         "--permission-mode", "default",
         "--strict-mcp-config",
         "--allowed-tools", "",
@@ -400,6 +437,160 @@ def _parse_reviewer_json(text: str) -> dict:
             if depth == 0:
                 return json.loads(s[start:i + 1])
     raise json.JSONDecodeError("no balanced JSON object in reviewer output", s, start)
+
+
+# --- Backend metadata extraction (resolved model, request id, first-token latency) -----------
+#
+# WHAT THIS IS FOR: the runner used to report only what the operator ASKED for (`--model sonnet`,
+# or null for a backend default), which makes two runs impossible to compare and an ETA impossible
+# to build. These helpers recover what the backend says it ACTUALLY did, and the caller labels the
+# difference explicitly — a requested alias is never presented as a resolved model (issue #11).
+
+
+def _claude_envelope(stdout: bytes) -> dict | None:
+    """The `claude -p --output-format json` result envelope, or None if stdout isn't one.
+
+    Deliberately strict: a bare reviewer-response JSON on stdout (an older CLI, or the text format)
+    must NOT be mistaken for an envelope, or its fields would be read as run metadata. Requires the
+    `type: result` marker, or a `result` string alongside a `usage` object.
+    """
+    s = stdout.decode("utf-8", "replace").strip()
+    if not s.startswith("{"):
+        return None
+    try:
+        d = json.loads(s)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    if d.get("type") == "result":
+        return d
+    if isinstance(d.get("result"), str) and isinstance(d.get("usage"), dict):
+        return d
+    return None
+
+
+def _resolve_claude_model(model_usage) -> str | None:
+    """Pick the PRIMARY model out of a `modelUsage` map. A headless run can bill more than one model
+    (a small helper model may do side work), so 'the model that reviewed the artifact' is the one
+    that actually read it — the largest total input, counting cached tokens, which is where a big
+    artifact shows up. Returns None when the map is absent or unusable."""
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+    best, best_in = None, -1
+    for name, u in model_usage.items():
+        if not isinstance(name, str) or not isinstance(u, dict):
+            continue
+        total = 0
+        for k in ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"):
+            v = u.get(k)
+            if isinstance(v, (int, float)):
+                total += v
+        if total > best_in:
+            best, best_in = name, total
+    return best
+
+
+def _claude_meta(env: dict | None) -> dict:
+    """Run metadata from a claude result envelope: resolved model, request/session id, time to
+    first token, and the backend's own duration. Every field is optional — a CLI that stops
+    emitting one degrades that field to None, never fails the run."""
+    if not isinstance(env, dict):
+        return {}
+    meta = {}
+    m = _resolve_claude_model(env.get("modelUsage"))
+    if m:
+        meta["model_resolved"] = m
+    sid = env.get("session_id")
+    if isinstance(sid, str) and sid:
+        meta["request_id"] = sid
+    ttft = env.get("ttft_ms")
+    if isinstance(ttft, (int, float)):
+        meta["ttfb_s"] = round(ttft / 1000.0, 3)
+    dur = env.get("duration_api_ms")
+    if isinstance(dur, (int, float)):
+        meta["backend_duration_s"] = round(dur / 1000.0, 3)
+    return meta
+
+
+def _codex_stream_meta(stdout: bytes) -> dict:
+    """Run metadata from the codex `--json` JSONL event stream. Codex reports a thread id (the
+    closest thing it offers to a request id) but — as of codex-cli 0.148 — does NOT name the model
+    it resolved, so `model_resolved` stays absent here and the caller reports the requested alias
+    labelled as such. Tolerant of unparseable lines: this is best-effort metadata, never a gate."""
+    meta = {}
+    for line in stdout.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        tid = ev.get("thread_id")
+        if isinstance(tid, str) and tid and "request_id" not in meta:
+            meta["request_id"] = tid
+        # If a future codex build names the model in an event, take it — until then this is inert.
+        mdl = ev.get("model")
+        if isinstance(mdl, str) and mdl:
+            meta["model_resolved"] = mdl
+    return meta
+
+
+_VERSION_CACHE: dict = {}
+
+
+def backend_version(command: list) -> str | None:
+    """The reviewer CLI's own version string, e.g. 'codex-cli 0.148.0-alpha.9'. Cached per command
+    path for the life of the process — a version doesn't change mid-session, and this must not add
+    a subprocess to every review. Best-effort: any failure returns None rather than disturbing the
+    run. Recorded so a duration comparison can survive a CLI upgrade that changes performance."""
+    key = tuple(command)
+    if key in _VERSION_CACHE:
+        return _VERSION_CACHE[key]
+    version = None
+    try:
+        p = subprocess.run(list(command) + ["--version"], capture_output=True, timeout=20)
+        text = (p.stdout or b"").decode("utf-8", "replace").strip()
+        if text:
+            version = text.splitlines()[0][:120]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        version = None
+    _VERSION_CACHE[key] = version
+    return version
+
+
+class _PhaseLog:
+    """WHAT IT'S FOR: a timeline of where a review's wall-clock time actually went, so a failure
+    reports a PLACE rather than just a duration. Before this, a timeout said only "605s elapsed" —
+    indistinguishable between a provider queue, a CLI that never authenticated, and a model that
+    reasoned past the cap. Each `mark` stamps a named moment in seconds since the review began.
+
+    Marks are ordered and never overwritten, so a retry's phases append rather than replace the
+    first attempt's — the sequence itself is the evidence.
+    """
+
+    def __init__(self):
+        self.t0 = time.monotonic()
+        self.marks = []
+
+    def mark(self, name: str) -> float:
+        t = time.monotonic() - self.t0
+        self.marks.append((name, round(t, 3)))
+        return t
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.t0
+
+    def last(self) -> str | None:
+        return self.marks[-1][0] if self.marks else None
+
+    def as_dict(self) -> dict:
+        """Phase name -> seconds since review start. A repeated name (a retried attempt) keeps its
+        LAST occurrence; the per-attempt names carry the attempt number, so nothing real collides."""
+        return dict(self.marks)
 
 
 _REVIEWER_STANCE = (
@@ -474,12 +665,23 @@ def _classify_backend_error(status, message, trusted):
     return "backend_error", False
 
 
-def _extract_backend_error(stdout: bytes, stderr: bytes, parse_jsonl: bool = True) -> dict:
+def _extract_backend_error(stdout: bytes, stderr: bytes, parse_jsonl: bool = True,
+                           envelope: dict | None = None) -> dict:
     """Recover the REAL error (the runner otherwise sees only a bare exit code + noisy stderr) and
-    classify it. `parse_jsonl` scans the codex `--json` event stream; the Claude backend's stdout is
-    plain text, so it's False there and only stderr is used. A stderr-only signal is UNTRUSTED — it
-    can label a failure but never trigger a retry. Returns {code, message, retryable}."""
+    classify it. `parse_jsonl` scans the codex `--json` event stream; `envelope` is the claude
+    result envelope, whose `api_error_status`/`result` name the failure that stderr often doesn't.
+    A stderr-only signal is UNTRUSTED — it can label a failure but never trigger a retry; an
+    envelope or an event field is structured, so it is trusted. Returns {code, message, retryable}."""
     status, message, trusted = None, None, False
+    if isinstance(envelope, dict):
+        st = envelope.get("api_error_status")
+        if isinstance(st, int):
+            status, trusted = st, True
+        for key in ("error", "result"):
+            v = envelope.get(key)
+            if isinstance(v, str) and v.strip() and envelope.get("is_error"):
+                message, trusted = v.strip()[:300], True
+                break
     if parse_jsonl:
         for line in stdout.decode("utf-8", "replace").splitlines():
             line = line.strip()
@@ -519,6 +721,157 @@ def _size_remedy(backend_name: str) -> str:
     return "shrinking the artifact or tightening the instruction"
 
 
+# Models observed to complete a mid-size code review well inside a 600s wall, offered as the
+# "trade depth for latency" recovery step. Deliberately a SHORT list of names the operator can
+# verify, not a claim about the whole model lineup.
+_FASTER_MODEL = {"claude": "sonnet"}
+_LOWER_EFFORT = {"xhigh": "high", "high": "medium", "medium": "low", "low": "none"}
+
+
+def _quote_cmd(parts) -> str:
+    import shlex
+    return " ".join(shlex.quote(str(p)) for p in parts)
+
+
+def _metric_meta(backend_meta: dict, requested_model) -> dict:
+    """The model/latency fields shared by every metrics row. Keeps the requested-vs-resolved
+    distinction in ONE place so no exit path can record an alias as if the backend confirmed it."""
+    resolved = (backend_meta or {}).get("model_resolved")
+    return {
+        "model_resolved": resolved,
+        "model_source": ("resolved" if resolved
+                         else ("requested" if requested_model else "backend_default")),
+        "ttfb_s": (backend_meta or {}).get("ttfb_s"),
+    }
+
+
+def _recovery_options(*, backend_name: str, model, effort, speed, wall_timeout: float,
+                      recommended_wall, artifact_tokens: int, host: str, ctx: dict | None) -> list:
+    """Ranked, concrete next steps after a timeout — each with the exact command to run.
+
+    The generic advice a timeout used to carry ("the wall was probably too short") leaves the
+    operator to guess a number, a model, and a split size while a paid review has just produced
+    nothing. Each option here states what it CHANGES (nothing / the model / the independence tier)
+    so a cheaper retry can't quietly cost the independence that is the point of the tool.
+
+    Every option is a FULL new model invocation: a timeout leaves no partial result to resume from.
+    `ctx` carries the CLI's own file paths so the commands are copy-pasteable; without it the
+    options still describe the change, just without a literal command line.
+    """
+    def _cmd(**overrides):
+        if not ctx:
+            return None
+        base = ["python3", ctx.get("prog", "impasse_run.py"), "review",
+                "--kind", ctx.get("kind", "code"),
+                "--instruction-file", ctx.get("instruction_file", "INSTRUCTION.txt"),
+                "--artifact-file", ctx.get("artifact_file", "ARTIFACT.md")]
+        be = overrides.get("backend", backend_name)
+        base += ["--backend", be]
+        mdl = overrides.get("model", model)
+        if mdl:
+            base += ["--model", str(mdl)]
+        eff = overrides.get("effort", effort)
+        if eff:
+            base += ["--effort", str(eff)]
+        spd = overrides.get("speed", speed)
+        if spd and spd != "standard":
+            base += ["--speed", str(spd)]
+        w = overrides.get("wall", wall_timeout)
+        base += ["--wall", f"{float(w):.0f}", "--idle", f"{float(w):.0f}"]
+        return _quote_cmd(base)
+
+    opts = []
+    longer = max(float(recommended_wall or 0), wall_timeout * 1.5)
+    longer = math.ceil(longer / 60.0) * 60
+    opts.append({
+        "rank": 1, "action": "retry_longer_wall", "changes": "nothing but the time budget",
+        "summary": f"Re-run unchanged with --wall {longer:.0f}s (and a matching --idle).",
+        "why": "The reviewer, model and independence tier stay identical; only the cap moves.",
+        "command": _cmd(wall=longer), "new_invocation": True,
+    })
+
+    faster = _FASTER_MODEL.get(backend_name)
+    if faster and faster != model:
+        opts.append({
+            "rank": 2, "action": "faster_model", "changes": "the reviewer MODEL",
+            "summary": f"Re-run on --model {faster} with --wall {longer:.0f}s.",
+            "why": (f"A different model reviews the artifact — same provider and the same "
+                    f"independence tier, but different depth. Findings are not comparable to a "
+                    f"run on {model or 'the backend default'}."),
+            "command": _cmd(model=faster, wall=longer), "new_invocation": True,
+        })
+    lower = _LOWER_EFFORT.get(effort or "medium") if backend_name == "codex" else None
+    if lower:
+        opts.append({
+            "rank": 2, "action": "lower_effort", "changes": "reasoning DEPTH",
+            "summary": f"Re-run at --effort {lower} with --wall {longer:.0f}s.",
+            "why": ("Less server-side reasoning finishes sooner; expect a shallower review. "
+                    "The model and independence tier are unchanged."),
+            "command": _cmd(effort=lower, wall=longer), "new_invocation": True,
+        })
+
+    # Splitting is the only option that reduces the work rather than re-buying it, so it earns a
+    # concrete target rather than "try a smaller artifact".
+    target = max(2000, artifact_tokens // 2)
+    opts.append({
+        "rank": 3, "action": "split_artifact", "changes": "the SCOPE of each review",
+        "summary": (f"Split the artifact into pieces of roughly {target} tokens "
+                    f"(~{target * 4} bytes) and review each separately."),
+        "why": ("Reviews scale with size, so two half-size reviews usually finish where one "
+                "full-size review times out. Each piece is reviewed WITHOUT sight of the others, "
+                "so cross-file findings can be missed and agreement across pieces is not "
+                "corroboration."),
+        "command": None, "new_invocation": True,
+    })
+
+    other = "claude" if backend_name == "codex" else "codex"
+    tier_note = ""
+    try:
+        other_provider = lib.get_backend(other).provider
+        tier = lib.independence_tier(host, other_provider)
+        tier_note = f" Relative to the '{host}' host that backend is {tier}."
+    except (FileNotFoundError, ValueError, OSError):
+        tier_note = " That backend is not resolvable here (not installed, or refused)."
+    opts.append({
+        "rank": 4, "action": "switch_backend", "changes": "the INDEPENDENCE tier",
+        "summary": f"Re-run on --backend {other} with --wall {longer:.0f}s.",
+        "why": ("A different reviewer provider may be faster, but independence is the reason to "
+                "use Impasse at all — check the tier before trading it away." + tier_note),
+        "command": _cmd(backend=other, model=None, effort=None, wall=longer),
+        "new_invocation": True,
+    })
+    return opts
+
+
+def resolve_knobs(backend_name: str, model=None, effort=None, speed=None) -> tuple:
+    """Apply the per-run > env > persisted-default > backend-default precedence for the three
+    reviewer knobs, and return (model, effort, speed) as they will ACTUALLY be applied.
+
+    One function so the pre-flight estimate and the real run can never disagree about which model
+    or effort a review would use — an ETA computed against different settings than the run would
+    apply is worse than no ETA.
+
+      - model:  --model > IMPASSE_{CODEX,CLAUDE}_MODEL > persisted `set-model` > backend default (None).
+      - effort: --effort > IMPASSE_CODEX_EFFORT > persisted `set-effort` > backend default (None).
+      - speed:  --speed > IMPASSE_CODEX_SPEED > persisted `set-speed` > "standard" (Fast mode OFF).
+
+    Only the codex backend HAS effort/speed knobs. For a backend without them (claude) both resolve
+    to None: an irrelevant IMPASSE_CLAUDE_EFFORT must neither fail the run nor masquerade in the
+    result as configuration that was actually applied.
+    """
+    model = (model or os.environ.get(f"IMPASSE_{backend_name.upper()}_MODEL")
+             or lib.get_default_model(backend_name))
+    if backend_name == "codex":
+        effort = (effort or os.environ.get("IMPASSE_CODEX_EFFORT")
+                  or lib.get_default_effort("codex"))
+        speed = (speed or os.environ.get("IMPASSE_CODEX_SPEED")
+                 or lib.get_default_speed("codex") or "standard")
+    else:
+        effort = None
+        speed = None
+    return model, effort, speed
+
+
 def _fail(code, message, kind, notice, manifest, termination=None, retryable=None) -> dict:
     failure = {"code": code, "message": message}
     if retryable is not None:
@@ -534,13 +887,25 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
            schema_path: str | None = None, approve_send: str | None = None,
            effort: str | None = None, model: str | None = None, speed: str | None = None,
            wall_timeout: float = 300.0,
-           idle_timeout: float = 300.0, no_record: bool = False, raw: bool = False) -> dict:
+           idle_timeout: float = 300.0, no_record: bool = False, raw: bool = False,
+           advise_stream=None, recovery_context: dict | None = None) -> dict:
     """Enforce consent, run a supervised read-only review, and classify the result.
     The returned 'response' is UNTRUSTED reviewer output — validate against the schema.
     `backend` selects the reviewer: 'auto' (the default) picks the most host-independent AVAILABLE
     backend for the detected host (to a Claude host, 'codex'; to a Codex host, 'claude'), or force
     'codex'/'claude' explicitly. The tier is computed relative to the detected host, and any
-    downgraded tier (same_provider/undetermined) carries an `independence_notice` the host surfaces."""
+    downgraded tier (same_provider/undetermined) carries an `independence_notice` the host surfaces.
+
+    Every result carries a `wall_advice` block (the recommended --wall for this payload, and
+    whether the requested one looks too short), and every result from a run that actually reached
+    the backend carries `telemetry` (where the time went, whether any bytes arrived, the resolved
+    model). A `timeout` additionally carries ranked `recovery` options.
+
+    `advise_stream` (the CLI passes sys.stderr) receives the wall recommendation BEFORE the send,
+    where it can still change the operator's mind; library callers leave it None and read
+    `wall_advice` instead. `recovery_context` carries the CLI's file paths so recovery options can
+    be rendered as copy-pasteable commands.
+    """
     if effort is not None and effort not in _ALLOWED_EFFORT:
         raise ValueError(f"effort must be one of {sorted(_ALLOWED_EFFORT)}")
     if speed is not None and speed not in _ALLOWED_SPEED:
@@ -577,29 +942,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         return {**_fail("backend_error", str(e), kind, str(e), manifest), "host": host,
                 "host_detection": hdblock}
 
-    # Model precedence: per-run --model > IMPASSE_{CODEX,CLAUDE}_MODEL env > persisted default
-    # (settings.json via `set-model`) > the backend's own default.
-    model = (model or os.environ.get(f"IMPASSE_{be.name.upper()}_MODEL")
-             or lib.get_default_model(be.name))
-    # Effort precedence mirrors model: per-run --effort > IMPASSE_CODEX_EFFORT env > persisted
-    # default (`set-effort`) > the backend's own default (flag omitted; codex defaults to medium).
-    # Only the codex backend HAS an effort knob — for backends without one (claude), resolve
-    # nothing and report null: an irrelevant IMPASSE_CLAUDE_EFFORT must neither fail the run nor
-    # masquerade in the result as configuration that was actually applied.
-    if be.name == "codex":
-        effort = (effort or os.environ.get("IMPASSE_CODEX_EFFORT")
-                  or lib.get_default_effort("codex"))
-    else:
-        effort = None
-    # Speed (service tier / Fast mode) precedence mirrors effort: per-run --speed > IMPASSE_CODEX_SPEED
-    # env > persisted default (`set-speed`) > "standard" (Fast mode OFF). Independent of effort. Only
-    # the codex backend HAS this knob — for backends without one (claude), resolve nothing and report
-    # null: an irrelevant IMPASSE_CLAUDE_SPEED must neither fail the run nor masquerade as applied.
-    if be.name == "codex":
-        speed = (speed or os.environ.get("IMPASSE_CODEX_SPEED")
-                 or lib.get_default_speed("codex") or "standard")
-    else:
-        speed = None
+    model, effort, speed = resolve_knobs(be.name, model, effort, speed)
 
     # Independence is host-relative. Compute the tier ONCE from this run's single host snapshot (the
     # tier is never cached on Backend — F011) so host, confidence, tier, and notice can never disagree
@@ -629,9 +972,73 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                f"(one of {sorted(_ALLOWED_SPEED)})")
         return {**_fail("backend_error", msg, kind, msg, manifest), **bmeta}
 
+    # --- Pre-send: size the payload and say whether this --wall is likely to hold ---------------
+    # Computed BEFORE anything is sent, because the failure it prevents (a full paid review thrown
+    # away by a too-short cap) is unrecoverable afterwards. Advisory only: an underprovisioned wall
+    # is a warning, never a refusal — the operator may have a good reason (a host command cap).
+    artifact_tokens = lib.estimate_tokens(len(artifact_bytes))
+    instruction_tokens = lib.estimate_tokens(len(instruction.encode("utf-8", "replace")))
+    _rec = lib.recommend_wall(backend=be.name, model=model, artifact_tokens=artifact_tokens,
+                              effort=effort, speed=speed)
+    under = wall_timeout < _rec["recommended_wall_s"]
+    _advice_msg = (
+        f"artifact ≈{artifact_tokens} tokens on {be.name}"
+        f"{'/' + str(model) if model else ' (backend default model)'}: recommended --wall "
+        f"{_rec['recommended_wall_s']:.0f}s ({_rec['basis']}) — {_rec['rationale']}"
+    )
+    if under:
+        _advice_msg = (f"⚠ --wall {wall_timeout:.0f}s may be too short. " + _advice_msg +
+                       ". A timeout discards the whole review, including any findings.")
+    if _rec.get("floor_reason"):
+        _advice_msg += f"; {_rec['floor_reason']}"
+    wall_advice = {
+        "requested_wall_s": float(wall_timeout), "underprovisioned": bool(under),
+        "message": _advice_msg, "artifact_tokens_est": artifact_tokens,
+        **{k: _rec[k] for k in ("recommended_wall_s", "basis", "sample_count", "p50_s", "p90_s",
+                                "rationale", "floor_reason")},
+    }
+    bmeta["wall_advice"] = wall_advice
+    if advise_stream is not None:
+        try:
+            print(_advice_msg, file=advise_stream, flush=True)
+        except (OSError, ValueError):
+            pass   # a closed/unusable stream must never fail the review
+
+    # --- Metrics: what gets logged about this run's TIMING (never its content) ------------------
+    # `metrics_base` holds only sizes, identifiers and configuration. lib.record_metrics filters to
+    # an allowlist as well, so this stays true even if a future edit here is careless.
+    metrics_base = {
+        "kind": kind, "backend": be.name, "provider": be.provider, "host": host,
+        "independence": independence, "model_requested": model,
+        "effort": effort, "speed": speed,
+        "artifact_bytes": len(artifact_bytes), "artifact_tokens_est": artifact_tokens,
+        "instruction_tokens_est": instruction_tokens,
+        # The digest is the ONE content-derived field here. `--no-record`/`--raw` mean the operator
+        # asked for nothing about this artifact to persist, so it is withheld — the timings, which
+        # describe the run rather than the content, are still kept. `IMPASSE_NO_METRICS=1` opts out
+        # of the store entirely.
+        "artifact_digest": (None if (no_record or raw)
+                            else (manifest.get("digest") if isinstance(manifest, dict) else None)),
+        "wall_s": float(wall_timeout), "idle_s": float(idle_timeout),
+    }
+    phases = _PhaseLog()
+
+    def _emit_metrics(outcome, **extra):
+        """Record one run's timings. Called on every path where the backend was actually spawned —
+        a timeout is the most valuable sample there is, so failures are recorded, not dropped."""
+        if os.environ.get("IMPASSE_NO_METRICS"):
+            return
+        row = dict(metrics_base)
+        row["outcome"] = outcome
+        row["phases"] = phases.as_dict()
+        row["duration_s"] = round(phases.elapsed(), 3)
+        row.update(extra)
+        lib.record_metrics(row)
+
     approved, notice = consent.check(be, manifest=manifest, approve_send=approve_send)
     if not approved:
         return {**_fail("consent_denied", notice, kind, notice, manifest), **bmeta}
+    phases.mark("consent_granted")
 
     def _f(code, message, **kw):
         return {**_fail(code, message, kind, notice, manifest, **kw), **bmeta}
@@ -683,15 +1090,83 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         else:
             return _f("backend_error", f"unsupported backend type '{be.type}'")
 
+        phases.mark("schema_loaded")
+        # The CLI version is metadata, not a gate: a duration is only comparable against the CLI
+        # build that produced it. Resolved once per process (cached), before the clock that matters.
+        be_version = backend_version(be.command)
+        phases.mark("backend_version_resolved")
+
         result = None
         parsed = None
+        backend_meta = {}    # request id / resolved model / first-token latency, per attempt
+        attempt = 0
         deadline = time.monotonic() + wall_timeout   # ONE wall-clock budget for the whole review
         transient_used = 0   # retries spent on outages (service_unavailable)
         output_used = 0      # retries spent on malformed reviewer output (issue #1)
+
+        def _telemetry(res=None, extra_meta=None):
+            """The where-did-the-time-go block attached to every post-spawn result."""
+            meta = dict(backend_meta)
+            if extra_meta:
+                meta.update(extra_meta)
+            # An alias ('sonnet') or a backend default is NOT a resolved model. Say which this is,
+            # so a performance comparison can't silently pool two different models (issue #11 item 6).
+            resolved = meta.get("model_resolved")
+            source = "resolved" if resolved else ("requested" if model else "backend_default")
+            t = {
+                "phases": phases.as_dict(), "last_phase": phases.last(),
+                "elapsed_s": round(phases.elapsed(), 3), "attempts": attempt,
+                "transient_retries": transient_used, "output_retries": output_used,
+                "model_requested": model, "model_resolved": resolved, "model_source": source,
+                "backend_version": be_version, "request_id": meta.get("request_id"),
+                "ttfb_s": meta.get("ttfb_s"),
+                "backend_duration_s": meta.get("backend_duration_s"),
+            }
+            if res is not None:
+                # first_byte_s is the SUPERVISOR's view (any byte on any stream); ttfb_s, when the
+                # backend reports one, is the provider's own time-to-first-token. Keep both: the
+                # gap between them is CLI startup, and conflating them would hide it.
+                t["first_byte_s"] = res.first_byte_s
+                t["bytes_received"] = res.bytes_received
+                t["received_any_bytes"] = res.bytes_received > 0
+                if t["ttfb_s"] is None and res.first_byte_s is not None:
+                    t["ttfb_s"] = round(res.first_byte_s, 3)
+            return t
+
+        def _timeout_result(message, termination_kind, res=None):
+            """A timeout that says WHERE the time went and WHAT to do next — the two things the
+            bare 'backend wall_timeout after 605s' failure could not (issue #11)."""
+            tel = _telemetry(res)
+            recovery = _recovery_options(
+                backend_name=be.name, model=model, effort=effort, speed=speed,
+                wall_timeout=wall_timeout, recommended_wall=_rec["recommended_wall_s"],
+                artifact_tokens=artifact_tokens, host=host, ctx=recovery_context)
+            if tel.get("received_any_bytes") is False:
+                message += (" — the backend produced NO output before the cap, so the time went to "
+                            "startup, authentication or a provider queue, not to reasoning over the "
+                            "artifact")
+            elif tel.get("ttfb_s") is not None:
+                message += (f" — first output after {tel['ttfb_s']:.1f}s, then "
+                            f"{tel['bytes_received']} byte(s); the backend was responding, so the "
+                            "cap was most likely too short for the work")
+            _emit_metrics("timeout", failure_code="timeout", termination=termination_kind,
+                          ttfb_s=tel.get("ttfb_s"), bytes_received=tel.get("bytes_received"),
+                          model_resolved=tel.get("model_resolved"),
+                          model_source=tel.get("model_source"), backend_version=be_version,
+                          transient_retries=transient_used, output_retries=output_used)
+            out = _f("timeout", message, termination=termination_kind)
+            out["telemetry"] = tel
+            out["recovery"] = recovery
+            # A timeout leaves nothing behind — say so, rather than letting the operator wonder
+            # whether a retry resumes anything.
+            out["reusable_result"] = False
+            return out
+
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return _f("timeout", f"backend wall_timeout after {wall_timeout:.0f}s")
+                return _timeout_result(f"backend wall_timeout after {wall_timeout:.0f}s",
+                                       "wall_timeout", result)
             if out_last is not None:
                 open(out_last, "w").close()   # truncate — never read a prior attempt's stale content
             # Run the reviewer in the run's own scratch dir, NOT the operator's project CWD (F003):
@@ -701,24 +1176,46 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             # cross-provider reviewer for a Codex host. Closes the PROJECT (artifact-controlled) vector;
             # user-global ~/.claude config is the operator's own (not artifact-controlled) — see the
             # residual note in docs/backends/claude.md. Codex is unaffected (hermetic via --ignore-rules).
+            attempt += 1
+            phases.mark(f"attempt_{attempt}_spawn")
             result = supervise(argv, input_bytes=artifact_bytes, cwd=scratch,
                                wall_timeout=remaining, idle_timeout=min(idle_timeout, remaining))
+            if result.first_byte_s is not None:
+                # Recorded as an absolute review-relative moment, so the phase timeline reads in one
+                # clock even though the supervisor measures from ITS own spawn.
+                phases.marks.append((f"attempt_{attempt}_first_byte",
+                                     round(phases.elapsed() - result.duration_s
+                                           + result.first_byte_s, 3)))
+            phases.mark(f"attempt_{attempt}_backend_exit")
+            envelope = _claude_envelope(result.stdout) if be.type == "claude-cli" else None
+            backend_meta = (_claude_meta(envelope) if be.type == "claude-cli"
+                            else _codex_stream_meta(result.stdout))
             if result.termination == "spawn_error":
-                return _f("backend_error", result.stderr.decode("utf-8", "replace")[-800:])
+                msg = result.stderr.decode("utf-8", "replace")[-800:]
+                _emit_metrics("error", failure_code="backend_error",
+                              termination="spawn_error", backend_version=be_version)
+                return _f("backend_error", msg)
             if result.termination in ("wall_timeout", "idle_timeout", "termination_failed"):
-                return _f("timeout", f"backend {result.termination} after {result.duration_s:.0f}s",
-                          termination=result.termination)
+                return _timeout_result(
+                    f"backend {result.termination} after {result.duration_s:.0f}s",
+                    result.termination, result)
+            phases.mark(f"attempt_{attempt}_validate_start")
             if result.exit_code != 0:
                 err = _extract_backend_error(result.stdout, result.stderr,
-                                             parse_jsonl=(be.type == "codex-cli"))
+                                             parse_jsonl=(be.type == "codex-cli"),
+                                             envelope=envelope)
                 # Auto-retry ONLY a transient outage; a rate/usage cap or auth failure won't clear
                 # in seconds, so surface it (with a retryable hint) for the host to offer recovery.
                 backoff = min(2 ** (transient_used + 1), 10)
                 if (err["code"] == "service_unavailable" and transient_used < _MAX_TRANSIENT_RETRIES
                         and deadline - time.monotonic() > backoff):
                     transient_used += 1
+                    phases.mark(f"attempt_{attempt}_transient_retry")
                     time.sleep(backoff)
                     continue
+                _emit_metrics("error", failure_code=err["code"], termination=result.termination,
+                              backend_version=be_version, transient_retries=transient_used,
+                              output_retries=output_used, **_metric_meta(backend_meta, model))
                 return _f(err["code"], err["message"], retryable=err["retryable"])
 
             # exit 0 — read and validate the final message. An LLM's malformed output is
@@ -739,11 +1236,20 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                     pass
             else:                               # claude -p prints the final message to stdout
                 if result.stdout_truncated:     # stdout hit the capture cap — the JSON is cut off
+                    _emit_metrics("invalid_response", failure_code="invalid_response",
+                                  termination=result.termination, backend_version=be_version,
+                                  transient_retries=transient_used, output_retries=output_used,
+                                  **_metric_meta(backend_meta, model))
                     return _f("invalid_response",
                               "reviewer output exceeded the capture cap (truncated). An unchanged "
                               f"re-run may fit; {_size_remedy(be.name)} is more reliable.",
                               retryable=True)
-                final_bytes = result.stdout
+                # With --output-format json the answer is the envelope's `result`; without a
+                # recognizable envelope (an older CLI, or a format change) stdout IS the answer.
+                if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+                    final_bytes = envelope["result"].encode("utf-8", "replace")
+                else:
+                    final_bytes = result.stdout
             problem = None
             if not final_bytes or not final_bytes.strip():
                 problem = "reviewer produced no final message"
@@ -751,6 +1257,10 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 # Size-check the BYTES before decoding: decoding first would count characters,
                 # letting a multi-byte UTF-8 message slip the bound — and the tolerant parser
                 # could then accept a complete object out of a silently truncated prefix.
+                _emit_metrics("invalid_response", failure_code="invalid_response",
+                              termination=result.termination, backend_version=be_version,
+                              transient_retries=transient_used, output_retries=output_used,
+                              **_metric_meta(backend_meta, model))
                 return _f("invalid_response",
                           f"final message exceeds the {_MAX_FINAL}-byte bound (read at least "
                           f"{len(final_bytes)} bytes). An unchanged re-run may fit, especially "
@@ -768,8 +1278,22 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                         break   # valid response
             if output_used < _MAX_OUTPUT_RETRIES and deadline - time.monotonic() > 0:
                 output_used += 1
+                phases.mark(f"attempt_{attempt}_output_retry")
                 continue
+            _emit_metrics("invalid_response", failure_code="invalid_response",
+                          termination=result.termination, backend_version=be_version,
+                          transient_retries=transient_used, output_retries=output_used,
+                          **_metric_meta(backend_meta, model))
             return _f("invalid_response", problem, retryable=True)
+
+        phases.mark("validated")
+        telemetry = _telemetry(result)
+        _findings = parsed.get("findings")
+        _emit_metrics("completed", termination=result.termination, backend_version=be_version,
+                      transient_retries=transient_used, output_retries=output_used,
+                      bytes_received=result.bytes_received,
+                      findings_count=len(_findings) if isinstance(_findings, list) else None,
+                      **_metric_meta(backend_meta, model))
 
         run_id = parsed.get("review_id")
         recorded = False
@@ -815,6 +1339,13 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             "ok": True, "kind": kind, "termination": result.termination,
             "duration_s": round(result.duration_s, 2), "raw": raw,
             **bmeta,
+            # The model the backend actually ran, when it reports one. `model` above is what was
+            # REQUESTED — for a backend default it is null, and for an alias it is the alias, so
+            # the two must never be conflated in a performance comparison (issue #11 item 6).
+            "model_resolved": telemetry["model_resolved"],
+            "model_source": telemetry["model_source"],
+            "backend_version": be_version,
+            "telemetry": telemetry,
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
             "run_id": run_id, "recorded": recorded, "record_path": record_path,
             "record_notice": record_notice,
@@ -858,7 +1389,9 @@ def _main(argv=None) -> int:
     rv.add_argument("--model", default=None,
                     help="reviewer model (else IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL, else the backend default)")
     rv.add_argument("--wall", type=float, default=300.0,
-                    help="total wall-clock cap (s). The real bound — scale UP for high effort / large artifacts.")
+                    help="total wall-clock cap (s). The real bound — scale UP for high effort / large "
+                         "artifacts. Run `estimate` (or read `wall_advice` in the result) for a "
+                         "payload-aware recommendation; a too-short wall discards the whole review.")
     rv.add_argument("--idle", type=float, default=300.0,
                     help="no-output cap (s). The reviewer waits SILENTLY on server-side reasoning, so a silent "
                          "gap is not a hang; keep this ≈ --wall (it can't distinguish a hang from a long API wait).")
@@ -866,6 +1399,15 @@ def _main(argv=None) -> int:
     rv.add_argument("--raw", action="store_true",
                     help="return the reviewer's UNVERIFIED findings and skip the "
                          "verify/reconcile/escalate protocol (records nothing; implies --no-record)")
+    es = sub.add_parser("estimate", help="recommend a --wall for an artifact BEFORE sending it "
+                                         "(no data leaves the machine; nothing is sent)")
+    es.add_argument("--artifact-file", required=True)
+    es.add_argument("--backend", default="auto", choices=["auto", "codex", "claude"])
+    es.add_argument("--model", default=None)
+    es.add_argument("--effort", default=None, choices=sorted(_ALLOWED_EFFORT))
+    es.add_argument("--speed", default=None, choices=sorted(_ALLOWED_SPEED))
+    es.add_argument("--wall", type=float, default=None,
+                    help="a wall you're considering; the output flags it if underprovisioned")
     md = sub.add_parser("mode", help="report the strongest honest review mode for this environment")
     md.add_argument("--kind", required=True, choices=["code", "document", "decision", "research", "data", "other"])
     md.add_argument("--environment", default=None, help="override auto-detection (else IMPASSE_ENV / auto)")
@@ -946,6 +1488,33 @@ def _main(argv=None) -> int:
             print(f"default speed for {args.backend}: {lib.get_default_speed(args.backend) or '(standard, Fast off)'}")
         return 0
 
+    if args.cmd == "estimate":
+        # A purely local pre-flight: it reads the artifact only to SIZE it. Nothing is sent, no
+        # consent is needed, and no model is invoked — so it is safe to run before deciding whether
+        # to run a review at all.
+        try:
+            art = _read_limited(args.artifact_file, _MAX_INPUT, binary=True)
+        except (OSError, ValueError) as e:
+            print(json.dumps({"ok": False, "failure": {"code": "artifact_unavailable",
+                                                       "message": str(e)}}, indent=2))
+            return 1
+        name = args.backend
+        if name == "auto":
+            sel = lib.review_mode("code", codex_available=bool(lib.resolve_codex_command()),
+                                  claude_available=bool(lib.resolve_claude_command()))
+            name = sel["mode"] if sel["mode"] in ("codex", "claude") else "codex"
+        model_r, effort_r, speed_r = resolve_knobs(name, args.model, args.effort, args.speed)
+        tokens = lib.estimate_tokens(len(art))
+        rec = lib.recommend_wall(backend=name, model=model_r, artifact_tokens=tokens,
+                                 effort=effort_r, speed=speed_r)
+        out = {"ok": True, "backend": name, "model": model_r, "effort": effort_r,
+               "speed": speed_r, "artifact_bytes": len(art), **rec}
+        if args.wall is not None:
+            out["requested_wall_s"] = args.wall
+            out["underprovisioned"] = args.wall < rec["recommended_wall_s"]
+        print(json.dumps(out, indent=2))
+        return 0
+
     if args.cmd == "mode":
         def _avail(resolve):
             try:                       # a bad *_BIN override raises; treat as unavailable, don't crash
@@ -969,10 +1538,16 @@ def _main(argv=None) -> int:
             print(json.dumps({"ok": False, "outcome": "failed",
                               "failure": {"code": "artifact_unavailable", "message": str(e)}}, indent=2))
             return 1
+        # stderr carries the pre-send wall recommendation (stdout stays pure JSON for the host to
+        # parse); the context lets a timeout print recovery commands with the real file paths.
+        ctx = {"prog": sys.argv[0] if sys.argv and sys.argv[0] else "impasse_run.py",
+               "kind": args.kind, "instruction_file": args.instruction_file,
+               "artifact_file": args.artifact_file}
         result = review(kind=args.kind, instruction=instruction, artifact_bytes=artifact_bytes,
                         backend=args.backend, schema_path=args.schema, approve_send=args.approve_send,
                         effort=args.effort, model=args.model, speed=args.speed, wall_timeout=args.wall,
-                        idle_timeout=args.idle, no_record=args.no_record, raw=args.raw)
+                        idle_timeout=args.idle, no_record=args.no_record, raw=args.raw,
+                        advise_stream=sys.stderr, recovery_context=ctx)
         print(json.dumps(result, indent=2))
         return 0 if result.get("ok") else 1
     return 2

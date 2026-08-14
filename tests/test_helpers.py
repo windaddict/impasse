@@ -94,6 +94,24 @@ if mode == "badjson_then_nowrite":   # proves per-attempt truncation: retry must
 if mode == "noise_stderr_unavailable":   # exit nonzero with NO error event; "unavailable" only in stderr noise
     sys.stderr.write("warning: connection temporarily unavailable during an unrelated step\n")
     sys.exit(1)
+if mode == "silent_hang":       # never emits a byte, outlives any test wall -> "backend never spoke"
+    time.sleep(600)
+if mode == "speak_then_hang":   # a byte lands, THEN it stalls -> "backend spoke, then went quiet"
+    sys.stdout.write(json.dumps({"type": "thread.started", "thread_id": "th_fake_1"}) + "\n")
+    sys.stdout.flush()
+    time.sleep(600)
+if mode == "partial_then_stall":   # partial JSON in the out-file, then stall (never completes)
+    if outp:
+        open(outp, "w", encoding="utf-8").write('{"schema_version":"1.0","findi')
+    sys.stdout.write(json.dumps({"type": "thread.started", "thread_id": "th_partial"}) + "\n")
+    sys.stdout.flush()
+    time.sleep(600)
+if mode == "orphan_then_hang":  # leaves a CHILD alive, then stalls: proves group teardown reaps both
+    import subprocess as _sp
+    _sp.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    sys.stdout.write(json.dumps({"type": "thread.started", "thread_id": "th_orphan"}) + "\n")
+    sys.stdout.flush()
+    time.sleep(600)
 if mode == "ratelimit":
     emit_error(429, "Rate limit reached for your account. Please try again later.")
 if mode == "unavailable":
@@ -123,12 +141,13 @@ _VALID_REVIEW = ('{"schema_version":"1.0","review_id":"cr","artifact":{"kind":"d
                  '"summary":"s","findings":[]}')
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
-import sys, os
+import sys, os, json, time
 try:
     sys.stdin.buffer.read()   # drain the piped artifact (reaches EOF)
 except Exception:
     pass
 mode = os.environ.get("FAKE_CLAUDE_MODE", "valid")
+time.sleep(float(os.environ.get("FAKE_CLAUDE_SLEEP", "0")))
 
 cf_all = os.environ.get("FAKE_COUNT_ALL")   # counts EVERY invocation (proves retry behavior)
 if cf_all:
@@ -154,6 +173,26 @@ if mode == "notjson_then_ok":   # malformed stdout once, valid on retry (issue #
     mode = "notjson" if n == 1 else "valid"
 
 valid = ''' + repr(_VALID_REVIEW) + r'''
+if mode in ("envelope", "envelope_error"):
+    # The `claude -p --output-format json` result envelope. Two models appear in modelUsage (a
+    # headless run can bill a small helper model for side work); the REVIEWER is the one that read
+    # the artifact, i.e. the larger total input including cache.
+    env = {
+        "type": "result", "subtype": "success", "is_error": mode == "envelope_error",
+        "result": "Rate limit reached for your account." if mode == "envelope_error" else valid,
+        "session_id": "sess_fake_9", "ttft_ms": 1234, "duration_api_ms": 4321,
+        "usage": {"input_tokens": 2, "output_tokens": 4},
+        "modelUsage": {
+            "claude-haiku-4-5-20251001": {"inputTokens": 525, "outputTokens": 11,
+                                          "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0},
+            "claude-sonnet-5": {"inputTokens": 2, "outputTokens": 4,
+                                "cacheReadInputTokens": 15565, "cacheCreationInputTokens": 21157},
+        },
+    }
+    if mode == "envelope_error":
+        env["api_error_status"] = 429
+    sys.stdout.write(json.dumps(env))
+    sys.exit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0")))
 out = {
     "valid": valid,
     "fenced": "```json\n" + valid + "\n```",
@@ -305,11 +344,21 @@ def main() -> int:
         os.chmod(_rz_bin, 0o755)
         os.environ["HOME"] = _rz_dir
         os.environ["PATH"] = os.path.join(tmp, "no-such-bin")   # ensure `which codex` misses
-        # On a machine WITH a real /Applications/ChatGPT.app the absolute path matches first; without
-        # one, our HOME-relative fake matches. Either proves the ChatGPT.app branch resolves.
-        _rz = lib.resolve_codex_command()
-        check(_rz is not None and _rz[0].endswith("ChatGPT.app/Contents/Resources/codex"),
-              "resolve_codex_command: finds the binary in the rebranded ChatGPT.app bundle")
+        # The candidate list is ORDERED, and the entries above the HOME-relative bundle are absolute
+        # paths we can't neutralize with a temp HOME. On a developer machine that really has one
+        # (a Homebrew codex, or a system-wide ChatGPT.app), resolution correctly stops there and this
+        # case is unreachable — so skip rather than assert a suffix that a Homebrew hit fails and a
+        # system ChatGPT.app passes for the WRONG reason. CI runs on a clean image and covers it.
+        _rz_earlier = [p for p in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex",
+                                   "/Applications/ChatGPT.app/Contents/Resources/codex")
+                       if os.path.isfile(p) and os.access(p, os.X_OK)]
+        if _rz_earlier:
+            check(True, "resolve_codex_command: ChatGPT.app bundle case skipped — a "
+                        f"higher-priority install exists here ({_rz_earlier[0]})")
+        else:
+            _rz = lib.resolve_codex_command()
+            check(_rz is not None and _rz[0] == _rz_bin,
+                  "resolve_codex_command: finds the binary in the rebranded ChatGPT.app bundle")
     finally:
         for _k, _v in (("HOME", _rz_home), ("PATH", _rz_path)):
             if _v is None:
@@ -660,7 +709,9 @@ def main() -> int:
         os.environ.pop("IMPASSE_CODEX_RESPECT_CONFIG", None)
         os.environ.pop("OPENAI_BASE_URL", None)
     argv_c = run.build_claude_argv(be_c.command, instruction="LENS")
-    check("-p" in argv_c and "LENS" in argv_c and argv_c[argv_c.index("--output-format") + 1] == "text", "build_claude_argv: -p + text output")
+    # json (not text): the envelope carries the RESOLVED model, time-to-first-token and session id
+    # that a plain text answer discards — see build_claude_argv and issue #11.
+    check("-p" in argv_c and "LENS" in argv_c and argv_c[argv_c.index("--output-format") + 1] == "json", "build_claude_argv: -p + json envelope output")
     check("--output-last-message" not in argv_c, "build_claude_argv: no output-file (reads stdout)")
     check(argv_c[argv_c.index("--allowed-tools") + 1] == "", "build_claude_argv: empty allowlist (fails closed)")
     check("--strict-mcp-config" in argv_c and argv_c[argv_c.index("--permission-mode") + 1] == "default", "build_claude_argv: strict MCP + pinned default permission mode")
@@ -1754,6 +1805,264 @@ def main() -> int:
     with open(_badf, "w") as f:
         f.write('{"hello": "world"}')
     check(report._main(["escalations", _badf]) == 2, "escalations CLI: a non-reconciliation file -> exit 2")
+
+    # --- issue #11: timeout diagnosability, wall recommendation, duration telemetry ---
+    # The defect: a Claude review that blew its wall returned "backend wall_timeout after 605s" and
+    # nothing else — no phase, no evidence the provider ever responded, no resolved model, and no
+    # next step but a guess. Each block below pins one half of the fix: the run must say WHERE the
+    # time went, and the tooling must say what wall to use next.
+    if os.name == "posix":
+        # (a) The supervisor's liveness evidence: silence and speech must be distinguishable.
+        _i11_silent = run.supervise(["bash", "-c", "sleep 30"], wall_timeout=2, idle_timeout=100)
+        check(_i11_silent.termination == "wall_timeout" and _i11_silent.first_byte_s is None
+              and _i11_silent.bytes_received == 0,
+              "issue #11: a backend that never speaks -> first_byte_s None, bytes_received 0")
+        _i11_loud = run.supervise(["bash", "-c", "echo hello; sleep 30"], wall_timeout=2, idle_timeout=100)
+        check(_i11_loud.termination == "wall_timeout" and _i11_loud.first_byte_s is not None
+              and _i11_loud.bytes_received >= 5,
+              "issue #11: a backend that speaks then stalls -> first_byte_s recorded")
+
+        # (b) A SILENT timeout must say the time went to startup/auth/queue, not to reasoning.
+        os.environ["FAKE_MODE"] = "silent_hang"
+        _i11_a = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=2, idle_timeout=100, no_record=True)
+        _i11_at = _i11_a.get("telemetry") or {}
+        check(_i11_a["ok"] is False and _i11_a["failure"]["code"] == "timeout"
+              and _i11_at.get("received_any_bytes") is False
+              and "NO output" in _i11_a["failure"]["message"],
+              "issue #11: silent-to-the-wall timeout reports that the backend produced no output")
+        check(_i11_at.get("last_phase", "").startswith("attempt_1")
+              and isinstance(_i11_at.get("phases"), dict)
+              and "consent_granted" in _i11_at["phases"] and "attempt_1_spawn" in _i11_at["phases"],
+              "issue #11: timeout carries a phase timeline (consent -> spawn -> ...)")
+        check(_i11_a.get("reusable_result") is False,
+              "issue #11: timeout states plainly that nothing is reusable from the attempt")
+
+        # (c) Bytes-then-stall must read differently — the backend WAS responding.
+        os.environ["FAKE_MODE"] = "speak_then_hang"
+        _i11_b = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=3, idle_timeout=100, no_record=True)
+        _i11_bt = _i11_b.get("telemetry") or {}
+        check(_i11_b["ok"] is False and _i11_bt.get("received_any_bytes") is True
+              and _i11_bt.get("ttfb_s") is not None
+              and "first output after" in _i11_b["failure"]["message"],
+              "issue #11: bytes-then-stall timeout reports time-to-first-byte, not just the cap")
+        check(_i11_bt.get("request_id") == "th_fake_1",
+              "issue #11: the codex thread id is recovered as the request id")
+
+        # (d) Partial JSON that never completes is a TIMEOUT, not a half-parsed review.
+        os.environ["FAKE_MODE"] = "partial_then_stall"
+        _i11_c = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=3, idle_timeout=100, no_record=True)
+        check(_i11_c["ok"] is False and _i11_c["failure"]["code"] == "timeout"
+              and "response" not in _i11_c,
+              "issue #11: partial JSON then stall -> timeout, never a partial response")
+
+        # (e) A descendant alive at the timeout must be torn down with the group, not leaked.
+        os.environ["FAKE_MODE"] = "orphan_then_hang"
+        _i11_t0 = time.monotonic()
+        _i11_d = run.review(kind="code", instruction="review", artifact_bytes=b"code",
+                            wall_timeout=2, idle_timeout=100, no_record=True)
+        check(_i11_d["failure"]["code"] == "timeout" and time.monotonic() - _i11_t0 < 25,
+              "issue #11: a backend leaving a live child still tears down and returns promptly")
+
+        # (f) Recovery: ranked, concrete, and honest about what each option changes.
+        _i11_rec = _i11_a.get("recovery") or []
+        _i11_first = _i11_rec[0] if _i11_rec else {}
+        check(len(_i11_rec) >= 3 and _i11_first.get("action") == "retry_longer_wall"
+              and all(o.get("new_invocation") is True for o in _i11_rec),
+              "issue #11: timeout returns ranked recovery options, each a full new invocation")
+        check(any(o.get("action") == "switch_backend" and "INDEPENDENCE" in (o.get("changes") or "")
+                  for o in _i11_rec)
+              and any(o.get("action") == "split_artifact" for o in _i11_rec),
+              "issue #11: recovery names the independence cost of switching backends, and a split target")
+        os.environ["FAKE_MODE"] = "valid"
+
+    # (g) A copy-pasteable command is built only when the CLI supplies its file paths.
+    _i11_ctx = {"prog": "impasse_run.py", "kind": "code", "instruction_file": "I.txt",
+                "artifact_file": "A md.txt"}
+    _i11_opts = run._recovery_options(backend_name="claude", model=None, effort=None, speed=None,
+                                      wall_timeout=600.0, recommended_wall=900.0,
+                                      artifact_tokens=5693, host="codex", ctx=_i11_ctx)
+    _i11_cmd = _i11_opts[0]["command"]
+    check("--wall 900" in _i11_cmd and "'A md.txt'" in _i11_cmd,
+          "issue #11: recovery command uses the recommended wall and quotes awkward paths")
+    check(run._recovery_options(backend_name="claude", model=None, effort=None, speed=None,
+                                wall_timeout=600.0, recommended_wall=900.0, artifact_tokens=10,
+                                host="codex", ctx=None)[0]["command"] is None,
+          "issue #11: without CLI context the options still describe the change, minus the command")
+
+    # (h) The wall recommendation: shipped seed until there is enough local history, then measured.
+    _i11_seed = lib.recommend_wall(backend="claude", artifact_tokens=5693, rows=[])
+    check(_i11_seed["basis"] == "heuristic" and _i11_seed["recommended_wall_s"] > 600,
+          "issue #11: with no history, the seed recommends MORE than the 600s that timed out")
+    _i11_rows = [{"outcome": "completed", "duration_s": 540 + i * 18, "artifact_tokens_est": 5693}
+                 for i in range(6)]
+    _i11_emp = lib.recommend_wall(backend="claude", artifact_tokens=5693, rows=_i11_rows)
+    check(_i11_emp["basis"] == "empirical" and _i11_emp["sample_count"] == 6
+          and _i11_emp["p90_s"] is not None,
+          "issue #11: >=5 completed samples switch the basis from shipped seed to measured")
+    # A timeout is NOT a duration — it must never pull an estimate down, and must raise the floor.
+    _i11_mixed = _i11_rows + [{"outcome": "timeout", "wall_s": 1800.0, "artifact_tokens_est": 5693,
+                               "duration_s": 1805.0}]
+    _i11_floor = lib.recommend_wall(backend="claude", artifact_tokens=5693, rows=_i11_mixed)
+    check(_i11_floor["recommended_wall_s"] > 1800 and _i11_floor["floor_reason"],
+          "issue #11: an already-exceeded cap raises the floor instead of being averaged in")
+    check(lib.recommend_wall(backend="claude", artifact_tokens=99_000_000,
+                             rows=[])["recommended_wall_s"] <= 5400,
+          "issue #11: the recommendation is capped — past it, split rather than wait")
+    # A history of SMALL fast reviews fits a near-zero rate. Extrapolating it to a large artifact
+    # would confidently recommend a short wall for a payload nothing local resembles — the very
+    # failure this feature exists to prevent. The shipped estimate must win there.
+    _i11_small = [{"outcome": "completed", "duration_s": 4.0, "artifact_tokens_est": 40}
+                  for _ in range(8)]
+    _i11_far = lib.recommend_wall(backend="claude", artifact_tokens=25000, rows=_i11_small)
+    _i11_near = lib.recommend_wall(backend="claude", artifact_tokens=40, rows=_i11_small)
+    check(_i11_far["recommended_wall_s"] >= 1800 and "no local evidence at this size" in _i11_far["rationale"],
+          "issue #11: a large artifact isn't sized from a history of tiny ones (extrapolation floor)")
+    check(_i11_near["recommended_wall_s"] < _i11_far["recommended_wall_s"]
+          and "no local evidence" not in _i11_near["rationale"],
+          "issue #11: within observed sizes the measured fit is still used")
+
+    # The store is a ROLLING log: reading its head would trim away the newest rows and report the
+    # oldest. Force an oversized file and prove the newest row survives and is what gets read.
+    _i11_tail_dir = tempfile.mkdtemp(prefix="impasse-i11-tail-")
+    _i11_cfg_keep = os.environ["IMPASSE_CONFIG_DIR"]
+    os.environ["IMPASSE_CONFIG_DIR"] = _i11_tail_dir
+    try:
+        _i11_pad = "P" * 900
+        for _n in range(40):
+            lib.record_metrics({"backend": "codex", "outcome": "completed", "duration_s": float(_n),
+                                "model_requested": _i11_pad})
+        _i11_prev_cap = lib._MAX_METRICS_BYTES
+        lib._MAX_METRICS_BYTES = 8000     # smaller than the file we just wrote
+        try:
+            _i11_tail = lib.load_metrics()
+            check(_i11_tail and _i11_tail[-1]["duration_s"] == 39.0
+                  and all(isinstance(r, dict) for r in _i11_tail),
+                  "issue #11: an oversized timing store reads its NEWEST rows, not its oldest")
+        finally:
+            lib._MAX_METRICS_BYTES = _i11_prev_cap
+    finally:
+        os.environ["IMPASSE_CONFIG_DIR"] = _i11_cfg_keep
+
+    # (i) The metrics store: an allowlist makes 'no artifact content' structural, not a promise.
+    _i11_before = len(lib.load_metrics())
+    lib.record_metrics({"backend": "codex", "outcome": "completed", "duration_s": 12.0,
+                        "artifact_text": "SECRET ARTIFACT BODY", "claim": "leak me"})
+    _i11_stored = lib.load_metrics()[-1]
+    check(len(lib.load_metrics()) == _i11_before + 1 and "artifact_text" not in _i11_stored
+          and "claim" not in _i11_stored and _i11_stored["duration_s"] == 12.0,
+          "issue #11: metrics writes drop every non-allowlisted field (no artifact content)")
+    check(lib.record_metrics({"nothing": "allowlisted"}) is False,
+          "issue #11: a row with no allowlisted field is not written at all")
+
+    # (j) Runs are recorded whatever their outcome — a timeout is the most useful sample there is.
+    _i11_m_before = len(lib.load_metrics())
+    os.environ["FAKE_MODE"] = "valid"
+    _i11_ok = run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    _i11_rows_after = lib.load_metrics()
+    _i11_last = _i11_rows_after[-1]
+    check(len(_i11_rows_after) == _i11_m_before + 1 and _i11_last["outcome"] == "completed"
+          and _i11_last["backend"] == "codex" and _i11_last.get("artifact_tokens_est") == 1,
+          "issue #11: a completed run records one metrics row with its sizes")
+    check(_i11_last.get("artifact_digest") is None,
+          "issue #11: --no-record withholds the content-derived digest from the metrics store")
+    check(isinstance(_i11_ok.get("wall_advice"), dict)
+          and _i11_ok["wall_advice"].get("recommended_wall_s")
+          and _i11_ok["wall_advice"].get("basis") in ("heuristic", "empirical"),
+          "issue #11: every result carries a wall recommendation and says which basis it used")
+    check(_i11_ok.get("backend_version") and _i11_ok.get("model_source") == "backend_default",
+          "issue #11: a backend-default model is labelled as such, never as a resolved model")
+
+    # (k) IMPASSE_NO_METRICS is a real opt-out, not a documented intention.
+    _i11_off_before = len(lib.load_metrics())
+    os.environ["IMPASSE_NO_METRICS"] = "1"
+    try:
+        run.review(kind="code", instruction="review", artifact_bytes=b"code", no_record=True)
+    finally:
+        os.environ.pop("IMPASSE_NO_METRICS", None)
+    check(len(lib.load_metrics()) == _i11_off_before,
+          "issue #11: IMPASSE_NO_METRICS=1 records nothing")
+
+    # (l) The pre-send advice reaches the operator BEFORE the send, where it can still matter.
+    _i11_buf = io.StringIO()
+    run.review(kind="code", instruction="review", artifact_bytes=b"x" * 40000, no_record=True,
+               advise_stream=_i11_buf, wall_timeout=60)
+    check("recommended --wall" in _i11_buf.getvalue() and "⚠" in _i11_buf.getvalue(),
+          "issue #11: an underprovisioned --wall is warned about on the advice stream pre-send")
+
+    # (m) The claude envelope: the resolved model, not the alias the operator typed.
+    _i11_env_prev = os.environ.get("FAKE_CLAUDE_MODE")
+    try:
+        os.environ["FAKE_CLAUDE_MODE"] = "envelope"
+        _i11_cl = run.review(kind="decision", instruction="review", artifact_bytes=b"doc",
+                             backend="claude", model="sonnet", no_record=True)
+        check(_i11_cl["ok"] is True and _i11_cl["model_resolved"] == "claude-sonnet-5"
+              and _i11_cl["model"] == "sonnet" and _i11_cl["model_source"] == "resolved",
+              "issue #11: the claude envelope resolves the alias to the model that actually ran")
+        check((_i11_cl.get("telemetry") or {}).get("ttfb_s") == 1.234
+              and _i11_cl["telemetry"]["request_id"] == "sess_fake_9",
+              "issue #11: envelope time-to-first-token and session id are recorded")
+        check(_i11_cl["response"]["review_id"] == "cr",
+              "issue #11: the review itself is read out of the envelope's result field")
+        # A backend that does NOT emit an envelope must still work — stdout is the answer.
+        os.environ["FAKE_CLAUDE_MODE"] = "valid"
+        _i11_bare = run.review(kind="decision", instruction="review", artifact_bytes=b"doc",
+                               backend="claude", no_record=True)
+        check(_i11_bare["ok"] is True and _i11_bare["model_resolved"] is None,
+              "issue #11: bare (non-envelope) stdout still parses, with no resolved model claimed")
+        # An envelope carrying an API error names it instead of leaving a bare exit code.
+        os.environ["FAKE_CLAUDE_MODE"] = "envelope_error"
+        os.environ["FAKE_CLAUDE_EXIT"] = "1"
+        _i11_er = run.review(kind="decision", instruction="review", artifact_bytes=b"doc",
+                             backend="claude", no_record=True)
+        check(_i11_er["ok"] is False and _i11_er["failure"]["code"] == "rate_limited",
+              "issue #11: an envelope api_error_status classifies the failure (not backend_error)")
+    finally:
+        os.environ.pop("FAKE_CLAUDE_EXIT", None)
+        if _i11_env_prev is None:
+            os.environ.pop("FAKE_CLAUDE_MODE", None)
+        else:
+            os.environ["FAKE_CLAUDE_MODE"] = _i11_env_prev
+
+    # (n) `estimate` is a LOCAL pre-flight — it must size the artifact without sending it.
+    _i11_art = os.path.join(tmp, "i11-artifact.txt")
+    with open(_i11_art, "w") as _fh:
+        _fh.write("x" * 23000)
+    # Isolate the config dir: by now the suite's own fake-backend runs have filled the metrics store
+    # with sub-second "reviews", which would (correctly) fit a tiny empirical rate and defeat the
+    # point of this case. `estimate` needs no consent, so redirecting the dir here is safe.
+    _i11_eb = io.StringIO()
+    _i11_cfg_prev = os.environ["IMPASSE_CONFIG_DIR"]
+    os.environ["IMPASSE_CONFIG_DIR"] = tempfile.mkdtemp(prefix="impasse-i11-estimate-")
+    try:
+        with contextlib.redirect_stdout(_i11_eb):
+            _i11_rc = run._main(["estimate", "--artifact-file", _i11_art, "--backend", "claude",
+                                 "--wall", "600"])
+    finally:
+        os.environ["IMPASSE_CONFIG_DIR"] = _i11_cfg_prev
+    _i11_ej = _json.loads(_i11_eb.getvalue())
+    check(_i11_rc == 0 and _i11_ej["underprovisioned"] is True
+          and _i11_ej["recommended_wall_s"] > 600 and _i11_ej["artifact_tokens_est"] == 5750,
+          "issue #11: estimate flags a 600s wall for a ~5.7k-token claude review (the reported case)")
+
+    # (o) The performance report, and its own delete.
+    _i11_pb = io.StringIO()
+    with contextlib.redirect_stdout(_i11_pb):
+        report._main(["performance"])
+    check("Impasse performance" in _i11_pb.getvalue() and "no artifact content" in _i11_pb.getvalue(),
+          "issue #11: `performance` reports recorded timings and states what the store holds")
+    _i11_fb = io.StringIO()
+    with contextlib.redirect_stdout(_i11_fb):
+        report._main(["performance", "--forget"])
+    check("deleted" in _i11_fb.getvalue() and lib.load_metrics() == [],
+          "issue #11: `performance --forget` deletes the timing store")
+    _i11_eb2 = io.StringIO()
+    with contextlib.redirect_stdout(_i11_eb2):
+        report._main(["performance"])
+    check("No run timings recorded yet" in _i11_eb2.getvalue(),
+          "issue #11: an empty timing store reports honestly instead of rendering a hollow table")
 
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")

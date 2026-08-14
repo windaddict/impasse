@@ -170,9 +170,32 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
 
    **Timeouts.** The reviewer reasons **silently server-side** and streams nothing for minutes — a
    quiet gap is *not* a hang, and `--idle` can't tell the two apart, so keep `--idle ≈ --wall` and
-   treat `--wall` as the real bound. **Scale `--wall` by effort/size:** low/medium ≈ 300s; **high
-   effort or a large artifact ≈ 600s+**; xhigh can exceed 30 min of silence and still complete.
-   A `timeout` failure usually means the wall was too short for the effort, not that the run hung.
+   treat `--wall` as the real bound.
+
+   **Don't guess the wall — ask for it.** Before a large or high-effort review, run the local
+   pre-flight (it sends nothing and needs no consent):
+   ```bash
+   python3 "$IMPASSE_ROOT/scripts/impasse_run.py" estimate --artifact-file A.md --backend auto --wall 300
+   ```
+   It returns a `recommended_wall_s` for that payload and flags a `--wall` that looks too short.
+   Every review result also carries a `wall_advice` block, and the runner prints the same line to
+   **stderr before it sends anything** — surface it to the operator when it warns. Read `basis`
+   before trusting the number: `heuristic` is a shipped estimate padded for margin, **not** a
+   measurement of this account; `empirical` means it was fitted from ≥5 of this machine's own
+   completed runs for that backend+model (`impasse_report.py performance` shows them). As a
+   fallback when you can't run the pre-flight: low/medium ≈ 300s; **high effort or a large artifact
+   ≈ 600s+** — and note that a ~5.7K-token code review has been observed to need ~600s on a Claude
+   backend, so 600s is a floor for that size, not a comfortable ceiling.
+
+   **A `timeout` now tells you where the time went.** It carries a `telemetry` block — the phase
+   timeline, whether the backend ever sent a byte (`received_any_bytes`), time to first byte, and
+   the resolved model — plus ranked `recovery` options with exact commands. Use them rather than
+   guessing: `received_any_bytes: false` means the time went to startup, authentication or a
+   provider queue, not to reasoning over the artifact, and re-running with a bigger wall will not
+   help. **A timeout leaves nothing reusable** (`reusable_result: false`) — every recovery option is
+   a full new paid invocation, and the options say which of them change the model or the
+   independence tier. Never present a timeout as a passing review.
+
    **Mind the host's own command cap — it is host-specific and often SHORTER than `--wall`.** The
    reviewer subprocess reasons silently for minutes; if the host's shell/exec harness kills the
    command first, an **interrupted run returns no findings — never read that as approval.** Give the
@@ -220,7 +243,8 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    reports `effort: null`, meaning backend-controlled). Values are allowlisted at every entry; the
    claude backend has no effort knob — nothing resolves for it and any result that reaches backend
    resolution reports `effort: null`. **Scale `--wall` to the resolved effort** (see Timeouts
-   above) — raising effort without raising the wall trades findings for timeouts.
+   above) — raising effort without raising the wall trades findings for timeouts. `estimate` takes
+   `--effort`, so ask it for the wall the higher effort actually needs.
 
    **Speed (Fast mode).** A separate **codex-only** service-tier knob, **independent of effort**.
    Precedence: `--speed <standard|fast>` (this run) > `IMPASSE_CODEX_SPEED` env > persisted default
@@ -343,6 +367,10 @@ never answered. When you use Impasse, it's good practice to:
   `impasse_report.py prune --older-than 30` (keeps runs with open escalations unless
   `--include-open`), or `forget <id>` for a specific run. `list` shows what's on disk and which
   runs are still open.
+- **The timing store is separate.** `impasse_report.py performance` shows how long reviews actually
+  take here, per backend+model, and is what upgrades a wall recommendation from a shipped estimate
+  to a measured one. It holds timings and sizes, **not** artifact content — so it isn't sensitive
+  the way records are — but it does survive `prune`, and `performance --forget` is its own delete.
 
 ## Environment & fallback
 

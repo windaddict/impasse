@@ -5,6 +5,52 @@ All notable changes to Impasse are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Timeout diagnosability, wall recommendations, and duration telemetry (issue #11)
+A review that blew its `--wall` reported only `backend wall_timeout after 605s` — no phase, no
+evidence the provider had ever responded, no resolved model, and no next step but a guess. Reported
+against the Claude backend, where a ~10.8K-token code review timed out twice at 605s and a
+~5.7K-token one completed in 594s against a 600s wall. The safety behavior was already correct (a
+timeout was never reported as a pass); what was missing was predictability and diagnosis.
+
+- **A timeout now says where the time went.** Results carry a `telemetry` block: the phase timeline
+  (consent → spawn → first byte → exit → validated), `received_any_bytes`, time to first byte, bytes
+  received, attempt/retry counts, and the resolved model. No bytes before the cap points at startup,
+  auth or a provider queue rather than at the model reasoning — a distinction that previously took a
+  re-run to establish. The supervisor records `first_byte_s`/`bytes_received` on every path,
+  timeouts included.
+- **A payload-aware `--wall` recommendation, before the send.** New `impasse_run.py estimate`
+  (purely local — it sends nothing and needs no consent) and a `wall_advice` block on every result,
+  also printed to stderr when the requested wall looks too short. `basis` states the provenance
+  honestly: **heuristic** is a shipped estimate padded for margin, *not* a measurement of your
+  account; **empirical** means fitted from ≥5 of this machine's own completed runs for that
+  backend+model. An already-exceeded cap raises the floor rather than being averaged in.
+- **A local timing store.** `config_dir()/metrics.jsonl` (`0600`, newest 1000 rows) records duration,
+  payload size, outcome, time-to-first-byte and retry counts for **every** run that reached the
+  backend, failures included — a timeout is the most informative sample there is. It holds **no
+  artifact content**, and that is structural rather than a promise: writes are filtered to a field
+  allowlist. The one content-derived field, the artifact digest, is withheld under `--no-record`/
+  `--raw`. New `impasse_report.py performance` reports it (timeouts counted separately from
+  completions); `performance --forget` deletes it, `IMPASSE_NO_METRICS=1` disables it.
+- **Concrete recovery instead of prose.** A timeout returns ranked options with exact commands, each
+  saying what it changes — the time budget only, the model, reasoning depth, scope, or the
+  independence tier — plus `reusable_result: false`, since a timeout leaves nothing to resume.
+- **The resolved model, not just the requested alias.** The claude backend now runs
+  `--output-format json`, whose envelope reports `modelUsage`, `ttft_ms` and `session_id`; Impasse
+  reads the review from the envelope's `result` and reports `model_resolved` + `model_source`.
+  Non-envelope stdout still parses exactly as before, claiming no resolved model. Codex's event
+  stream names no model (codex-cli 0.148), so codex runs report `requested`/`backend_default` and
+  never overstate. Reviewer CLI versions are recorded so a comparison survives a CLI upgrade.
+- **Tests:** silent-to-the-wall, bytes-then-stall, partial-JSON-then-stall, a live descendant at
+  teardown, recovery-option shape, seed-vs-empirical recommendation, the timeout floor, the metrics
+  allowlist (a planted artifact field is dropped), the `IMPASSE_NO_METRICS` opt-out, envelope model
+  resolution and its fail-soft fallback, and both new CLI surfaces.
+- **Deferred:** the issue's opt-in *supervised chunking* for oversized artifacts changes the protocol
+  rather than the runner and is outside its own acceptance criteria — designed, not built, in
+  `docs/proposals/supervised-chunking.md`.
+- **Unrelated fix:** the `resolve_codex_command` ChatGPT.app test asserted a path suffix that a
+  higher-priority Homebrew `codex` install fails and a system-wide `ChatGPT.app` passed for the wrong
+  reason; it now asserts the exact path and skips where an earlier candidate really exists.
+
 ### Multi-host support — Impasse now runs turnkey under Claude Code *and* OpenAI Codex
 Both hosts implement the open [Agent Skills standard](https://agentskills.io); one installation serves
 either, because the code is host-relative at runtime (the host is detected per run, never persisted)
