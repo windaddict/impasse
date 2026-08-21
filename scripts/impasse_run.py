@@ -772,7 +772,8 @@ def _metric_meta(backend_meta: dict, requested_model) -> dict:
 
 
 def _recovery_options(*, backend_name: str, model, effort, speed, wall_timeout: float,
-                      recommended_wall, artifact_tokens: int, host: str, ctx: dict | None) -> list:
+                      recommended_wall, artifact_tokens: int, host: str, ctx: dict | None,
+                      host_confidence: str | None = None) -> list:
     """Ranked, concrete next steps after a timeout — each with the exact command to run.
 
     The generic advice a timeout used to carry ("the wall was probably too short") leaves the
@@ -856,6 +857,17 @@ def _recovery_options(*, backend_name: str, model, effort, speed, wall_timeout: 
         other_provider = lib.get_backend(other).provider
         tier = lib.independence_tier(host, other_provider)
         tier_note = f" Relative to the '{host}' host that backend is {tier}."
+        # A tier quoted HERE is an independence claim like any other, so it owes the same
+        # provenance caveat the result's top-level notice carries. Without this, a timeout could
+        # advertise a bare "that backend is cross_provider" whose host identity was merely
+        # asserted (Cursor) or inferred (codex sandbox heuristic) — the one claim this tool must
+        # never overstate. The full notice rides on the result; this is the pointer to it.
+        if tier == "cross_provider" and host_confidence in ("asserted", "heuristic"):
+            _basis = ("your IMPASSE_HOST assertion, which Impasse did not verify"
+                      if host_confidence == "asserted"
+                      else "a heuristic host detection, not a branded identity flag")
+            tier_note += (f" That rests on {_basis} — see this result's independence_notice "
+                          "before trading on it.")
     except (FileNotFoundError, ValueError, OSError):
         tier_note = " That backend is not resolvable here (not installed, or refused)."
     opts.append({
@@ -1169,7 +1181,8 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             recovery = _recovery_options(
                 backend_name=be.name, model=model, effort=effort, speed=speed,
                 wall_timeout=wall_timeout, recommended_wall=_rec["recommended_wall_s"],
-                artifact_tokens=artifact_tokens, host=host, ctx=recovery_context)
+                artifact_tokens=artifact_tokens, host=host, ctx=recovery_context,
+                host_confidence=hd.get("confidence"))
             # State what was OBSERVED and what it rules out — not a diagnosis the signal can't
             # support. A byte on stdout/stderr means only that the CLI wrote something: codex emits
             # a thread-started event within milliseconds, so "bytes arrived" is not evidence the

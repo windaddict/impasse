@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Impasse as an OpenAI Codex skill (open Agent Skills standard), by SYMLINK.
+# Install Impasse as a Cursor skill (open Agent Skills standard), by SYMLINK.
 #
 # Safe by construction: it only ever creates or replaces a SYMLINK. Removing/replacing a symlink
 # never touches its target, so this installer cannot delete your repo or any real files. If a
@@ -10,10 +10,20 @@
 # install is post-verified, turning any raced outcome into a loud failure. Idempotent.
 # Requires bash + python3 + coreutils resolved from a TRUSTED PATH (like any script it runs `python3`,
 # `ln`, `mkdir` by name — run it in your normal shell, not under an attacker-controlled PATH).
-# See docs/host-detection.md and SKILL.md "Running it (host adapter)".
 #
-# Usage: bash scripts/install-codex.sh [--root DIR] [--dry-run]
-#   --root DIR install under DIR (default: auto-detected Codex skills root)
+# WHY A CURSOR-NATIVE INSTALL AT ALL: Cursor's docs say it also discovers skills from the Claude and
+# Codex locations, so a machine that already has Impasse under Claude Code MAY load it in Cursor with
+# no install. That compat path is a CANDIDATE, not a verified one — it has not been dogfooded here —
+# so this installer exists to give you a path that does not depend on it. See
+# docs/host-detection.md and SKILL.md "Running it (host adapter)".
+#
+# INDEPENDENCE UNDER CURSOR — read before you rely on a review from here. Cursor's host model is
+# whatever you picked in its model picker, and no environment marker reveals which lab it came from.
+# Impasse therefore reports `undetermined` under Cursor unless YOU assert the host with IMPASSE_HOST
+# (see SKILL.md). Installing this script changes nothing about that.
+#
+# Usage: bash scripts/install-cursor.sh [--root DIR] [--dry-run]
+#   --root DIR install under DIR (default: auto-detected Cursor skills root)
 #   --dry-run  print what would happen; change nothing
 # For a stable (non-symlink) install, copy the repo into place yourself: cp -R <repo> <root>/impasse
 set -euo pipefail
@@ -31,28 +41,28 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1;;
     --root) ROOT="${2:?--root needs a directory}"; shift;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
   shift
 done
 
-# Detect the active Codex skills root ($CODEX_HOME authoritative; else the skills dir that EXISTS;
-# both -> ambiguous, stop; neither -> ~/.codex/skills, what current alpha builds read).
+# Detect the active Cursor skills root. Project-local (.cursor/skills) is deliberately NOT
+# auto-detected: it would install into whatever directory you happened to run this from, which is a
+# surprising place to leave a symlink. Pass --root .cursor/skills if you want that.
 detect_root() {
-  if [ -n "${CODEX_HOME:-}" ]; then echo "$CODEX_HOME/skills"; return; fi
-  local c="$HOME/.codex/skills" a="$HOME/.agents/skills" have=()
+  local c="$HOME/.cursor/skills" a="$HOME/.agents/skills" have=()
   [ -d "$c" ] && have+=("$c"); [ -d "$a" ] && have+=("$a")
   case "${#have[@]}" in
     1) echo "${have[0]}";;
-    0) echo "$c"; echo "note: neither skills dir exists; defaulting to $c (newer builds may use" \
+    0) echo "$c"; echo "note: neither skills dir exists; defaulting to $c (some builds read" \
             "~/.agents/skills — pass --root if so)." >&2;;
     *) echo "AMBIGUOUS";;
   esac
 }
 [ -n "$ROOT" ] || ROOT="$(detect_root)"
 if [ "$ROOT" = "AMBIGUOUS" ]; then
-  echo "both ~/.codex/skills and ~/.agents/skills exist — can't tell which your Codex build reads." >&2
+  echo "both ~/.cursor/skills and ~/.agents/skills exist — can't tell which your Cursor build reads." >&2
   echo "Re-run with --root <dir> (see docs/host-detection.md)." >&2
   exit 1
 fi
@@ -74,7 +84,7 @@ elif [ -e "$DEST" ]; then
   exit 1
 fi
 
-echo "Impasse -> Codex skill (symlink)"
+echo "Impasse -> Cursor skill (symlink)"
 echo "  source: $SRC"
 echo "  dest:   $DEST"
 
@@ -110,7 +120,10 @@ if [ ! -L "$DEST" ] || [ "$(canon "$DEST")" != "$SRC" ]; then
 fi
 
 echo "Installed. Next:"
-echo "  1. Restart Codex (skills load at startup)."
-echo "  2. Confirm discovery: run /skills in Codex and look for 'impasse', or type \$impasse."
+echo "  1. Restart Cursor (skills load at startup)."
+echo "  2. Confirm discovery: look for 'impasse' in Cursor's skills list, or invoke it by name."
 echo "  3. If it isn't listed, your build may read a different skills root — re-run with"
 echo "     --root ~/.agents/skills (see docs/host-detection.md)."
+echo "  4. BEFORE trusting a review from Cursor, assert which model drives this session:"
+echo "     export IMPASSE_HOST=claude|codex|gemini|grok   # or leave unset to stay 'undetermined'"
+echo "     Impasse cannot detect it, and an unasserted Cursor session never claims cross-provider."

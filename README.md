@@ -353,10 +353,27 @@ git clone https://github.com/windaddict/impasse ~/src/impasse
 bash ~/src/impasse/scripts/install-codex.sh   # symlinks into ~/.codex/skills/impasse
 ```
 
+**Cursor** *(supported, not yet dogfooded)* — clone anywhere, then run the symlink installer and
+restart Cursor:
+
+```bash
+git clone https://github.com/windaddict/impasse ~/src/impasse
+bash ~/src/impasse/scripts/install-cursor.sh   # symlinks into ~/.cursor/skills/impasse
+```
+
+Cursor also documents discovery from the Claude and Codex skill locations, so an existing install may
+already be visible — that path is unverified here, which is why the installer exists. **One thing to
+know before trusting a review from Cursor:** Cursor's model picker spans several labs and nothing
+reveals which one is driving your session, so Impasse reports `undetermined` rather than guessing. Tell
+it which model you're on — `export IMPASSE_HOST=claude|codex|gemini|grok` — and the rival backend is
+labeled cross-provider, with a notice recording that the label rests on your assertion rather than a
+detection. See the "Cursor host adapter" section of [`SKILL.md`](SKILL.md).
+
 **Invoke it through your host** — there is no separate `impasse` binary; it runs inside the agent:
 
 - **Claude Code** — the `/impasse` slash command, or just ask ("Use Impasse to review this decision memo").
 - **OpenAI Codex** — `$impasse`, or ask by description.
+- **Cursor** — ask by name or description ("Use Impasse to review this change").
 
 (Power users can call the helpers directly: `python3 <skill-dir>/scripts/impasse_run.py review …` — see
 [`SKILL.md`](SKILL.md). That's what the host runs under the hood.)

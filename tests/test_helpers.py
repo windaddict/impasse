@@ -758,7 +758,13 @@ def main() -> int:
     os.environ["FAKE_MODE"] = "valid"
     os.environ["FAKE_EXIT"] = "0"
     codex_only = run.review(kind="code", instruction="review", artifact_bytes=b"code")
-    check(codex_only.get("independence") == "cross_provider" and codex_only.get("independence_notice") is None, "review(codex): cross-provider, no downgrade notice")
+    # IMPASSE_HOST is set suite-wide (see setup), so this cross_provider tier is ASSERTED and owes
+    # a soft provenance notice — but never a DOWNGRADE notice. Both halves matter: the tier stays
+    # positive, and the operator can still see the claim was taken on their word.
+    _cp_notice = codex_only.get("independence_notice") or ""
+    check(codex_only.get("independence") == "cross_provider" and "ASSERTION" in _cp_notice
+          and "Same-provider" not in _cp_notice and "undetermined" not in _cp_notice.lower(),
+          "review(codex): cross-provider keeps its tier, carries an asserted-provenance notice")
     os.environ.pop("FAKE_CLAUDE_MODE", None)
 
     # --- the claude transport path (stdout, capture cap) carries the SAME retry/size contract ---
@@ -1112,8 +1118,10 @@ def main() -> int:
         # e2e: a codex host inverts the ladder — claude becomes the cross-provider reviewer
         os.environ["IMPASSE_HOST"] = "codex"
         rc = run.review(kind="decision", instruction="review", artifact_bytes=b"memo", backend="claude", no_record=True)
-        check(rc["ok"] and rc.get("independence") == "cross_provider" and rc.get("independence_notice") is None,
-              "review(claude, codex host): cross-provider, no downgrade notice")
+        _rc_notice = rc.get("independence_notice") or ""
+        check(rc["ok"] and rc.get("independence") == "cross_provider" and "ASSERTION" in _rc_notice
+              and "Same-provider" not in _rc_notice,
+              "review(claude, codex host): cross-provider tier kept, asserted provenance disclosed")
         check(rc.get("host") == "codex", "review: result reports the host")
         # force --backend codex: the same-provider path we're asserting is now the NON-default
         # under a codex host (auto would pick claude — see the F002 bare-review tests below)
@@ -1129,7 +1137,22 @@ def main() -> int:
         m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="codex")
         check(m["mode"] == "claude" and m["tier"] == "cross_provider" and m["host"] == "codex",
               "review_mode: codex host + both available -> claude (cross-provider) preferred")
-        check(m["notice"] is None, "review_mode: cross_provider selection owes no notice")
+        # Passing host= IS an assertion (review_mode records method=override/confidence=asserted for
+        # it), so this cross_provider selection owes the soft provenance notice — not a downgrade.
+        check(m["tier"] == "cross_provider" and "ASSERTION" in (m["notice"] or "")
+              and "Same-provider" not in (m["notice"] or ""),
+              "review_mode: an ASSERTED cross_provider keeps its tier and discloses the assertion")
+        # A DETECTED identity is the one cross_provider case that owes nothing at all: nothing was
+        # guessed and nothing was taken on the operator's word.
+        # `claude`, not `codex`: host_detection can only ever emit codex as heuristic or asserted,
+        # so a "strong codex" detection is a state the system cannot produce, and asserting on it
+        # would pin an impossible combination instead of a real invariant.
+        _m_strong = lib.review_mode("code", environment="claude_code", codex_available=True,
+                                    claude_available=True, host="claude",
+                                    detection={"host": "claude", "method": "auto",
+                                               "confidence": "strong"})
+        check(_m_strong["tier"] == "cross_provider" and _m_strong["notice"] is None,
+              "review_mode: a DETECTED cross_provider owes no notice (nothing inferred or asserted)")
         m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="claude")
         check(m["mode"] == "codex" and m["tier"] == "cross_provider", "review_mode: claude host + both available -> codex (unchanged)")
         m = lib.review_mode("code", environment="claude_code", codex_available=True, claude_available=True, host="cursor")
@@ -1317,7 +1340,10 @@ def main() -> int:
             # asserting both detect_host output AND that unknown/cursor never yield a positive tier (F003 rev2)
             def _expected(A, cursor, override):
                 if override:                                    # nonempty
-                    if override not in lib.KNOWN_HOSTS:
+                    # Literal, NOT lib.KNOWN_HOSTS: an oracle that reads the production table can
+                    # never contradict it, which is the whole point of an independent truth table.
+                    # Update this list deliberately when a host is added.
+                    if override not in ("claude", "codex", "gemini", "grok", "cursor", "other"):
                         return "unknown"
                     if A and A != {override}:
                         return "unknown"
@@ -1336,7 +1362,10 @@ def main() -> int:
             _matrix_ok, _cells = True, 0
             for A in _subsets:
                 for cur in (False, True):
-                    for ov in (None, "", "claude", "codex", "gemini", "cursor", "other", "zzinvalid"):
+                    # Overrides are DERIVED from KNOWN_HOSTS, not hardcoded: this matrix is the
+                    # exhaustiveness claim, and a hardcoded list silently stops covering the new
+                    # host the moment one is added (adding `grok` did exactly that).
+                    for ov in (None, "", *lib.KNOWN_HOSTS, "zzinvalid"):
                         kw = {}
                         for h in A:
                             k, v = _marker_for[h]
@@ -2304,6 +2333,106 @@ def main() -> int:
         run._VERSION_CACHE.clear()
         run._VERSION_CACHE.update(_r2_vprev)
 
+    # --- Cursor host adapter (Phase A) + Grok as an attributable host (Phase B) ---
+    _cur_prev = {k: os.environ.get(k) for k in
+                 ("IMPASSE_HOST", "CURSOR_AGENT", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                  "GEMINI_CLI", "CODEX_SANDBOX")}
+    try:
+        for _k in _cur_prev:
+            os.environ.pop(_k, None)
+
+        # PHASE B: grok is nameable as a HOST. It has no marker to detect and no backend to review
+        # with — asserting it is the ONLY way in, and that is the whole point: it lets a Grok-driven
+        # session (typically Cursor) label a Codex/Claude reviewer honestly instead of undetermined.
+        check("grok" in lib.KNOWN_HOSTS and lib._HOST_PROVIDERS.get("grok") == "xAI",
+              "grok: nameable as a host attributed to xAI")
+        check(lib.independence_tier("grok", "OpenAI") == "cross_provider"
+              and lib.independence_tier("grok", "Anthropic") == "cross_provider",
+              "grok host: both shipped backends are cross-provider")
+        # The asymmetry is deliberate: xAI is a known HOST provider but not a known BACKEND
+        # provider, because no Grok backend ships. Pin it so it reads as a decision, not an omission.
+        check("xAI" not in lib._KNOWN_PROVIDERS,
+              "grok: xAI is a host provider but NOT a backend provider (no grok backend ships)")
+        check(lib.independence_tier("grok", "xAI") == "same_provider",
+              "grok: equality is checked first, so an xAI backend on a grok host is same_provider")
+        # Pin the LIMITATION that absence creates, so it reads as a known, fail-safe cost rather
+        # than a property someone later mistakes for correct: an xAI backend would score
+        # `undetermined` against non-xAI hosts until xAI is added to _KNOWN_PROVIDERS. Understating
+        # independence is the safe direction, but a future backend must update that tuple.
+        check(all(lib.independence_tier(_h, "xAI") == "undetermined"
+                  for _h in ("claude", "codex", "gemini")),
+              "grok: an unshipped provider understates (never overstates) independence — fail-safe")
+        os.environ["IMPASSE_HOST"] = "grok"
+        _hd_grok = lib.host_detection()
+        check(_hd_grok["host"] == "grok" and _hd_grok["method"] == "override"
+              and _hd_grok["confidence"] == "asserted",
+              "grok: IMPASSE_HOST=grok is accepted as an ASSERTED host")
+        os.environ.pop("IMPASSE_HOST", None)
+
+        # CURSOR: the marker alone must never buy a positive tier. This is anti-pattern #1 in the
+        # proposal and the single most important property of the whole adapter.
+        os.environ["CURSOR_AGENT"] = "1"
+        _hd_cursor = lib.host_detection()
+        check(_hd_cursor["host"] == "cursor" and _hd_cursor["confidence"] == "none",
+              "cursor: CURSOR_AGENT=1 detects the host but with NO confidence")
+        check(lib.independence_tier("cursor", "OpenAI") == "undetermined"
+              and lib.independence_tier("cursor", "Anthropic") == "undetermined",
+              "cursor: the marker alone NEVER yields a positive tier (anti-pattern 1)")
+        _m_cursor = lib.review_mode("code", environment="claude_code", codex_available=True,
+                                    claude_available=True, detection=_hd_cursor)
+        check(_m_cursor["tier"] == "undetermined"
+              and "undetermined" in (_m_cursor["notice"] or "").lower(),
+              "cursor: an unasserted Cursor session still reviews, but the notice is surfaced")
+
+        # ...and the asserted upgrade path, which is what the adapter actually adds.
+        os.environ["IMPASSE_HOST"] = "claude"
+        _hd_asserted = lib.host_detection()
+        check(_hd_asserted["host"] == "claude" and _hd_asserted["confidence"] == "asserted",
+              "cursor: the operator's assertion overrides the cursor marker")
+        _m_asserted = lib.review_mode("code", environment="claude_code", codex_available=True,
+                                      claude_available=True, detection=_hd_asserted)
+        check(_m_asserted["mode"] == "codex" and _m_asserted["tier"] == "cross_provider",
+              "cursor: asserting the host model earns a real cross-provider reviewer")
+        # THE POINT OF PHASE A: the tier goes positive AND the notice says it was asserted. A host
+        # that prints only independence_notice previously showed nothing here.
+        check("ASSERTION" in (_m_asserted["notice"] or "")
+              and "IMPASSE_HOST" in (_m_asserted["notice"] or ""),
+              "cursor: an asserted tier discloses its provenance in the NOTICE, not only in host_detection")
+        # An assertion goes stale silently when the operator switches model mid-session; the notice
+        # has to say so, because nothing in the system can detect that.
+        check("switch" in (_m_asserted["notice"] or "").lower(),
+              "cursor: the asserted notice warns that a mid-session model switch invalidates it")
+        os.environ.pop("IMPASSE_HOST", None)
+
+        # The heuristic notice must not promise something the asserted branch doesn't deliver.
+        # It used to say "set IMPASSE_HOST=<host> to confirm it"; once an asserted positive tier
+        # started carrying its own notice, that advice pointed at a different warning, not silence.
+        _heur = lib.independence_notice("cross_provider", "codex", "claude", "Anthropic", "heuristic") or ""
+        check("IMPASSE_HOST" in _heur and "confirm it" not in _heur,
+              "notice: heuristic advice no longer promises that asserting SILENCES the disclosure")
+        # The two weak-basis branches must stay distinguishable — an operator has to be able to tell
+        # "we guessed" from "you told us", since only one of them is theirs to re-check.
+        _asrt = lib.independence_notice("cross_provider", "codex", "claude", "Anthropic", "asserted") or ""
+        check("INFERRED" in _heur and "ASSERTION" in _asrt and _heur != _asrt,
+              "notice: inferred and asserted provenance read differently")
+
+        # A conflicting assertion must not be silently honored over a strong detection.
+        os.environ["CLAUDECODE"] = "1"
+        os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"
+        os.environ["IMPASSE_HOST"] = "codex"
+        _hd_conflict = lib.host_detection()
+        # EXACTLY unknown. Accepting "unknown or codex" would have let the unsafe outcome
+        # {host: codex, confidence: asserted} pass — which is the very thing that would label a
+        # Claude reviewer cross-provider on a machine whose strong marker says Claude.
+        check(_hd_conflict["host"] == "unknown" and _hd_conflict["confidence"] == "none",
+              "cursor: an override conflicting with a strong marker resolves to unknown, exactly")
+    finally:
+        for _k, _v in _cur_prev.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
     check("/" not in lib._safe_id("a/b/../../etc"), "safe_id: path separators collapsed")
@@ -2370,6 +2499,61 @@ def main() -> int:
             _sh.rmtree(_iroot, ignore_errors=True)
     else:
         check(True, "T1 installer: skipped (bash or installer unavailable)")
+
+    # --- install-cursor.sh: same safety contract, driven against a throwaway --root ---
+    # The guarantee that matters is identical to the Codex installer's: it acts only on a symlink or
+    # an empty slot, and REFUSES a physical path rather than deleting real data. Re-tested rather
+    # than assumed, because the two scripts are separate files that can drift apart.
+    _cur_installer = os.path.join(os.getcwd(), "scripts", "install-cursor.sh")
+    if _sh.which("bash") and os.path.isfile(_cur_installer):
+        _curoot = tempfile.mkdtemp(prefix="impasse-cursor-installer-test-")
+
+        def _cinst(*args):
+            return _sp.run(["bash", _cur_installer, "--root", _curoot, *args],
+                           capture_output=True, text=True)
+        try:
+            _cr1 = _cinst()
+            _cdest = os.path.join(_curoot, "impasse")
+            check(_cr1.returncode == 0 and os.path.islink(_cdest)
+                  and os.path.realpath(_cdest) == os.getcwd(),
+                  "cursor installer: fresh install creates a symlink to the repo")
+            check(_cinst().returncode == 0 and "Already installed" in _cinst().stdout,
+                  "cursor installer: re-run is idempotent (Already installed)")
+            # The core safety guarantee: a real directory is refused and left byte-for-byte intact.
+            os.remove(_cdest)
+            os.makedirs(_cdest)
+            _ckeep = os.path.join(_cdest, "keep.txt")
+            open(_ckeep, "w").write("precious")
+            _cr2 = _cinst()
+            check(_cr2.returncode != 0 and "not a symlink" in (_cr2.stderr + _cr2.stdout)
+                  and os.path.isfile(_ckeep) and open(_ckeep).read() == "precious",
+                  "cursor installer: refuses a physical dir and leaves it INTACT")
+            _sh.rmtree(_cdest)
+            _cbefore = os.path.exists(_cdest)
+            check(_cinst("--dry-run").returncode == 0 and os.path.exists(_cdest) == _cbefore,
+                  "cursor installer: --dry-run makes no filesystem change")
+            # It must NOT quietly imply Cursor gets independence for free: the operator-assertion
+            # requirement is the one thing a Cursor user most needs to be told at install time.
+            check("IMPASSE_HOST" in _cr1.stdout,
+                  "cursor installer: tells the operator they must assert the host model")
+            # F002: `ln -s SRC DEST` does NOT fail when DEST is a directory — it silently creates
+            # DEST/<name> inside it and exits 0. Simulate the post-rm race by pre-creating the
+            # directory and confirming the installer FAILS loudly rather than reporting success
+            # with a link buried one level down.
+            _sh.rmtree(_cdest, ignore_errors=True)
+            os.makedirs(_cdest)
+            _cr3 = _cinst()
+            check(_cr3.returncode != 0
+                  and not os.path.islink(os.path.join(_cdest, "impasse")),
+                  "cursor installer: a directory at the destination never becomes a link INSIDE it")
+            _sh.rmtree(_cdest, ignore_errors=True)
+        finally:
+            _sh.rmtree(_curoot, ignore_errors=True)
+    else:
+        # NOT an unconditional pass: deleting install-cursor.sh is exactly "reverting the production
+        # change", and a green skip would hide it. Only a missing bash may excuse the suite.
+        check(_sh.which("bash") is None,
+              "cursor installer: present (a missing installer is a FAILURE, not a skip)")
 
     print()
     if _fails:

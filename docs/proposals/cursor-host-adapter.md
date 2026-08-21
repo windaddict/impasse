@@ -1,6 +1,11 @@
 # Proposal: Cursor as a first-class Impasse host
 
-**Status: design proposal — NOT built.** Revised after an Impasse review
+**Status: Phases A and B BUILT (2026-08-21); Phase C not built.** What shipped: the Cursor host
+adapter in `SKILL.md`, `grok` as an attributable host, the asserted-provenance `independence_notice`,
+`scripts/install-cursor.sh`, and docs across `README`/`environments`/`host-detection`/`glossary`.
+**The dogfood checklist in Phase A has NOT been run** — nothing here has been exercised end to end
+from inside Cursor, so every Cursor-specific claim in the shipped docs is marked provisional. Phase C
+(a `grok` reviewer backend) remains deferred by design. Originally revised after an Impasse review
 (`impasse-cursor-host-adapter-review-001`, `--backend claude`, 2026-08-20). This file records
 how to make Impasse work under Cursor Agent (Desktop + CLI) without overclaiming independence.
 Evidence for the limitations and workarounds comes from Cursor's public skill docs (fetched
@@ -284,6 +289,11 @@ Defer until someone will maintain the CLI contract (xAI headless flags move).
 
 ## Open questions for the operator
 
+**Resolved at build time (2026-08-21):** Q1 → A+B shipped together, as recommended. Q2 → yes, the
+asserted soft notice shipped (it is what makes provenance visible in the field a host actually
+prints). Q3 → kept `auto`'s current ordering; no `IMPASSE_PREFERRED_BACKEND` was added. Q4 → Phase C
+deferred. The original questions are kept below for the record.
+
 1. **Phase A only first, or A+B together?** B is small and makes Grok-in-Cursor hosts attributable
    without a Grok backend — recommended with A if you already expect Grok chat sessions.
 2. **Ship the asserted soft notice in Phase A?** Recommended so provenance is not only in a
@@ -295,8 +305,11 @@ Defer until someone will maintain the CLI contract (xAI headless flags move).
 
 ## Rollout
 
-1. Land Phase A (and optionally B) on a feature branch; three gates if code changes.
-2. Dogfood from Cursor with asserted host + Claude-or-Codex reviewer (checklist above).
+1. ~~Land Phase A (and optionally B) on a feature branch; three gates if code changes.~~
+   **DONE 2026-08-21** — A+B landed together, three gates green.
+2. **OUTSTANDING** — Dogfood from Cursor with asserted host + Claude-or-Codex reviewer (checklist
+   above). Until this runs, every Cursor-specific claim in the shipped docs stays marked provisional
+   and `SKILL.md` continues to list only Claude Code and Codex as *tested* hosts.
 3. Impasse-review the landing diff: Cursor host with asserted provider, cross-provider backend.
 4. Push; bump `~/.claude` submodule if that install tracks main; symlink/update Cursor path if used.
 

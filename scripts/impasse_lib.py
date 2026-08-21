@@ -251,13 +251,28 @@ def get_backend(name: str = "codex") -> Backend:
 # surfaces). A host that DOESN'T declare itself gets 'undetermined', never a positive
 # cross-provider claim: a subprocess cannot identify a driver that won't identify itself, so
 # the only fail-safe answer for an unattributed driver is "we don't know".
-KNOWN_HOSTS = ("claude", "codex", "gemini", "cursor", "other")
+KNOWN_HOSTS = ("claude", "codex", "gemini", "grok", "cursor", "other")
 # Hosts attributable to a single model provider. cursor/other run an operator-selected
 # underlying model (a Cursor agent may BE Claude or GPT), so no provider can be attributed.
-_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI", "gemini": "Google"}
+#
+# `grok` (xAI) is here as a HOST only. It is reachable today exactly one way — an operator asserting
+# IMPASSE_HOST=grok because a Grok model is driving their session (typically inside Cursor, whose
+# model picker offers the Grok family). There is no Grok *marker* to auto-detect and no Grok
+# *backend* to review with; naming the host is what lets a Grok-driven session label a Codex or
+# Claude reviewer honestly as cross-provider instead of settling for `undetermined`.
+_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI", "gemini": "Google", "grok": "xAI"}
 # Providers that can appear as a REVIEWER BACKEND. Only OpenAI (codex) and Anthropic (claude) ship
-# a backend, so Google is intentionally absent here even though it's a known HOST provider above —
-# adding it would be dead code (independence_tier reads the host provider from _HOST_PROVIDERS).
+# a backend, so Google and xAI are intentionally absent even though both are known HOST providers
+# above: a host provider needs no backend to be nameable, and adding a provider no backend reports
+# would be dead code today.
+#
+# THE LIMITATION THIS CREATES, stated exactly: independence_tier compares providers for equality
+# FIRST, so a same_provider verdict is always right. But a DIFFERENT provider is only promoted to
+# cross_provider when it appears in this tuple — so if a Google or xAI backend were ever added and
+# this tuple were not updated with it, that backend would score `undetermined` against every host
+# except its own. That is fail-safe (it understates independence, never overstates it), but it
+# would be wrong. Adding a backend MUST add its provider here; the test suite pins the current
+# reachable behavior, not the hypothetical.
 _KNOWN_PROVIDERS = ("Anthropic", "OpenAI")
 
 
@@ -399,15 +414,34 @@ def independence_notice(tier: str, host: str, backend_name: str, provider: str,
     tier can forget the notice that must ride with it.
 
     `confidence` is the host_detection() confidence. A cross_provider tier owes no *downgrade* notice,
-    but when it rests on a HEURISTIC host detection (today: codex via sandbox-state vars, no branded
-    flag) it carries a SOFT notice so a guessed positive claim can't read as a confirmed one."""
+    but when it rests on anything WEAKER THAN A DETECTED IDENTITY it carries a SOFT notice, so a
+    positive claim that was guessed or asserted can't read as a confirmed one:
+
+    - "heuristic" — inferred (today: codex via sandbox-state vars, with no branded flag).
+    - "asserted"  — the OPERATOR set IMPASSE_HOST. Impasse verified nothing; it took their word.
+      This is the only way a Cursor session (whose host model is operator-chosen and unattributable)
+      can reach a positive tier at all, so the claim is real but only as good as the assertion —
+      and it goes stale silently if they switch the session's model afterwards.
+
+    Success for an asserted tier is NOT "notice is null"; it is "the tier is honest AND the operator
+    can see it was asserted." A host that prints only this field would otherwise show nothing."""
     if tier == "cross_provider":
+        if confidence == "asserted":
+            return (
+                f"⚠ Cross-provider label rests on an ASSERTION, not a detection: the '{host}' host "
+                f"was set via IMPASSE_HOST (reviewer '{backend_name}' via {provider}). Impasse did "
+                "not verify it — if the model actually driving this session is not " + host + ", "
+                "this label is wrong, and it does not update if you switch models mid-session. "
+                "Re-check it when the session's model changes."
+            )
         if confidence == "heuristic":
             return (
                 f"⚠ Cross-provider label INFERRED from a heuristic: the '{host}' host was detected "
                 f"from a sandbox-state condition, not a branded identity flag (reviewer '{backend_name}' "
                 f"via {provider}). The independence is likely real but not firmly established — a "
-                "sandbox-bypassed run would be undetectable. Set IMPASSE_HOST=" + host + " to confirm it."
+                "sandbox-bypassed run would be undetectable. Setting IMPASSE_HOST=" + host + " replaces "
+                "this inference with YOUR assertion (recorded as such, and still disclosed) — it "
+                "removes the guess, not the need to state a basis."
             )
         return None
     if tier == "same_provider":

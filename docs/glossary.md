@@ -69,6 +69,13 @@ in a doc rather than re-defining it inline.
 - **host-detection provenance** *(coined)* — the recorded basis for a host label, carried on every
   result as `host_detection: {method, confidence}` (e.g. `auto`/`override`; `strong`/`heuristic`/
   `none`) so a heuristic guess is never presented as certainty.
+- **asserted host** *(coined)* — a host identity Impasse took from the operator (`IMPASSE_HOST`)
+  rather than detecting: `{method: override, confidence: asserted}`. Its role is to let a host that
+  cannot identify itself — above all **Cursor**, whose model is operator-chosen and unattributable —
+  still earn an honest positive tier, at the cost that Impasse verified nothing. A positive tier
+  resting on an assertion therefore carries a soft `independence_notice`, and the assertion goes
+  **stale silently** if the operator switches the session's model afterwards. Read it as
+  "independent *if the assertion was true*," not as a verified fact.
 - **fail-safe / fail-open / fail-closed** — a control's default when it's uncertain. Host detection
   is *fail-safe*: any ambiguity resolves to `unknown` (→ tier `undetermined`), never a guessed
   positive. An **allowlist** *fails closed* (nothing is permitted unless named); a **denylist** can

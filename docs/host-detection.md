@@ -16,6 +16,7 @@ not a subjective marker rating — so it matches the runtime `host_detection.con
 | `claude` | a presence-style surface flag: `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_COWORK` / `CLAUDE_CHAT_SANDBOX` affirmatively set | **heuristic** | these accept any non-falsy value, so they can't mint a *strong* (silent) cross-provider claim — a resulting positive tier carries the soft notice | empirically confirmed |
 | `gemini` | `GEMINI_CLI == "1"` | **strong** | documented detection hook; not yet live-verified in this repo's harness | Gemini CLI shell-tool docs — geminicli.com/docs/tools/shell |
 | `cursor` | `CURSOR_AGENT == "1"` | **none** — non-attributable (operator-chosen model); detected only to sharpen the recommendation, never a positive tier. Marker is documented but was once dropped/re-added in a `cursor-agent` release | cursor.com/docs/agent/tools/terminal |
+| `grok` | *(no marker — assertion only)* | **asserted** when `IMPASSE_HOST=grok`; never auto-detected | xAI ships no host marker Impasse can read; the host is nameable so a Grok-driven session (typically inside Cursor) can label a Codex/Claude reviewer honestly instead of settling for `undetermined` | n/a — operator assertion |
 | `codex` | `CODEX_SANDBOX == "seatbelt"` **or** `CODEX_SANDBOX_NETWORK_DISABLED == "1"` | **heuristic** | sandbox-state signal, not a host flag; absent under sandbox bypass | openai/codex issues #30356, #5041; developers.openai.com/codex/environment-variables |
 
 **Deliberately not used:** `TERM_PROGRAM=vscode` (shared across the VS Code family — Cursor, VS Code,
@@ -45,6 +46,15 @@ the realistic ones — but they **cannot** stop a deliberately or accidentally i
 This residual is the same one the original Claude-only detection always carried; it is accepted and
 disclosed, not hidden. The independence label is only as trustworthy as the environment's integrity.
 For a firmer basis on a weak host (notably Codex under sandbox bypass), set `IMPASSE_HOST` explicitly.
+
+**An assertion is not a detection, and it is disclosed as such.** Setting `IMPASSE_HOST` yields
+`confidence: asserted`, and a positive tier resting on it now carries a soft `independence_notice`
+saying so — parallel to the heuristic notice. Impasse verified nothing; it took the operator's word.
+This matters most on **Cursor**, where assertion is the *only* route to a positive tier because the
+host model is operator-chosen and unattributable, and where the assertion **goes stale silently** if
+the operator switches the session's model afterwards. Nothing can detect that switch, so the notice
+tells the operator to re-check it. Judge an asserted `cross_provider` as "independent if the
+assertion was true," not as a verified fact.
 
 ## Drift
 

@@ -5,6 +5,42 @@ All notable changes to Impasse are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Cursor host adapter, and `grok` as an attributable host (proposal Phases A + B)
+Cursor implements the Agent Skills standard, and a probe in a Cursor shell confirmed the scripts run
+there (`impasse_run.py mode` returned `host=cursor`). **No full review has been run from Cursor**, so
+"the review path works there" remains inference from that probe plus Cursor's published docs, not an
+observation. What is certain is the independence problem: Cursor is not one provider. Its model picker spans Anthropic, OpenAI, Google, xAI and Cursor's own Composer family,
+and no environment marker reveals which is driving a session, so every Cursor review reported
+`undetermined`. `CURSOR_AGENT=1` identifies the IDE, not the lab.
+
+- **Operator assertion, always disclosed.** The route to a positive tier under Cursor is the operator
+  naming the model driving *this* session (`IMPASSE_HOST`). That already worked; what was missing was
+  disclosure. A `cross_provider` tier resting on `confidence: asserted` now carries a soft
+  `independence_notice` — parallel to the existing heuristic one — saying the label was taken on the
+  operator's word, was never verified, and **goes stale silently if they switch models mid-session**.
+  Success for an asserted tier is explicitly *not* "notice is null"; it is "the tier is honest AND the
+  operator can see it was asserted." **This is a behavior change:** three existing tests asserted
+  `independence_notice is None` for an asserted cross-provider tier and were updated.
+- **`grok` is nameable as a host** (`_HOST_PROVIDERS["grok"] = "xAI"`). It has no marker and is never
+  auto-detected — assertion is the only way in — but naming it lets a Grok-driven session label a
+  Codex or Claude reviewer as genuinely cross-provider instead of settling for `undetermined`. xAI is
+  deliberately a known *host* provider and not a known *backend* provider: no Grok backend ships, and
+  the asymmetry is now pinned by a test so it reads as a decision rather than an oversight.
+- **`scripts/install-cursor.sh`** — symlink-only, refuses to clobber a real directory, idempotent,
+  same safety contract as `install-codex.sh` (re-tested rather than assumed, since they can drift).
+  It also tells the operator at install time that they must assert the host model.
+- **Docs**: a "Cursor host adapter" section in `SKILL.md` (skill-root resolution without a
+  `CLAUDE_SKILL_DIR` equivalent, the per-invocation assertion rule, consent without
+  `AskUserQuestion`, provisional timeout guidance), plus `README` install, `environments`,
+  `host-detection` and a glossary entry for **asserted host**.
+
+**Not dogfooded.** Nothing here has been exercised end to end from inside Cursor — this was built
+from Cursor's published skill docs plus a probe of the scripts in a Cursor shell. Every
+Cursor-specific claim is marked provisional in the docs, `SKILL.md` still lists only Claude Code and
+Codex as *tested* hosts, and the proposal's Phase A dogfood checklist remains open. A `grok` reviewer
+backend (Phase C) is deferred by design.
+
+
 ### Second-round review of the issue-#11 fixes (review-of-the-fixes)
 The commit that applied the first review's 11 findings was itself sent back for an independent
 cross-provider review. It raised 7 findings; all 7 were verified against the code and fixed. The
