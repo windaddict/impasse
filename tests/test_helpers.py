@@ -2191,6 +2191,119 @@ def main() -> int:
         run._VERSION_CACHE.clear()
         run._VERSION_CACHE.update(_r11_vprev)
 
+    # --- R2-F001..F007: fixes for the SECOND cross-provider review, of the fix commit itself ---
+    # (a26b736 applied 11 findings; this block pins the defects that review-of-the-fixes found.)
+
+    # R2-F002 (high): RecursionError escaped THREE more parsers of untrusted reviewer stdout.
+    # The first round fixed _claude_envelope/_codex_stream_meta and stopped there.
+    _r2_deep = "{\"a\":" + "[" * 200000 + "}"
+    _r2_unwrap_ok = False
+    try:
+        run._unwrap_error(_r2_deep)
+        _r2_unwrap_ok = True
+    except RecursionError:
+        pass
+    check(_r2_unwrap_ok, "review2 F002: _unwrap_error classifies deeply nested JSON, never raises")
+
+    _r2_ebe_ok = False
+    try:
+        run._extract_backend_error((_r2_deep + "\n").encode(), b"", True, None)
+        _r2_ebe_ok = True
+    except RecursionError:
+        pass
+    check(_r2_ebe_ok, "review2 F002: the codex JSONL error scan survives deeply nested lines")
+
+    # The main SUCCESS path: the reviewer's own final message. A raise here would escape as a
+    # traceback instead of classifying as invalid_response (which is never a false pass).
+    _r2_prj = None
+    try:
+        run._parse_reviewer_json(_r2_deep)
+    except RecursionError:
+        _r2_prj = "recursion"
+    except ValueError:      # json.JSONDecodeError is a ValueError; the module isn't imported here
+        _r2_prj = "classified"
+    check(_r2_prj == "classified",
+          "review2 F002: _parse_reviewer_json classifies nested JSON as invalid, not RecursionError")
+
+    # R2-F001 (high): the metrics store's "no artifact content" claim must be structural per FIELD,
+    # not merely truncated. A scalar field must never accept a dict whose KEYS carry text.
+    check(lib._sanitize_metric_value({"ARTIFACT TEXT": 1}, field="kind") is None,
+          "review2 F001: a dict on a scalar metric field is dropped, not stored as keys")
+    check(lib._sanitize_metric_value("x" * 500, field="phases") is None,
+          "review2 F001: a string on the phases field is dropped (per-field typing)")
+    _r2_ph = lib._sanitize_metric_value({"spawn": 1.5}, field="phases")
+    check(_r2_ph == {"spawn": 1.5}, "review2 F001: the phases map still stores its numbers")
+    lib.record_metrics({"kind": {"ARTIFACT TEXT": 1}, "backend": "codex"})
+    _r2_rows_now = lib.load_metrics(backend="codex")
+    check(all("ARTIFACT TEXT" not in str(r) for r in _r2_rows_now),
+          "review2 F001: artifact text on a scalar field never reaches metrics.jsonl")
+
+    # R2-F006 (low): record_metrics documents itself TOTAL (never raises). A huge int overflowed
+    # math.isfinite with OverflowError, which is an ArithmeticError -- not in the caught tuple.
+    _r2_overflow_ok = False
+    try:
+        lib.record_metrics({"phases": {"x": 10 ** 10000}})
+        _r2_overflow_ok = True
+    except OverflowError:
+        pass
+    check(_r2_overflow_ok, "review2 F006: an unbounded int can't break record_metrics's never-raises contract")
+
+    # R2-F005 (medium): "filtered to finite numbers" must mean isfinite, not merely isinstance.
+    for _r2_bad, _r2_name in ((float("nan"), "NaN"), (float("inf"), "Infinity")):
+        _r2_fin_ok = False
+        try:
+            report.render_performance([{"backend": "codex", "model_resolved": "m",
+                                        "model_source": "resolved", "outcome": "completed",
+                                        "duration_s": 100.0, "artifact_tokens_est": _r2_bad}])
+            _r2_fin_ok = True
+        except (ValueError, OverflowError):
+            pass
+        check(_r2_fin_ok, f"review2 F005: {_r2_name} in a metric series renders instead of crashing")
+
+    # R2-F004 (medium): the effort/speed match landed in recommend_wall but the performance report
+    # bypassed it by passing pre-grouped rows, so the number the operator SEES pooled both.
+    _r2_mixed = [{"backend": "codex", "model_resolved": "m", "model_source": "resolved",
+                  "outcome": "completed", "duration_s": 100.0, "artifact_tokens_est": 4000,
+                  "effort": "low", "speed": "standard"} for _ in range(5)]
+    _r2_mixed += [{"backend": "codex", "model_resolved": "m", "model_source": "resolved",
+                   "outcome": "completed", "duration_s": 900.0, "artifact_tokens_est": 4000,
+                   "effort": "high", "speed": "standard"} for _ in range(5)]
+    _r2_perf = report.render_performance(_r2_mixed)
+    check("effort" in _r2_perf.lower(),
+          "review2 F004: the performance report separates histories by effort/speed")
+
+    # R2-F007 (low): a regression test must FAIL with its fix reverted, or it pins nothing. The
+    # round-1 F006 check asserted >= 250 on a case where the UNFLOORED path already returned ~375,
+    # so it could not tell fixed from reverted. This case is chosen so the floor actually BINDS:
+    # a history of long runs on large artifacts, queried for a SMALL one. The fitted rate
+    # ((800-300)/10k = 50/1k) puts the raw estimate at 300 + 50*1 = 350s -> ~440s after margin,
+    # which is BELOW the 800s p90 actually observed. Only the floor lifts it above.
+    _r2_slow = [{"outcome": "completed", "duration_s": 800.0, "artifact_tokens_est": 10000}
+                for _ in range(6)]
+    _r2_floor = lib.recommend_wall(backend="claude", artifact_tokens=1000, rows=_r2_slow)
+    check(_r2_floor["basis"] == "empirical" and _r2_floor["p90_s"] == 800.0
+          and _r2_floor["recommended_wall_s"] >= _r2_floor["p90_s"],
+          "review2 F007: the recommendation never falls below the OBSERVED p90 (floor binds here)")
+    _r2_seed_only = lib.recommend_wall(backend="claude", artifact_tokens=1000, rows=[])
+    check(_r2_seed_only["basis"] == "heuristic",
+          "review2 F007: an empty history is heuristic, distinguishing the two bases")
+
+    # R2-F003 (high): --wall is documented as the cap for the WHOLE review, so the version probe
+    # must be bounded by the REMAINING budget, not its own fixed 20s.
+    check(run.backend_version(["/nonexistent/codex"], remaining=0.0) is None,
+          "review2 F003: the version probe with no budget left returns None immediately")
+    _r2_vprev = dict(run._VERSION_CACHE)
+    run._VERSION_CACHE.clear()
+    try:
+        _r2_t0 = time.monotonic()
+        run.backend_version([sys.executable, "-c", "import time; time.sleep(30)"], remaining=0.5)
+        _r2_probe_elapsed = time.monotonic() - _r2_t0
+        check(_r2_probe_elapsed < 5,
+              "review2 F003: a hanging version probe is bounded by the remaining wall, not 20s")
+    finally:
+        run._VERSION_CACHE.clear()
+        run._VERSION_CACHE.update(_r2_vprev)
+
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
     check("/" not in lib._safe_id("a/b/../../etc"), "safe_id: path separators collapsed")

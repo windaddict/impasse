@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -423,9 +424,15 @@ def render_performance(rows: list) -> str:
     """WHAT IT'S FOR: answering "how long does a review actually take on MY account, and what
     --wall should I give the next one" from recorded runs instead of a shipped guess.
 
-    Groups by backend + model, because those are the two things that move duration most, and
-    reports timeouts SEPARATELY from completions — a timeout records when we stopped waiting, not
-    how long the review needed, so folding it into a duration percentile would understate every
+    Groups by backend + model + effort + speed — the same four keys `recommend_wall` fits on. Model
+    and backend move duration most, but effort and speed move it enough that pooling them makes the
+    displayed recommendation meaningless: a history of low-effort runs would size a high-effort
+    review far too small. The library learned this in issue #11; this report has to group the same
+    way or it silently undoes the filter when it passes `rows=` (which bypasses the store's own
+    filtering — see `recommend_wall`).
+
+    Timeouts are reported SEPARATELY from completions — a timeout records when we stopped waiting,
+    not how long the review needed, so folding it into a duration percentile would understate every
     future estimate.
     """
     if not rows:
@@ -436,14 +443,16 @@ def render_performance(rows: list) -> str:
     groups = {}
     for r in rows:
         key = (r.get("backend") or "?",
-               r.get("model_resolved") or r.get("model_requested") or "(backend default)")
+               r.get("model_resolved") or r.get("model_requested") or "(backend default)",
+               r.get("effort"), r.get("speed"))
         groups.setdefault(key, []).append(r)
 
     out = [f"⏱️  Impasse performance — {len(rows)} run(s) recorded",
-           f"    store: {lib.metrics_path()} (0600) — timings and sizes only, no artifact content.",
+           f"    store: {lib.metrics_path()} (0600) — timings and sizes; no artifact content "
+           f"(model/version strings come from the backend, bounded to 200 chars).",
            "    `performance --forget` deletes it.",
            "─" * 78]
-    for (backend, model), rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+    for (backend, model, effort, speed), rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         done = [r for r in rs if r.get("outcome") == "completed"]
         timeouts = [r for r in rs if r.get("outcome") == "timeout"]
         errors = [r for r in rs if r.get("outcome") not in ("completed", "timeout")]
@@ -451,8 +460,11 @@ def render_performance(rows: list) -> str:
         # can also truncate, so a null or a string where a duration belongs must render as "—",
         # never raise out of a report the operator ran to diagnose something else.
         def _nums(rows_, key):
+            # isfinite, not just isinstance: NaN/Infinity ARE floats, and they survive percentile
+            # arithmetic only to raise ValueError/OverflowError at the int() that formats them.
             return [r.get(key) for r in rows_
-                    if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)]
+                    if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)
+                    and math.isfinite(r.get(key))]
         durs = _nums(done, "duration_s")
         ttfbs = _nums(done, "ttfb_s")
         toks = _nums(done, "artifact_tokens_est")
@@ -460,6 +472,14 @@ def render_performance(rows: list) -> str:
         # backend never confirmed — two such rows may be different models pooled under one name.
         srcs = {r.get("model_source") for r in rs}
         label = f"{_clean(backend)}/{_clean(model)}"
+        # Name the settings this group is fitted at: the recommendation below is only valid for
+        # them, and an unlabelled number invites reuse at settings it was never measured under.
+        _knobs = []
+        if effort:
+            _knobs.append(f"effort {_clean(effort)}")
+        if speed:
+            _knobs.append(f"speed {_clean(speed)}")
+        label += f"  [{' · '.join(_knobs)}]" if _knobs else "  [effort/speed unrecorded]"
         if srcs and srcs <= {"requested", "backend_default"}:
             label += "  (requested, not confirmed by the backend)"
         line = f"  {label}\n     {len(rs)} run(s) · {len(done)} completed"
@@ -475,12 +495,17 @@ def render_performance(rows: list) -> str:
                        + (f" · first byte p50 {_ttfb50:.1f}s" if _ttfb50 is not None else "")
                        + (f" · artifact p50 ~{_tok50:.0f} tokens" if _tok50 is not None else ""))
             median_tokens = int(_tok50 or 0)
+            # rs is already filtered to one backend/model/effort/speed by the group key above,
+            # which is the filtering `recommend_wall` documents as the caller's job when rows= is
+            # passed. Grouping and fitting must stay on the same four keys.
             rec = lib.recommend_wall(backend=backend, artifact_tokens=median_tokens,
-                                     model=None if model == "(backend default)" else model, rows=rs)
+                                     model=None if model == "(backend default)" else model,
+                                     effort=effort, speed=speed, rows=rs)
             out.append(f"     → for a ~{median_tokens}-token review: --wall "
                        f"{rec['recommended_wall_s']:.0f}s ({rec['basis']})")
         _t_walls = [t.get("wall_s") for t in timeouts
-                    if isinstance(t.get("wall_s"), (int, float)) and not isinstance(t.get("wall_s"), bool)]
+                    if isinstance(t.get("wall_s"), (int, float))
+                    and not isinstance(t.get("wall_s"), bool) and math.isfinite(t.get("wall_s"))]
         if _t_walls:
             out.append(f"     ⏰ longest cap already exceeded: {max(_t_walls):.0f}s — a retry needs "
                        "more than that, not the same again")

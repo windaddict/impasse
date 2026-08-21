@@ -96,7 +96,8 @@ in a doc rather than re-defining it inline.
   bound. Blowing the wall discards the entire review; nothing partial is kept.
 - **timing store** *(coined)* — `config_dir()/metrics.jsonl`: one append-only row per run recording
   duration, payload size, outcome and time-to-first-byte — **no artifact content** (writes are
-  filtered to a field allowlist). Its role is to make the **wall recommendation** reflect this
+  filtered to a field allowlist and typed per field; the backend-supplied model/version strings are
+  bounded at 200 characters). Its role is to make the **wall recommendation** reflect this
   machine's real history instead of a shipped constant. Separate from a **run record** and deleted
   separately (`impasse_report.py performance --forget`).
 - **wall recommendation / `basis`** *(coined)* — the `--wall` Impasse suggests for a given payload

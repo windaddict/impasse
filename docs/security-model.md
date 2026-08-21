@@ -59,8 +59,12 @@ under that provider's terms and retention.
   SIZE in bytes/estimated tokens, wall/idle settings, outcome, time to first byte, and retry counts
   — so `impasse_run.py estimate` can recommend a `--wall` from your own history rather than a
   shipped constant. The exact guarantee is structural, not a promise: `record_metrics` writes only
-  an allowlist of scalar fields, so artifact text cannot reach this file even through a caller
-  mistake. One content-DERIVED field is stored, the artifact's sha256 digest, which correlates
+  an allowlist of fields and types each one BY NAME, so artifact text cannot reach this file even
+  through a caller mistake — a dict handed to a scalar field is dropped rather than stored as keys.
+  The guarantee is about *callers*, not about the *backend*: two fields (`model_resolved`,
+  `backend_version`) are read from the reviewer CLI's own output, so a misbehaving backend can place
+  up to 200 characters of its choosing in them. Bounded and attributable, not impossible; set
+  `IMPASSE_NO_METRICS=1` to disable the store entirely. One content-DERIVED field is stored, the artifact's sha256 digest, which correlates
   repeat attempts on the same artifact; it is the same digest already shown in the consent manifest,
   and it is withheld entirely under `--no-record`/`--raw`. A digest confirms whether a *known*
   artifact was reviewed — it does not reveal an unknown one. Delete the store with

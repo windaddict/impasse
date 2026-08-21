@@ -5,6 +5,50 @@ All notable changes to Impasse are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Second-round review of the issue-#11 fixes (review-of-the-fixes)
+The commit that applied the first review's 11 findings was itself sent back for an independent
+cross-provider review. It raised 7 findings; all 7 were verified against the code and fixed. The
+pattern worth recording: **three of the seven were the same failure mode — a fix applied to the one
+path the original finding named, while sibling paths on the same hazard were left untouched.**
+
+- **`RecursionError` on untrusted reviewer stdout reached three more parsers.** The first round
+  hardened `_claude_envelope` and `_codex_stream_meta` and stopped there; `_unwrap_error`, the codex
+  JSONL error scan in `_extract_backend_error`, and `_parse_reviewer_json` still caught only
+  `json.JSONDecodeError`, which `RecursionError` does not subclass. All three now classify it.
+  `_parse_reviewer_json` normalizes it to a `JSONDecodeError` so every caller — not just today's
+  one, which already caught it — treats it as `invalid_response`, which is never a false pass.
+- **The timing store's no-artifact-content guarantee is now per FIELD, and stated exactly.** The
+  value sanitizer bounded types and lengths but was shape-only, so a dict handed to a scalar field
+  would have stored its KEYS verbatim — artifact text arriving as `{"<text>": 1}`. Values are now
+  typed by destination field (`phases` takes a bounded number map; every other field takes only a
+  finite bounded number, bool, ≤200-char string, or None). The docs no longer make the absolute
+  claim: `model_resolved` and `backend_version` are read from the reviewer CLI's own output, so a
+  misbehaving backend can place up to 200 characters in those two — bounded and attributable, not
+  impossible.
+- **`--wall` now covers the version probe.** The first round moved deadline creation ahead of the
+  probe, but the probe still used a fixed 20s timeout and never received the budget, so a small wall
+  could be overrun before the reviewer was spawned. `backend_version` now takes the remaining budget
+  and is bounded by the smaller of it and 20s, skipping entirely when nothing is left. The `--wall`
+  help discloses that bounded process teardown may still add a few seconds past the cap.
+- **`performance` no longer pools incompatible histories.** The effort/speed match landed in
+  `recommend_wall` but the report bypassed it by passing pre-grouped `rows=`, so the number the
+  operator actually SEES still mixed low- and high-effort runs. The report groups on the same four
+  keys the library fits on, and labels each group with the settings it was measured at.
+- **Non-finite metric values no longer crash the report.** "Filtered to finite numbers" was
+  implemented as an `isinstance` check; NaN and Infinity are floats and passed it, raising
+  `ValueError`/`OverflowError` at the `int()` that formats them. `_nums` and `_percentile` now test
+  `math.isfinite` and exclude bools.
+- **`record_metrics` keeps its never-raises contract.** A huge int overflowed `math.isfinite`, and
+  `OverflowError` is an `ArithmeticError` — not in the caught tuple — so it escaped from the one
+  function documented TOTAL, on the failure paths whose diagnosis it exists to serve. Integers are
+  bounded before conversion and the handler now catches `ArithmeticError`.
+- **Two regression checks did not pin their fixes.** The round-1 floor test asserted
+  `recommended_wall_s >= 250` on a case where the unfloored path already returned ~375, so it could
+  not tell fixed from reverted. It is replaced with a case where the floor actually binds (long runs
+  on large artifacts, queried for a small one: ~440s unfloored vs a 800s observed p90). Every new
+  check in this round was verified to FAIL against the code with its fix removed.
+
+
 ### Timeout diagnosability, wall recommendations, and duration telemetry (issue #11)
 A review that blew its `--wall` reported only `backend wall_timeout after 605s` — no phase, no
 evidence the provider had ever responded, no resolved model, and no next step but a guess. Reported

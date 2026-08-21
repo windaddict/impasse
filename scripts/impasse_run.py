@@ -415,8 +415,8 @@ def _parse_reviewer_json(text: str) -> dict:
         s = s.strip()
     try:
         return json.loads(s)
-    except json.JSONDecodeError:
-        pass
+    except (json.JSONDecodeError, RecursionError):
+        pass    # RecursionError: deeply nested UNTRUSTED output blows the decoder's stack
     start = s.find("{")
     if start == -1:
         raise json.JSONDecodeError("no JSON object found in reviewer output", s, 0)
@@ -437,7 +437,14 @@ def _parse_reviewer_json(text: str) -> dict:
         elif c == "}":
             depth -= 1
             if depth == 0:
-                return json.loads(s[start:i + 1])
+                try:
+                    return json.loads(s[start:i + 1])
+                except RecursionError:
+                    # Normalize to the documented failure type so EVERY caller -- not just today's
+                    # one, which already catches RecursionError -- classifies this as
+                    # invalid_response rather than taking a traceback out of the review path.
+                    raise json.JSONDecodeError(
+                        "reviewer output nests too deeply to parse", s, start) from None
     raise json.JSONDecodeError("no balanced JSON object in reviewer output", s, start)
 
 
@@ -547,17 +554,31 @@ def _codex_stream_meta(stdout: bytes) -> dict:
 _VERSION_CACHE: dict = {}
 
 
-def backend_version(command: list) -> str | None:
+_VERSION_PROBE_TIMEOUT = 20.0    # the probe's own ceiling, when the wall leaves more than this
+
+
+def backend_version(command: list, remaining: float | None = None) -> str | None:
     """The reviewer CLI's own version string, e.g. 'codex-cli 0.148.0-alpha.9'. Cached per command
     path for the life of the process — a version doesn't change mid-session, and this must not add
     a subprocess to every review. Best-effort: any failure returns None rather than disturbing the
-    run. Recorded so a duration comparison can survive a CLI upgrade that changes performance."""
+    run. Recorded so a duration comparison can survive a CLI upgrade that changes performance.
+
+    `remaining` is the review's REMAINING wall budget. The probe is bounded by whichever is smaller,
+    it or `_VERSION_PROBE_TIMEOUT` — because `--wall` is documented as the cap on the whole review,
+    and a fixed 20s probe would overrun a smaller wall before the reviewer was ever spawned. A
+    non-positive budget skips the probe entirely (returns None): there is no time left to spend on
+    metadata, and the caller is about to time out anyway."""
     key = tuple(command)
     if key in _VERSION_CACHE:
         return _VERSION_CACHE[key]
+    timeout = _VERSION_PROBE_TIMEOUT
+    if remaining is not None:
+        if remaining <= 0:
+            return None     # deliberately NOT cached: a skipped probe is not a known-absent version
+        timeout = min(timeout, remaining)
     version = None
     try:
-        p = subprocess.run(list(command) + ["--version"], capture_output=True, timeout=20)
+        p = subprocess.run(list(command) + ["--version"], capture_output=True, timeout=timeout)
         text = (p.stdout or b"").decode("utf-8", "replace").strip()
         if text:
             version = text.splitlines()[0][:120]
@@ -645,8 +666,8 @@ def _unwrap_error(raw):
                 d = json.loads(s)
                 if isinstance(d, dict):
                     return _from_dict(d)
-            except json.JSONDecodeError:
-                pass
+            except (ValueError, RecursionError):
+                pass    # untrusted backend text: nested JSON raises RecursionError, not ValueError
         return None, raw
     return None, None
 
@@ -694,8 +715,8 @@ def _extract_backend_error(stdout: bytes, stderr: bytes, parse_jsonl: bool = Tru
                 continue
             try:
                 ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+            except (ValueError, RecursionError):
+                continue    # same untrusted stream as _codex_stream_meta; same nesting hazard
             if not isinstance(ev, dict):
                 continue
             raw = None
@@ -1102,7 +1123,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         deadline = time.monotonic() + wall_timeout   # ONE wall-clock budget for the whole review
         # The CLI version is metadata, not a gate: a duration is only comparable against the CLI
         # build that produced it. Resolved once per process (cached), and inside the budget above.
-        be_version = backend_version(be.command)
+        be_version = backend_version(be.command, remaining=deadline - time.monotonic())
         phases.mark("backend_version_resolved")
 
         result = None
@@ -1417,7 +1438,9 @@ def _main(argv=None) -> int:
     rv.add_argument("--model", default=None,
                     help="reviewer model (else IMPASSE_CODEX_MODEL / IMPASSE_CLAUDE_MODEL, else the backend default)")
     rv.add_argument("--wall", type=float, default=300.0,
-                    help="total wall-clock cap (s). The real bound — scale UP for high effort / large "
+                    help="total wall-clock cap (s) for the review, version probe included; bounded "
+                         "process teardown may add a few seconds past it. The real bound — scale UP "
+                         "for high effort / large "
                          "artifacts. Run `estimate` (or read `wall_advice` in the result) for a "
                          "payload-aware recommendation; a too-short wall discards the whole review.")
     rv.add_argument("--idle", type=float, default=300.0,

@@ -917,8 +917,10 @@ def forget_run(run_id: str) -> bool:
 #
 # It is deliberately NOT a second copy of the run record. A run record (runs/<id>/) holds the
 # reviewed content; this holds sizes, timings and outcomes. The privacy guarantee is STRUCTURAL, not
-# a promise: `record_metrics` writes only the allowlisted scalar fields in `_METRIC_FIELDS`, so a
-# caller cannot put artifact text here even by mistake. The one content-derived value stored is
+# a promise: `record_metrics` writes only the allowlisted fields in `_METRIC_FIELDS`, and types each
+# one by name, so a caller cannot put artifact text here even by mistake. Two fields
+# (`model_resolved`, `backend_version`) are read from the reviewer CLI's own output and so are
+# backend-controlled within a 200-character bound -- see record_metrics for the exact guarantee. The one content-derived value stored is
 # `artifact_digest` — a hash, not content; it already appears in the consent manifest and the run
 # record, and it is what lets repeat attempts on the same artifact be correlated. A digest confirms
 # whether a KNOWN artifact was reviewed; it does not reveal an unknown one.
@@ -954,29 +956,57 @@ _MAX_METRIC_STR = 200     # bound every stored string; see _sanitize_metric_valu
 _MAX_METRIC_PHASES = 80   # bound the one nested map that is stored
 
 
-def _sanitize_metric_value(v):
+# `phases` is the ONE field stored as a nested map ({phase_name: seconds}); every other allowlisted
+# field is a scalar. Typing them separately is what makes the no-content guarantee structural: a
+# scalar field cannot smuggle text in as dictionary KEYS, which a shape-only check would have let
+# through (a dict's keys are values too).
+_METRIC_MAP_FIELDS = frozenset({"phases"})
+_MAX_METRIC_INT = 2 ** 53   # bound ints as well as strings: an unbounded int is unbounded TEXT on
+                            # disk once serialized, and float() on a huge one raises OverflowError.
+
+
+def _sanitize_metric_value(v, field: str | None = None):
     """Coerce one metric value to a bounded, content-free shape, or None to drop it.
+
+    TOTAL: never raises, for any input. `record_metrics` calls this on every review's exit path,
+    including the failure paths whose diagnosis it exists to serve.
 
     Keys alone are not a no-content guarantee: a value reaching an allowed key still has to be
     bounded in TYPE and LENGTH, or an unbounded backend-supplied string (e.g. a model name read out
     of the reviewer CLI's own output) could carry arbitrary text into the store and, incidentally,
-    grow a single row past the trim threshold. So only finite numbers, booleans, short strings, None,
-    and a bounded {name: number} phase map survive; anything else is dropped rather than stringified.
+    grow a single row past the trim threshold.
+
+    Typing is PER FIELD, not merely per shape. `field` names the destination column; the one map
+    field (`phases`) accepts only a bounded {name: number} map, and every other field accepts only a
+    finite number, a bool, a short string, or None. Without that split, a dict handed to a scalar
+    field would store its KEYS verbatim — artifact text arriving as `{"<artifact text>": 1}` — which
+    is exactly the hole the shape-only version left open. An unknown/None `field` is treated as
+    scalar: the conservative side, since unknown keys are dropped by `record_metrics` anyway.
     """
+    is_map_field = field in _METRIC_MAP_FIELDS
+    if isinstance(v, dict):
+        if not is_map_field:
+            return None     # a scalar field never takes a map: its keys would be stored text
+        out = {}
+        for k, val in list(v.items())[:_MAX_METRIC_PHASES]:
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                continue
+            if isinstance(val, int) and abs(val) > _MAX_METRIC_INT:
+                continue    # bounded BEFORE float(): math.isfinite on a huge int raises OverflowError
+            if not math.isfinite(val):
+                continue
+            out[str(k)[:60]] = val
+        return out
+    if is_map_field:
+        return None         # and the map field takes nothing else
     if v is None or isinstance(v, bool):
         return v
     if isinstance(v, int):
-        return v
+        return v if abs(v) <= _MAX_METRIC_INT else None
     if isinstance(v, float):
         return v if math.isfinite(v) else None
     if isinstance(v, str):
         return v[:_MAX_METRIC_STR]
-    if isinstance(v, dict):
-        out = {}
-        for k, val in list(v.items())[:_MAX_METRIC_PHASES]:
-            if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val):
-                out[str(k)[:60]] = val
-        return out
     return None
 
 
@@ -988,16 +1018,24 @@ def record_metrics(entry: dict) -> bool:
     telemetry", never turn a reviewer timeout into a traceback.
 
     The no-artifact-content guarantee is structural on BOTH axes: only `_METRIC_FIELDS` keys are
-    written, and every value is passed through `_sanitize_metric_value`, which admits only finite
-    numbers, booleans, short strings and a bounded phase map. A caller cannot put artifact text here
-    even by mistake, and no single row can grow without bound.
+    written, and every value is passed through `_sanitize_metric_value` WITH ITS FIELD NAME, so each
+    column is typed — the one map field (`phases`) takes a bounded {name: number} map and every other
+    field takes only a finite bounded number, a bool, a <=200-char string, or None. A caller cannot
+    put artifact text here even by mistake, and no single row can grow without bound.
+
+    THE EXACT GUARANTEE: no caller can write artifact content, and every stored string is bounded at
+    200 characters. It is NOT a claim that stored strings are backend-independent — `model_resolved`
+    and `backend_version` are read from the reviewer CLI's own output, so a misbehaving backend can
+    place up to 200 characters of its choosing in those two fields. Bounded and attributable, not
+    impossible; `--no-record`/`--raw` withhold the digest, and IMPASSE_NO_METRICS=1 disables the
+    store entirely.
     """
     try:
         row = {}
         for k, v in entry.items():
             if k not in _METRIC_FIELDS:
                 continue
-            sv = _sanitize_metric_value(v)
+            sv = _sanitize_metric_value(v, field=k)
             if sv is not None or v is None:
                 row[k] = sv
         if not row:
@@ -1018,7 +1056,10 @@ def record_metrics(entry: dict) -> bool:
                 pass
             _trim_metrics(path)
         return True
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, ArithmeticError):
+        # ArithmeticError too (OverflowError is one, and is NOT a ValueError): this function
+        # documents itself TOTAL, and it runs on the failure exit paths where a traceback would
+        # replace the diagnosis the operator came for.
         return False
 
 
@@ -1119,7 +1160,8 @@ def _percentile(values: list, q: float) -> float | None:
     """Nearest-rank percentile of a list of numbers (q in 0..1). None for an empty list. Nearest-rank
     (not interpolated) is deliberate: on the handful of samples this store realistically holds, an
     interpolated value invents a duration nobody observed."""
-    vals = sorted(v for v in values if isinstance(v, (int, float)))
+    vals = sorted(v for v in values
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
     if not vals:
         return None
     k = max(0, min(len(vals) - 1, int(math.ceil(q * len(vals))) - 1))
