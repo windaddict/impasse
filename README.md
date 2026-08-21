@@ -334,6 +334,22 @@ marker/override conflict yields `undetermined`, never an overstated cross-provid
 because detection reads environment variables, its confidence is only as good as the environment's integrity. Detail:
 [`docs/environments.md`](docs/environments.md), [`docs/host-detection.md`](docs/host-detection.md).
 
+## Which version am I running?
+
+Ask the agent. `SKILL.md` carries the version in its header text, and the skill instructs the agent
+to state it when a review begins — so on a host that loads the skill body into context, no command is
+needed. (Hosts differ in when they load that text; if yours doesn't volunteer it, the machine
+surfaces below always answer.)
+
+For a machine-readable answer, every surface reports `impasse_version`: `impasse_run.py mode`,
+`estimate`, and each review result (failures included). Running from a git checkout appends the
+commit — `0.5.0+48f2b1e` — so a symlinked dev clone identifies the exact code, not just the release.
+
+This matters when a host can discover skills in more than one place (Cursor checks several): two
+install paths can serve different code. The version makes the answering copy identify itself — it
+does **not** compare installs, so noticing a stale one still takes a reader who knows which version
+to expect.
+
 ## Install
 
 Impasse is an Agent Skill — the repository *is* the skill directory. Install it where your host looks

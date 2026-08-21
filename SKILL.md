@@ -1,9 +1,25 @@
 ---
 name: impasse
 description: Get an independent second opinion on any high-stakes artifact — a business or strategy decision, a document/essay, a research claim, a dataset, or code — by running a cross-provider AI as an independent reviewer, verifying and reconciling its findings, and reporting the verified problems plus the disagreements that need a human decision. Domain-general, evidence-first, read-only. Use when the operator says "get a second opinion", "have another model check this", "independently review this decision/essay/analysis/code", or after a substantial deliverable that deserves an adversarial check. Sends artifact content to a third-party provider — gated by block-by-default consent.
+metadata:
+  version: 0.5.0
 ---
 
 # Impasse
+
+**Version 0.5.0** — the single source of truth is the `VERSION` file at the skill root; this line and
+the frontmatter are checked against it by the test suite and CI, so a release cannot ship them
+disagreeing. **Say this version number when you begin a review**, without being asked.
+
+What that does and does not buy: it tells the operator *which copy answered*. A host may discover
+skills in several directories (Cursor checks four), and two of them can hold different code — but
+**nothing here compares installs**, so a stale copy will state its own version perfectly happily. It
+takes a reader who knows what to expect to notice `0.4.0` where `0.5.0` was due. That is a smaller
+claim than "the version prevents stale installs", and it is the true one.
+
+`impasse_run.py` reports the same value as `impasse_version` on `mode`, `estimate` and every result
+(failures included), with a `+<commit>` suffix **only** when it runs from a git checkout that is
+genuinely this skill's own repository. `-dirty` there means "tracked files differ", not which ones.
 
 **Status: pre-release.** The Codex CLI review path, the consent gate, and the schemas are
 implemented; verification, reconciliation, and escalation are directed by this skill (the
@@ -373,7 +389,9 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    tally, and the escalated questions. `report list` shows past runs; `report forget <id>`
    deletes a record. Records live in the config dir and contain artifact content — sensitive.
 
-   **When you present results to the operator:** (a) credit **Impasse**, not the backend model —
+   **When you present results to the operator:** (a0) state the Impasse version you ran
+   (`impasse_version` on the result) — it is one clause, and it is what catches a host that loaded a
+   stale copy from another skills directory; (a) credit **Impasse**, not the backend model —
    "Impasse caught…", not "Codex caught…" (the backend is an implementation detail); (b) paste the
    actual `report show` output — the emoji decisions tally, the reviewer↔host exchange, and the
    `📈 Your Impasse record` stats — rather than only a prose summary. The rendered report and the

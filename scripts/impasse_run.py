@@ -914,7 +914,7 @@ def _fail(code, message, kind, notice, manifest, termination=None, retryable=Non
     failure = {"code": code, "message": message}
     if retryable is not None:
         failure["retryable"] = retryable
-    r = {"ok": False, "outcome": "failed", "kind": kind,
+    r = {"ok": False, "outcome": "failed", "kind": kind, "impasse_version": lib.version(),
          "failure": failure, "notice": notice, "manifest": manifest}
     if termination:
         r["termination"] = termination
@@ -1067,6 +1067,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         if os.environ.get("IMPASSE_NO_METRICS"):
             return
         row = dict(metrics_base)
+        row["impasse_version"] = lib.version()
         row["outcome"] = outcome
         row["phases"] = phases.as_dict()
         row["duration_s"] = round(phases.elapsed(), 3)
@@ -1379,6 +1380,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 # or a later reconciliation would land in the wrong directory.
                 parsed["review_id"] = run_id
                 p = lib.save_run_doc(run_id, "reviewer-response", parsed)
+                lib.save_run_meta(run_id)   # which Impasse produced this record (sibling file)
                 recorded = True
                 record_path = p   # the full file path, not just the directory
                 record_notice = (
@@ -1409,6 +1411,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             "backend_version": be_version,
             "telemetry": telemetry,
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
+            "impasse_version": lib.version(),
             "run_id": run_id, "recorded": recorded, "record_path": record_path,
             "record_notice": record_notice,
             "notice": notice, "manifest": manifest,
@@ -1572,7 +1575,7 @@ def _main(argv=None) -> int:
         rec = lib.recommend_wall(backend=name, model=model_r, artifact_tokens=tokens,
                                  effort=effort_r, speed=speed_r)
         out = {"ok": True, "backend": name, "model": model_r, "effort": effort_r,
-               "speed": speed_r, "artifact_bytes": len(art), **rec}
+               "speed": speed_r, "artifact_bytes": len(art), "impasse_version": lib.version(), **rec}
         if args.wall is not None:
             out["requested_wall_s"] = args.wall
             out["underprovisioned"] = args.wall < rec["recommended_wall_s"]
@@ -1591,6 +1594,10 @@ def _main(argv=None) -> int:
             claude_available=_avail(lib.resolve_claude_command),
         )
         decision["environment"] = args.environment or lib.detect_environment()
+        # `mode` is what a host runs FIRST, before every review, so it is the cheapest place to
+        # answer "which Impasse is this?" — no extra command, and a stale copy shows itself at
+        # step zero rather than after a confusing result.
+        decision["impasse_version"] = lib.version()
         print(json.dumps(decision, indent=2))
         return 0
 

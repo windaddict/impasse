@@ -9,6 +9,8 @@ touches real user config. POSIX assumptions (killpg) — skips the tree tests of
 from __future__ import annotations
 
 import os
+import json
+import shutil
 import stat
 import sys
 import tempfile
@@ -2480,6 +2482,105 @@ def main() -> int:
                 os.environ.pop(_k, None)
             else:
                 os.environ[_k] = _v
+
+    # --- skill version: ONE source of truth, and the surfaces must agree ---
+    # Surfacing a version in several files is how an operator learns it without running anything —
+    # and is also a new way to be wrong. This gate is the whole reason the redundancy is safe: a
+    # release that bumps VERSION but forgets SKILL.md fails here instead of shipping a stale claim.
+    import re as _re
+    _ver_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+    _ver_declared = open(_ver_file, encoding="utf-8").read().strip()
+    check(_re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", _ver_declared) is not None,
+          f"version: VERSION holds a bare semver ({_ver_declared!r})")
+    check(lib.version(with_revision=False) == _ver_declared,
+          "version: lib.version(with_revision=False) matches the VERSION file exactly")
+
+    _skill_text = open(os.path.join(os.path.dirname(_ver_file), "SKILL.md"), encoding="utf-8").read()
+    _fm = _re.search(r"\A---\n(.*?)\n---", _skill_text, _re.S)
+    _fm_body = _fm.group(1) if _fm else ""
+    # SCOPED to the metadata block, not a loose search of the whole frontmatter. A bare
+    # `^version:` match would accept a TOP-LEVEL version key and pass while metadata.version
+    # disagreed — a gate that can be satisfied by the wrong line is not a gate.
+    _md = _re.search(r"^metadata:\s*\n((?:[ \t]+.*\n?)+)", _fm_body, _re.M)
+    _md_ver = _re.search(r"^[ \t]+version:\s*(\S+)\s*$", _md.group(1), _re.M) if _md else None
+    check(_md_ver is not None and _md_ver.group(1) == _ver_declared,
+          "version: SKILL.md frontmatter metadata.version matches VERSION (scoped to metadata)")
+    # And there must be exactly ONE version key in the frontmatter, so a stray top-level one can't
+    # sit alongside the real one saying something different.
+    check(len(_re.findall(r"^\s*version:", _fm_body, _re.M)) == 1,
+          "version: the frontmatter declares version exactly once (no competing keys)")
+    _hdr_ver = _re.search(r"\*\*Version ([0-9]+\.[0-9]+\.[0-9]+)\*\*", _skill_text)
+    check(_hdr_ver is not None and _hdr_ver.group(1) == _ver_declared,
+          "version: the SKILL.md header line matches VERSION (the surface a host reads for free)")
+
+    # The git suffix is environment-specific: it must decorate the runtime value and NEVER leak
+    # into the documented one, or the docs would differ per checkout.
+    check(lib.version().startswith(_ver_declared),
+          "version: the runtime value extends the released version rather than replacing it")
+    check("+" not in lib.version(with_revision=False),
+          "version: the base value carries no git suffix (docs stay checkout-independent)")
+
+    # Degradation: an install that cannot identify itself must SAY so, not guess or raise.
+    _ver_prev = dict(lib._VERSION_CACHED)
+    _ver_path_prev = lib._VERSION_FILE
+    try:
+        lib._VERSION_CACHED.clear()
+        lib._VERSION_FILE = os.path.join(tempfile.gettempdir(), "impasse-no-such-VERSION")
+        check(lib.version() == "unknown", "version: a missing VERSION file yields 'unknown', not a crash")
+        lib._VERSION_CACHED.clear()
+        _bad = tempfile.mkstemp(prefix="impasse-badver-")[1]
+        open(_bad, "w").write("v1; rm -rf /\n")
+        lib._VERSION_FILE = _bad
+        check(lib.version() == "unknown",
+              "version: a malformed VERSION string is rejected, not interpolated into reports")
+        os.unlink(_bad)
+    finally:
+        lib._VERSION_FILE = _ver_path_prev
+        lib._VERSION_CACHED.clear()
+        lib._VERSION_CACHED.update(_ver_prev)
+
+    # It must reach the surfaces a host and a stored record actually read.
+    check("impasse_version" in lib._METRIC_FIELDS,
+          "version: the timing store is allowed to record which version produced each row")
+    # ...and prove it actually ARRIVES on the surfaces, by driving the real code paths. Membership
+    # in an allowlist proves only that the field is permitted, not that anything writes it; each of
+    # these fails if its production line is reverted.
+    import subprocess as _vsp
+    _cli = os.path.join(os.path.dirname(_ver_file), "scripts", "impasse_run.py")
+    _mode_out = _vsp.run([sys.executable, _cli, "mode", "--kind", "code"],
+                         capture_output=True, text=True)
+    check(json.loads(_mode_out.stdout).get("impasse_version") == lib.version(),
+          "version: `mode` reports it (the command a host runs FIRST, before any review)")
+    _est_art = tempfile.mkstemp(prefix="impasse-estver-")[1]
+    open(_est_art, "w").write("x" * 400)
+    try:
+        _est_out = _vsp.run([sys.executable, _cli, "estimate", "--artifact-file", _est_art,
+                             "--backend", "codex"], capture_output=True, text=True)
+        check(json.loads(_est_out.stdout).get("impasse_version") == lib.version(),
+              "version: `estimate` reports it")
+    finally:
+        os.unlink(_est_art)
+    # The FAILURE envelope matters most: "which version?" is asked precisely when a run went wrong.
+    _vfail = run.review(kind="code", instruction="x", artifact_bytes=b"y", backend="codex",
+                        no_record=True)
+    check(_vfail.get("impasse_version") == lib.version(),
+          "version: a FAILED review still identifies the version that produced it")
+    _vm_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _vm_dir = tempfile.mkdtemp(prefix="impasse-vermeta-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _vm_dir
+        _vm_path = lib.save_run_meta("ver-meta-test")
+        check(_vm_path and os.path.isfile(_vm_path)
+              and json.loads(open(_vm_path).read())["impasse_version"] == lib.version(),
+              "version: a run record is stamped with the Impasse that produced it")
+        check(stat.S_IMODE(os.stat(_vm_path).st_mode) == 0o600,
+              "version: the run-meta stamp is 0600 like every other record file")
+    finally:
+        if _vm_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _vm_prev
+        shutil.rmtree(_vm_dir, ignore_errors=True)
 
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")

@@ -3,7 +3,57 @@
 All notable changes to Impasse are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) for its schemas and skill.
 
+**Versioning, precisely.** Three contracts are versioned INDEPENDENTLY here, and conflating them
+would be a mistake: the **skill** (the `VERSION` file — what this changelog numbers), the **stored
+schemas** (`schemas/*.v1.json`), and the **on-disk formats** (`CONSENT_VERSION`, `NOTICE_VERSION`).
+A skill release does not imply a schema bump, and vice versa. While the skill is **pre-release**, the
+`0.y.z` line is deliberate: it says the CLI and protocol surfaces may still change without a major
+bump. The `VERSION` file is the single source of truth; `SKILL.md`'s header line and frontmatter are
+checked against it by the test suite, so they cannot drift.
+
 ## [Unreleased]
+
+## [0.5.0] — 2026-08-21
+
+First numbered release. Everything below was previously unreleased work on `main`; the entries are
+unchanged, and the version exists so that an operator — or an agent — can tell which Impasse is
+running without being handed a command.
+
+### Skill versioning, surfaced where it is already read
+The failure this fixes was observed, not hypothetical: two install paths (`~/.claude/skills/impasse`
+and a Cursor-native symlink) served **different code**, and nothing said so. A review ran against a
+stale copy and looked entirely normal.
+
+- **`VERSION` at the skill root is the single source of truth**, surfaced in the places a reader
+  reaches for free: the `SKILL.md` header (every host loads it into context on invoke, so the agent
+  simply knows it), the frontmatter `metadata.version`, and machine output.
+- **`SKILL.md` now instructs the host to state its version when a review begins** — unprompted. That
+  removes the "run this obscure command" step. **Stated exactly:** this surfaces *which copy
+  answered*; it does not detect a stale install by itself. Nothing enumerates or compares the
+  discoverable install paths, so a stale copy states its own version quite happily — it takes a
+  reader who knows what to expect to catch it. The smaller claim is the true one.
+- **`impasse_version` on every machine surface**: `mode` (which a host runs *first*), `estimate`,
+  every review result including failures, every timing-store row, and a `run-meta.json` stamped
+  beside each run record. Records are kept for months; "which code produced this" is a question a
+  stored record should answer about itself.
+- **A `+<commit>` suffix when running from a git checkout** (`0.5.0+48f2b1e-dirty`), because the
+  common dev setup symlinks a working clone — where a bare release number could be any of a hundred
+  commits. The suffix decorates the runtime value only and never the documented one, so docs stay
+  checkout-independent. Two limits, both deliberate: `git -C` searches **parent** directories, so a
+  skill copied into an unrelated checkout (a dotfiles repo — `~/.claude` is one) would otherwise
+  report that repo's commit as its own; the provenance is therefore refused unless the repository
+  top level *is* the skill root **and** `VERSION` is tracked in it. And `-dirty` is a boolean —
+  it says tracked files differ, never which ones — so it narrows the candidates rather than
+  identifying exact code.
+- **The redundancy is gated, not trusted.** A version copied into several files is a new way to be
+  wrong, so the suite asserts the `VERSION` file, the header line and the frontmatter agree —
+  verified to fail on exactly the release mistake it exists to catch (bump one, forget the others).
+  Degradation is pinned too: a missing, non-UTF-8, or otherwise malformed `VERSION` yields
+  `"unknown"` rather than a guess or a traceback — which matters because `version()` is called from
+  the failure path, where raising would replace a real diagnosis with a stack trace. **Scope of the
+  gate:** it runs in the tree the tests run in — the working tree locally, and the committed tree in
+  CI. A copied or packaged install is not gated, so a hand-edited copy in the field can still
+  disagree with itself.
 
 ### Cursor host adapter, and `grok` as an attributable host (proposal Phases A + B)
 Cursor implements the Agent Skills standard, and a probe in a Cursor shell confirmed the scripts run

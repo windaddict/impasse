@@ -26,6 +26,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -33,6 +34,104 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 APP = "impasse"
+
+
+# --- Skill version -----------------------------------------------------------------------------
+#
+# WHAT IT'S FOR: answering "which Impasse is running?" WITHOUT the operator having to run anything.
+# The version lives in one file (`VERSION` at the skill root) and is surfaced in three places that
+# reach a reader for free: the `SKILL.md` header (which every host loads into context when the skill
+# is invoked, so the agent simply knows it), every review result, and the local timing store.
+#
+# The single source of truth matters more than the surfacing. A version string copied into several
+# files is a new way to be wrong — the same doc-drift failure the repo's documentation standards
+# exist to prevent — so `tests/test_helpers.py` asserts the file, the SKILL.md header line and the
+# frontmatter all agree, and a release that forgets one fails the gate rather than shipping a lie.
+
+_VERSION_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+_VERSION_CACHED: dict = {}
+
+
+def _git_revision() -> str | None:
+    """The short commit of the checkout this code is running from, or None if that can't be told.
+
+    WHY: a released version alone is ambiguous for the common dev setup, where a host's skills dir
+    SYMLINKS a working clone — "0.5.0" there could be any of a hundred commits, including uncommitted
+    edits. Best-effort by construction: no git, not a repo, or a slow/hanging git all degrade to
+    None, because a provenance nicety must never break a review. It is bounded rather than free: the
+    git calls carry a 2s timeout each and the result is cached for the process, so a pathological
+    git can add a one-off delay to the first version lookup — not to every call."""
+    root = os.path.dirname(_VERSION_FILE)
+
+    def _git(*args) -> str | None:
+        try:
+            p = subprocess.run(["git", "-C", root, *args], capture_output=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            # Deliberately NARROW: git missing (OSError), or a timeout/odd exit
+            # (SubprocessError). No bare `except Exception` — an unexpected error here is a real
+            # defect and should surface rather than be relabelled "no revision".
+            return None
+        if p.returncode != 0:
+            return None    # not a repo, or git can't read it — a normal outcome for an install
+        return (p.stdout or b"").decode("utf-8", "replace").strip()
+
+    # `git -C <dir>` SEARCHES PARENT DIRECTORIES. A skill COPIED into an unrelated checkout — a
+    # dotfiles repo, a monorepo — would otherwise inherit that repo's commit and report confident,
+    # completely wrong provenance. (`~/.claude` is itself a git repo, so this is the normal case,
+    # not a corner one.) Two guards: the repository top level must BE the skill root, and VERSION
+    # must actually be tracked in it. Either failing means "this checkout is not this skill".
+    top = _git("rev-parse", "--show-toplevel")
+    if not top or os.path.realpath(top) != os.path.realpath(root):
+        return None
+    if _git("ls-files", "--error-unmatch", "VERSION") is None:
+        return None
+
+    rev = _git("describe", "--always", "--dirty", "--exclude", "*")
+    if not rev:
+        return None
+    # Shape-check git's output before it can reach a report or the metrics store: this is a
+    # subprocess's stdout, and every other externally-sourced string here is bounded and validated
+    # rather than trusted.
+    return rev if re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.\-]{0,39}", rev) else None
+
+
+def version(*, with_revision: bool = True) -> str:
+    """The skill's version, e.g. '0.5.0' or '0.5.0+g48f2b1e' (or '0.5.0+g48f2b1e-dirty').
+
+    `with_revision=False` returns the bare released version — that is the value the consistency gate
+    compares against `SKILL.md`, since the git suffix is environment-specific and must not be baked
+    into documentation. Returns 'unknown' if the VERSION file is missing or unreadable: an install
+    that cannot identify itself says so rather than guessing or raising."""
+    key = "full" if with_revision else "base"
+    if key in _VERSION_CACHED:
+        return _VERSION_CACHED[key]
+    base = "unknown"
+    try:
+        # Read a bounded amount but MORE than any valid version, so trailing junk is seen and
+        # rejected rather than silently truncated away into something that looks valid.
+        with open(_VERSION_FILE, encoding="utf-8") as f:
+            candidate = f.read(256).strip()
+        # Shape-checked, not trusted: this string is interpolated into reports and stored in the
+        # metrics store, so bound it the way every other externally-sourced string is bounded.
+        # Bounded components too: an unbounded digit run is still "valid semver" by shape but is
+        # not a version anyone released, and it ends up interpolated into reports and written to
+        # the metrics store.
+        if re.fullmatch(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}(?:[-+][0-9A-Za-z.\-]{1,32})?",
+                        candidate or ""):
+            base = candidate
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError as well as OSError: a VERSION file that isn't valid UTF-8 is a
+        # malformed file, exactly like an unreadable one, and `version()` is called from `_fail` —
+        # the failure path — where raising would replace a real diagnosis with a traceback.
+        base = "unknown"
+    _VERSION_CACHED["base"] = base
+    full = base
+    if base != "unknown":
+        rev = _git_revision()
+        if rev:
+            full = f"{base}+{rev}"
+    _VERSION_CACHED["full"] = full
+    return _VERSION_CACHED[key]
 
 
 def config_dir() -> str:
@@ -901,6 +1000,27 @@ def reserve_run_id(review_id: str) -> str:
     raise OSError(f"could not reserve a unique run directory for {base!r}")
 
 
+def save_run_meta(run_id: str) -> str | None:
+    """Stamp the run directory with WHICH IMPASSE produced it.
+
+    A sibling file rather than a field: `reviewer-response` and `reconciliation-result` are both
+    `additionalProperties: false`, so host provenance cannot live inside them without a schema
+    change — and it does not belong there anyway (the reviewer does not produce it). Records are
+    kept and compared for months, so "which code wrote this" is exactly the question a stored record
+    should be able to answer about itself. Best-effort: never raises, because failing to record
+    provenance must not fail a review that otherwise succeeded."""
+    try:
+        d = _run_dir(run_id)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "run-meta.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"impasse_version": version(), "recorded_at": time.time()}, f, indent=2)
+        os.chmod(path, 0o600)
+        return path
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def save_run_doc(run_id: str, name: str, doc: dict) -> str:
     """Persist one run document (name = 'reviewer-response' | 'reconciliation-result').
     The initial reviewer-response should use a run_id from reserve_run_id() so it can't clobber another
@@ -1013,6 +1133,7 @@ _METRIC_FIELDS = frozenset({
     "outcome", "failure_code", "termination",
     "duration_s", "ttfb_s", "bytes_received",
     "phases", "transient_retries", "output_retries", "findings_count",
+    "impasse_version",
 })
 
 

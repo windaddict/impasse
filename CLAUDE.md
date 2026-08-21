@@ -39,6 +39,19 @@ modes, `FAKE_COUNT_ALL` to count invocations).
 - **A rejection needs contradicting evidence** (schema-enforced). An evidence-less refutation is a
   `deadlocked` item with `dispute_kind: unverified_refutation`, not a `rejected` one.
 
+## Cutting a release
+
+`VERSION` (skill root) is the **single source of truth**. To release: bump it, update the
+`**Version X.Y.Z**` line in `SKILL.md` and `metadata.version` in its frontmatter, move `[Unreleased]`
+entries under a new `## [X.Y.Z] — DATE` heading in `CHANGELOG.md`, run the three gates, commit, then
+`git tag vX.Y.Z`. The suite **fails** if the three version surfaces disagree, so a half-finished bump
+cannot ship — that gate is the reason it is safe to state the version in more than one file.
+
+While pre-release, stay on `0.y.z`: it declares the CLI and protocol surfaces may still change
+without a major bump. Three contracts are versioned **independently** — the skill (`VERSION`), the
+stored schemas (`schemas/*.v1.json`), and the on-disk formats (`CONSENT_VERSION`, `NOTICE_VERSION`).
+Bumping one does not imply bumping another; see the note at the top of `CHANGELOG.md`.
+
 ## Changing a schema
 
 Edit `schemas/*.v1.json` in place for an additive or invariant-preserving change, then add/adjust
