@@ -41,7 +41,7 @@ locations (Homebrew, `/usr/local/bin`, `~/.local/bin`, `~/.npm-global/bin`, the 
 
 ```
 claude -p "<reviewer instruction + schema>" \
-  --output-format text \
+  --output-format json \
   --permission-mode default \
   --strict-mcp-config \
   --allowed-tools "" \
@@ -58,6 +58,17 @@ observations, not a durable API):
   fence or a line of prose, the runner parses tolerantly (`_parse_reviewer_json`: strip a fence,
   else a string-aware balanced-brace scan). It also rejects a stdout that hit the capture cap
   (`stdout_truncated`) rather than trying to parse a cut-off object.
+- **`--output-format json`, not `text` — the envelope carries run metadata.** Observed on
+  `claude` 2.1.220, the envelope includes `modelUsage` (which model actually ran, e.g.
+  `claude-sonnet-5` behind the alias `sonnet`), `ttft_ms` (time to first token), `session_id`,
+  `duration_api_ms`, token usage, and `api_error_status`. Impasse reads the review out of the
+  envelope's `result` field and records the rest, so it can report a **resolved** model rather than
+  the alias that was requested, and say where a slow run spent its time. A headless run can bill
+  more than one model (a small helper model may do side work), so the reviewer is taken to be the
+  one with the largest total input — the model that actually read the artifact.
+  **Fail-soft:** stdout that is not a recognizable envelope is treated as the final message
+  directly, exactly as the `text` format was, so a CLI that changes or drops the format degrades to
+  the previous behavior instead of failing the run. In that case no resolved model is claimed.
 - **Read-only is fail-closed, and it is NOT a process sandbox.** Unlike codex's
   `--sandbox read-only` (a real OS-level sandbox), the Claude reviewer runs in your normal Claude
   Code process. Its read-only posture is three independent controls instead:

@@ -5,6 +5,105 @@ All notable changes to Impasse are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Second-round review of the issue-#11 fixes (review-of-the-fixes)
+The commit that applied the first review's 11 findings was itself sent back for an independent
+cross-provider review. It raised 7 findings; all 7 were verified against the code and fixed. The
+pattern worth recording: **three of the seven were the same failure mode — a fix applied to the one
+path the original finding named, while sibling paths on the same hazard were left untouched.**
+
+- **`RecursionError` on untrusted reviewer stdout reached three more parsers.** The first round
+  hardened `_claude_envelope` and `_codex_stream_meta` and stopped there; `_unwrap_error`, the codex
+  JSONL error scan in `_extract_backend_error`, and `_parse_reviewer_json` still caught only
+  `json.JSONDecodeError`, which `RecursionError` does not subclass. All three now classify it.
+  `_parse_reviewer_json` normalizes it to a `JSONDecodeError` so every caller — not just today's
+  one, which already caught it — treats it as `invalid_response`, which is never a false pass.
+- **The timing store's no-artifact-content guarantee is now per FIELD, and stated exactly.** The
+  value sanitizer bounded types and lengths but was shape-only, so a dict handed to a scalar field
+  would have stored its KEYS verbatim — artifact text arriving as `{"<text>": 1}`. Values are now
+  typed by destination field (`phases` takes a bounded number map; every other field takes only a
+  finite bounded number, bool, ≤200-char string, or None). The docs no longer make the absolute
+  claim: `model_resolved` and `backend_version` are read from the reviewer CLI's own output, so a
+  misbehaving backend can place up to 200 characters in those two — bounded and attributable, not
+  impossible.
+- **`--wall` now covers the version probe.** The first round moved deadline creation ahead of the
+  probe, but the probe still used a fixed 20s timeout and never received the budget, so a small wall
+  could be overrun before the reviewer was spawned. `backend_version` now takes the remaining budget
+  and is bounded by the smaller of it and 20s, skipping entirely when nothing is left. The `--wall`
+  help discloses that bounded process teardown may still add a few seconds past the cap.
+- **`performance` no longer pools incompatible histories.** The effort/speed match landed in
+  `recommend_wall` but the report bypassed it by passing pre-grouped `rows=`, so the number the
+  operator actually SEES still mixed low- and high-effort runs. The report groups on the same four
+  keys the library fits on, and labels each group with the settings it was measured at.
+- **Non-finite metric values no longer crash the report.** "Filtered to finite numbers" was
+  implemented as an `isinstance` check; NaN and Infinity are floats and passed it, raising
+  `ValueError`/`OverflowError` at the `int()` that formats them. `_nums` and `_percentile` now test
+  `math.isfinite` and exclude bools.
+- **`record_metrics` keeps its never-raises contract.** A huge int overflowed `math.isfinite`, and
+  `OverflowError` is an `ArithmeticError` — not in the caught tuple — so it escaped from the one
+  function documented TOTAL, on the failure paths whose diagnosis it exists to serve. Integers are
+  bounded before conversion and the handler now catches `ArithmeticError`.
+- **Two regression checks did not pin their fixes.** The round-1 floor test asserted
+  `recommended_wall_s >= 250` on a case where the unfloored path already returned ~375, so it could
+  not tell fixed from reverted. It is replaced with a case where the floor actually binds (long runs
+  on large artifacts, queried for a small one: ~440s unfloored vs a 800s observed p90). Every new
+  check in this round was verified to FAIL against the code with its fix removed.
+
+
+### Timeout diagnosability, wall recommendations, and duration telemetry (issue #11)
+A review that blew its `--wall` reported only `backend wall_timeout after 605s` — no phase, no
+evidence the provider had ever responded, no resolved model, and no next step but a guess. Reported
+against the Claude backend, where a ~10.8K-token code review timed out twice at 605s and a
+~5.7K-token one completed in 594s against a 600s wall. The safety behavior was already correct (a
+timeout was never reported as a pass); what was missing was predictability and diagnosis.
+
+- **A timeout now says where the time went.** Results carry a `telemetry` block: the phase timeline
+  (consent → spawn → first byte → exit → validated), `received_any_bytes`, time to first byte, bytes
+  received, attempt/retry counts, and the resolved model. No bytes before the cap points at startup,
+  auth or a provider queue rather than at the model reasoning — a distinction that previously took a
+  re-run to establish. The supervisor records `first_byte_s`/`bytes_received` on every path,
+  timeouts included.
+- **A payload-aware `--wall` recommendation, before the send.** New `impasse_run.py estimate`
+  (purely local — it sends nothing and needs no consent) and a `wall_advice` block on every result,
+  also printed to stderr when the requested wall looks too short. `basis` states the provenance
+  honestly: **heuristic** is a shipped estimate padded for margin, *not* a measurement of your
+  account; **empirical** means fitted from ≥5 of this machine's own completed runs for that
+  backend+model. An already-exceeded cap raises the floor rather than being averaged in.
+- **A local timing store.** `config_dir()/metrics.jsonl` (`0600`, newest 1000 rows) records duration,
+  payload size, outcome, time-to-first-byte and retry counts for **every** run that reached the
+  backend, failures included — a timeout is the most informative sample there is. It holds **no
+  artifact content**, and that is structural rather than a promise: writes are filtered to a field
+  allowlist. The one content-derived field, the artifact digest, is withheld under `--no-record`/
+  `--raw`. New `impasse_report.py performance` reports it (timeouts counted separately from
+  completions); `performance --forget` deletes it, `IMPASSE_NO_METRICS=1` disables it.
+- **Concrete recovery instead of prose.** A timeout returns ranked options with exact commands, each
+  saying what it changes — the time budget only, the model, reasoning depth, scope, or the
+  independence tier — plus `reusable_result: false`, since a timeout leaves nothing to resume.
+- **The resolved model, not just the requested alias.** The claude backend now runs
+  `--output-format json`, whose envelope reports `modelUsage`, `ttft_ms` and `session_id`; Impasse
+  reads the review from the envelope's `result` and reports `model_resolved` + `model_source`.
+  Non-envelope stdout still parses exactly as before, claiming no resolved model. Codex's event
+  stream names no model (codex-cli 0.148), so codex runs report `requested`/`backend_default` and
+  never overstate. Reviewer CLI versions are recorded so a comparison survives a CLI upgrade.
+- **Tests:** silent-to-the-wall, bytes-then-stall, partial-JSON-then-stall, a live descendant at
+  teardown, recovery-option shape, seed-vs-empirical recommendation, the timeout floor, the metrics
+  allowlist (a planted artifact field is dropped), the `IMPASSE_NO_METRICS` opt-out, envelope model
+  resolution and its fail-soft fallback, and both new CLI surfaces.
+- **Dogfooded, and it paid.** A cross-provider Impasse review of this change (codex, `--effort high`,
+  Fast mode; 24.9K-token diff, completed in 239s against a 1860s recommended wall) raised **11
+  findings, all verified and fixed here** — among them a genuine failure-as-success path (a claude
+  envelope marked `is_error` was only checked when the exit status was non-zero), an overclaiming
+  timeout message (the byte signal was presented as evidence about model progress, which this run's
+  own telemetry disproves — codex's first byte arrived at 0.053s), a metrics allowlist that bounded
+  keys but not value types or lengths, empirical recommendations pooled across mismatched
+  effort/speed, a `RecursionError` escape on deeply nested untrusted backend JSON, and the version
+  probe sitting outside the wall budget. Run record: `issue-11-adversarial-review`.
+- **Deferred:** the issue's opt-in *supervised chunking* for oversized artifacts changes the protocol
+  rather than the runner and is outside its own acceptance criteria — designed, not built, in
+  `docs/proposals/supervised-chunking.md`.
+- **Unrelated fix:** the `resolve_codex_command` ChatGPT.app test asserted a path suffix that a
+  higher-priority Homebrew `codex` install fails and a system-wide `ChatGPT.app` passed for the wrong
+  reason; it now asserts the exact path and skips where an earlier candidate really exists.
+
 ### Multi-host support — Impasse now runs turnkey under Claude Code *and* OpenAI Codex
 Both hosts implement the open [Agent Skills standard](https://agentskills.io); one installation serves
 either, because the code is host-relative at runtime (the host is detected per run, never persisted)

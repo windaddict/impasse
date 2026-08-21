@@ -452,9 +452,13 @@ additional conditions Impasse places on the MIT license:
   sanctions laws, and with your providers' geographic restrictions.
 
 Impasse stores **run records locally** (the config dir's `runs/`) — they hold whatever you sent, so
-treat the local store as sensitive. Impasse itself sends your artifact only to the provider you
-invoke. Delete Impasse's local records with `impasse_report.py forget <id>` or `prune` — this
-removes only Impasse's local copies, not anything already sent to a provider.
+treat the local store as sensitive. It also keeps a **timing store** (`metrics.jsonl`) holding
+durations, payload sizes and outcomes — no artifact content — which is what makes the `--wall`
+recommendation reflect your account rather than a shipped guess. Impasse itself sends your artifact
+only to the provider you invoke. Delete Impasse's local records with `impasse_report.py forget <id>`
+or `prune`, and the timing store with `impasse_report.py performance --forget` (`prune` does not
+clear it); `IMPASSE_NO_METRICS=1` disables timing collection entirely. All of this removes only
+Impasse's local copies, not anything already sent to a provider.
 
 ## Related work
 
@@ -502,8 +506,18 @@ they're kept `0600` and never committed.
 
 Every `show` closes with a **running recap across your reconciled runs** — findings reviewed,
 accepted, refuted with evidence, resolved, and awaiting you — a plain reminder of what independent
-review has surfaced. Deeper longitudinal reporting (trends over time, per-artifact history) is
-still roadmap; each run is fully inspectable on its own.
+review has surfaced.
+
+`performance` reports the other longitudinal view: **how long reviews actually take on your
+machine**, grouped by backend and model, with timeouts counted separately from completions (a
+timeout records when Impasse stopped waiting, not how long the review needed, so folding it into an
+average would understate every future estimate). That history is what
+`scripts/impasse_run.py estimate --artifact-file A.md` uses to recommend a `--wall` before you
+send anything; until ~5 completed runs exist for a backend+model it answers from a shipped estimate
+and says so. This store holds **timings and sizes, not artifact content** — see
+[the security model](docs/security-model.md) for exactly what it keeps — and
+`performance --forget` deletes it. Longitudinal reporting of *findings* (trends in what gets caught,
+per-artifact history) is still roadmap; each run is fully inspectable on its own.
 
 ## Who builds this
 

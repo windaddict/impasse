@@ -46,13 +46,30 @@ under that provider's terms and retention.
   termination bound it; the runner's scratch dir (holding the reviewer's `last-*.txt` output) is
   removed automatically via `shutil.rmtree` in a `finally` on normal cleanup, so you don't clean it
   up by hand — though an abrupt kill (`SIGKILL`) or a host crash can leave one behind.
-  The `*.jsonl`/`*.err` run artifacts may contain artifact content and are `.gitignore`d; the
-  persistent sensitive artifacts are the run records (below).
+  The `*.jsonl`/`*.err` run artifacts may contain artifact content and are `.gitignore`d. Impasse
+  writes two persistent local stores: the run records below (which DO hold artifact content) and
+  the timing store (which does not).
 - **Run records (the audit trail) contain artifact content.** Each run's reviewer-response and
   reconciliation-result are persisted under `config_dir()/runs/<id>/` (`0600` files, `0700`
   dir), never committed. This is deliberate — a governance tool should keep receipts — but it
   means the review's content lives on disk. Use `impasse_report.py forget <id>` (or `--no-record`
   on the run) to remove/skip a record, and be mindful when the artifact is sensitive.
+- **The timing store contains no artifact content.** `config_dir()/metrics.jsonl` (`0600`, capped
+  at the most recent 1000 rows) records how long each review took — backend, model, effort, payload
+  SIZE in bytes/estimated tokens, wall/idle settings, outcome, time to first byte, and retry counts
+  — so `impasse_run.py estimate` can recommend a `--wall` from your own history rather than a
+  shipped constant. The exact guarantee is structural, not a promise: `record_metrics` writes only
+  an allowlist of fields and types each one BY NAME, so artifact text cannot reach this file even
+  through a caller mistake — a dict handed to a scalar field is dropped rather than stored as keys.
+  The guarantee is about *callers*, not about the *backend*: two fields (`model_resolved`,
+  `backend_version`) are read from the reviewer CLI's own output, so a misbehaving backend can place
+  up to 200 characters of its choosing in them. Bounded and attributable, not impossible; set
+  `IMPASSE_NO_METRICS=1` to disable the store entirely. One content-DERIVED field is stored, the artifact's sha256 digest, which correlates
+  repeat attempts on the same artifact; it is the same digest already shown in the consent manifest,
+  and it is withheld entirely under `--no-record`/`--raw`. A digest confirms whether a *known*
+  artifact was reviewed — it does not reveal an unknown one. Delete the store with
+  `impasse_report.py performance --forget`, or set `IMPASSE_NO_METRICS=1` to record nothing.
+  Note that this store outlives individual run records: pruning records does not clear timings.
 
 ## Independence is limited, not guaranteed
 

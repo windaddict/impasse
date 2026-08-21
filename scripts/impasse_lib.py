@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -703,13 +705,13 @@ def get_default_speed(backend: str) -> str | None:
     return s if s in ALLOWED_SPEED else None
 
 
-def _settings_lock():
-    """An interprocess lock guarding the settings read-modify-write, so two hosts (e.g. a Claude Code
-    and a Codex host sharing one config dir) can't lose an update via interleaved read-modify-replace
+def _interprocess_lock(lock_name: str):
+    """An exclusive interprocess lock file in the config dir, so two hosts (e.g. a Claude Code and a
+    Codex host sharing one config dir) can't lose an update via interleaved read-modify-replace
     (core-review F005). POSIX flock (like the process-group teardown, POSIX-only); a no-op context on
     platforms without fcntl. Returns a context manager."""
     ensure_config_dir()
-    lock_path = os.path.join(config_dir(), "settings.lock")
+    lock_path = os.path.join(config_dir(), lock_name)
     try:
         import fcntl
     except ImportError:
@@ -728,6 +730,11 @@ def _settings_lock():
             finally:
                 os.close(self._fd)
     return _Lock()
+
+
+def _settings_lock():
+    """The interprocess lock guarding the settings read-modify-write (see _interprocess_lock)."""
+    return _interprocess_lock("settings.lock")
 
 
 def _set_default_setting(key: str, backend: str, value: str | None) -> None:
@@ -898,3 +905,453 @@ def forget_run(run_id: str) -> bool:
         shutil.rmtree(d, ignore_errors=True)
         return not os.path.exists(d)
     return False
+
+
+# --- Duration telemetry: the metrics store ---------------------------------------------------
+#
+# WHAT IT'S FOR: a review can take 3 minutes or 30, and before this store Impasse had no way to tell
+# an operator which — so a wall-clock cap was a guess, and a timeout threw away the evidence needed
+# to guess better next time. This is a small append-only log of HOW LONG runs took, kept so the
+# recommendation engine below can answer "how long will THIS review take on YOUR account" from your
+# own history instead of a shipped constant.
+#
+# It is deliberately NOT a second copy of the run record. A run record (runs/<id>/) holds the
+# reviewed content; this holds sizes, timings and outcomes. The privacy guarantee is STRUCTURAL, not
+# a promise: `record_metrics` writes only the allowlisted fields in `_METRIC_FIELDS`, and types each
+# one by name, so a caller cannot put artifact text here even by mistake. Two fields
+# (`model_resolved`, `backend_version`) are read from the reviewer CLI's own output and so are
+# backend-controlled within a 200-character bound -- see record_metrics for the exact guarantee. The one content-derived value stored is
+# `artifact_digest` — a hash, not content; it already appears in the consent manifest and the run
+# record, and it is what lets repeat attempts on the same artifact be correlated. A digest confirms
+# whether a KNOWN artifact was reviewed; it does not reveal an unknown one.
+#
+# Failed runs are recorded too — a timeout is the single most informative sample for predicting the
+# next wall, so dropping it would blind exactly the case this exists to fix.
+
+METRICS_FILENAME = "metrics.jsonl"
+_MAX_METRICS_RECORDS = 1000     # bound the store; oldest entries are dropped past this
+_METRICS_TRIM_SLACK = 200       # rewrite only once this many past the cap (amortize the rewrite)
+_MAX_METRICS_BYTES = 8_000_000  # refuse to read a pathologically large store into memory
+
+# The write allowlist. Adding a key here is the ONLY way a field reaches disk — keep it scalar and
+# content-free (see the privacy note above).
+_METRIC_FIELDS = frozenset({
+    "ts", "kind", "backend", "provider", "host", "independence",
+    "model_requested", "model_resolved", "model_source", "backend_version",
+    "effort", "speed",
+    "artifact_bytes", "artifact_tokens_est", "instruction_tokens_est", "schema_tokens_est",
+    "artifact_digest",
+    "wall_s", "idle_s",
+    "outcome", "failure_code", "termination",
+    "duration_s", "ttfb_s", "bytes_received",
+    "phases", "transient_retries", "output_retries", "findings_count",
+})
+
+
+def metrics_path() -> str:
+    return os.path.join(config_dir(), METRICS_FILENAME)
+
+
+_MAX_METRIC_STR = 200     # bound every stored string; see _sanitize_metric_value
+_MAX_METRIC_PHASES = 80   # bound the one nested map that is stored
+
+
+# `phases` is the ONE field stored as a nested map ({phase_name: seconds}); every other allowlisted
+# field is a scalar. Typing them separately is what makes the no-content guarantee structural: a
+# scalar field cannot smuggle text in as dictionary KEYS, which a shape-only check would have let
+# through (a dict's keys are values too).
+_METRIC_MAP_FIELDS = frozenset({"phases"})
+_MAX_METRIC_INT = 2 ** 53   # bound ints as well as strings: an unbounded int is unbounded TEXT on
+                            # disk once serialized, and float() on a huge one raises OverflowError.
+
+
+def _sanitize_metric_value(v, field: str | None = None):
+    """Coerce one metric value to a bounded, content-free shape, or None to drop it.
+
+    TOTAL: never raises, for any input. `record_metrics` calls this on every review's exit path,
+    including the failure paths whose diagnosis it exists to serve.
+
+    Keys alone are not a no-content guarantee: a value reaching an allowed key still has to be
+    bounded in TYPE and LENGTH, or an unbounded backend-supplied string (e.g. a model name read out
+    of the reviewer CLI's own output) could carry arbitrary text into the store and, incidentally,
+    grow a single row past the trim threshold.
+
+    Typing is PER FIELD, not merely per shape. `field` names the destination column; the one map
+    field (`phases`) accepts only a bounded {name: number} map, and every other field accepts only a
+    finite number, a bool, a short string, or None. Without that split, a dict handed to a scalar
+    field would store its KEYS verbatim — artifact text arriving as `{"<artifact text>": 1}` — which
+    is exactly the hole the shape-only version left open. An unknown/None `field` is treated as
+    scalar: the conservative side, since unknown keys are dropped by `record_metrics` anyway.
+    """
+    is_map_field = field in _METRIC_MAP_FIELDS
+    if isinstance(v, dict):
+        if not is_map_field:
+            return None     # a scalar field never takes a map: its keys would be stored text
+        out = {}
+        for k, val in list(v.items())[:_MAX_METRIC_PHASES]:
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                continue
+            if isinstance(val, int) and abs(val) > _MAX_METRIC_INT:
+                continue    # bounded BEFORE float(): math.isfinite on a huge int raises OverflowError
+            if not math.isfinite(val):
+                continue
+            out[str(k)[:60]] = val
+        return out
+    if is_map_field:
+        return None         # and the map field takes nothing else
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v if abs(v) <= _MAX_METRIC_INT else None
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, str):
+        return v[:_MAX_METRIC_STR]
+    return None
+
+
+def record_metrics(entry: dict) -> bool:
+    """Append ONE run's timing/outcome metrics to the local store. Returns True if written.
+
+    TOTAL: never raises. This runs on every review's exit path — including the failure paths whose
+    diagnosis it exists to serve — so a full disk or a read-only config dir must degrade to "no
+    telemetry", never turn a reviewer timeout into a traceback.
+
+    The no-artifact-content guarantee is structural on BOTH axes: only `_METRIC_FIELDS` keys are
+    written, and every value is passed through `_sanitize_metric_value` WITH ITS FIELD NAME, so each
+    column is typed — the one map field (`phases`) takes a bounded {name: number} map and every other
+    field takes only a finite bounded number, a bool, a <=200-char string, or None. A caller cannot
+    put artifact text here even by mistake, and no single row can grow without bound.
+
+    THE EXACT GUARANTEE: no caller can write artifact content, and every stored string is bounded at
+    200 characters. It is NOT a claim that stored strings are backend-independent — `model_resolved`
+    and `backend_version` are read from the reviewer CLI's own output, so a misbehaving backend can
+    place up to 200 characters of its choosing in those two fields. Bounded and attributable, not
+    impossible; `--no-record`/`--raw` withhold the digest, and IMPASSE_NO_METRICS=1 disables the
+    store entirely.
+    """
+    try:
+        row = {}
+        for k, v in entry.items():
+            if k not in _METRIC_FIELDS:
+                continue
+            sv = _sanitize_metric_value(v, field=k)
+            if sv is not None or v is None:
+                row[k] = sv
+        if not row:
+            return False
+        row.setdefault("ts", time.time())
+        line = json.dumps(row, separators=(",", ":")) + "\n"
+        ensure_config_dir()
+        path = metrics_path()
+        with _interprocess_lock("metrics.lock"):
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                os.close(fd)
+            try:
+                os.chmod(path, 0o600)   # best-effort; a pre-existing file may have looser bits
+            except OSError:
+                pass
+            _trim_metrics(path)
+        return True
+    except (OSError, ValueError, TypeError, ArithmeticError):
+        # ArithmeticError too (OverflowError is one, and is NOT a ValueError): this function
+        # documents itself TOTAL, and it runs on the failure exit paths where a traceback would
+        # replace the diagnosis the operator came for.
+        return False
+
+
+def _read_metrics_tail(path: str) -> bytes:
+    """Read at most _MAX_METRICS_BYTES from the END of the store, dropping a leading partial line.
+
+    The TAIL, not the head: this is a rolling log whose newest rows are the ones that matter — for
+    trimming (keep the newest) and for percentiles (describe recent behavior). Reading the head of an
+    oversized file would make trimming discard the newest rows and make `performance` report the
+    oldest, both silently.
+    """
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        if size > _MAX_METRICS_BYTES:
+            f.seek(size - _MAX_METRICS_BYTES)
+            data = f.read()
+            nl = data.find(b"\n")   # the seek lands mid-row; drop that partial line
+            return data[nl + 1:] if nl != -1 else b""
+        return f.read()
+
+
+def _trim_metrics(path: str) -> None:
+    """Drop the oldest rows once the store drifts past its cap. Called under the metrics lock.
+    Amortized: only rewrites once _METRICS_TRIM_SLACK rows past the cap, not on every append."""
+    try:
+        lines = _read_metrics_tail(path).splitlines(keepends=True)
+        if len(lines) <= _MAX_METRICS_RECORDS + _METRICS_TRIM_SLACK:
+            return
+        keep = lines[-_MAX_METRICS_RECORDS:]
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".metrics-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(b"".join(keep))
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            fsync_dir(os.path.dirname(path))
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    except OSError:
+        return
+
+
+def load_metrics(*, backend: str | None = None, model: str | None = None,
+                 effort: str | None = None, speed: str | None = None) -> list:
+    """Read the metrics store, newest last, optionally filtered. Malformed lines are SKIPPED rather
+    than fatal — a partially-written row (crash mid-append) must not break `performance` reporting.
+
+    `model` matches either the resolved or the requested model, so filtering by the name an operator
+    actually typed still finds runs whose backend later reported a fully-qualified id.
+
+    `effort`/`speed` matter because they change duration substantially: pooling a history of
+    `--effort low` runs into an estimate for `--effort high` would under-recommend the wall. They
+    filter only when given, so a caller that doesn't care still sees everything.
+    """
+    try:
+        data = _read_metrics_tail(metrics_path())
+    except OSError:
+        return []
+    rows = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if backend and row.get("backend") != backend:
+            continue
+        if model and model not in (row.get("model_resolved"), row.get("model_requested")):
+            continue
+        if effort is not None and row.get("effort") != effort:
+            continue
+        if speed is not None and row.get("speed") != speed:
+            continue
+        rows.append(row)
+    return rows
+
+
+def forget_metrics() -> bool:
+    """Delete the whole metrics store. Returns True if a file was removed."""
+    try:
+        os.remove(metrics_path())
+        return True
+    except OSError:
+        return False
+
+
+def _percentile(values: list, q: float) -> float | None:
+    """Nearest-rank percentile of a list of numbers (q in 0..1). None for an empty list. Nearest-rank
+    (not interpolated) is deliberate: on the handful of samples this store realistically holds, an
+    interpolated value invents a duration nobody observed."""
+    vals = sorted(v for v in values
+                  if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
+    if not vals:
+        return None
+    k = max(0, min(len(vals) - 1, int(math.ceil(q * len(vals))) - 1))
+    return float(vals[k])
+
+
+# --- Wall-clock recommendation ---------------------------------------------------------------
+#
+# WHAT IT'S FOR: turning "how long should --wall be?" from a guess into a number, so an operator
+# doesn't discover a too-small cap by burning a full paid review on a timeout. It answers from the
+# operator's own history when there is enough of it, and from a coarse shipped table when there
+# isn't — and always says WHICH, because a seeded constant and a measured percentile deserve very
+# different amounts of trust.
+#
+# HONESTY BOUND: the shipped tables below are NOT measurements of your account. They are coarse
+# seeds seeded from a handful of observed runs (issue #11: a ~5.7K-token code review took 594s on
+# Claude Sonnet, and the Claude backend default exceeded 605s at both ~5.7K and ~10.8K tokens),
+# padded for margin. They are a starting point that keeps a first run from timing out, not a
+# prediction. Once `_MIN_EMPIRICAL_SAMPLES` completed runs for a backend+model exist in the metrics
+# store, the empirical fit supersedes them and `basis` says "empirical".
+
+# Rough characters-per-token for English prose and code. A crude divisor, NOT a tokenizer — it is
+# used only to size a timeout, where being 20% off changes nothing that matters.
+_BYTES_PER_TOKEN = 4
+
+# Per-backend seeds: (base_s, seconds_per_1k_artifact_tokens). `base_s` covers CLI startup, auth,
+# connection and the fixed instruction+schema overhead; the rate covers reading the artifact and
+# reasoning over it.
+_WALL_SEEDS = {
+    "claude": (300.0, 70.0),
+    "codex": (180.0, 40.0),
+}
+_WALL_SEED_FALLBACK = (300.0, 70.0)   # an unknown backend gets the slower profile, never the faster
+
+# Reasoning effort multiplies thinking time (codex only — the claude backend has no effort knob).
+_EFFORT_MULTIPLIER = {"none": 0.6, "low": 0.75, "medium": 1.0, "high": 1.6, "xhigh": 2.2}
+# Fast mode is a higher serving tier: real, but modest and not guaranteed. Claim only a small gain.
+_SPEED_MULTIPLIER = {"standard": 1.0, "fast": 0.8}
+
+_WALL_SAFETY_MARGIN = 1.25    # headroom over the central estimate — a timeout costs a whole review
+_WALL_FLOOR_S = 300.0         # never recommend below the CLI default; startup+auth alone can eat minutes
+_WALL_CEILING_S = 5400.0      # 90 min: past here, splitting the artifact beats waiting longer
+_WALL_ROUNDING_S = 60.0       # recommendations are round minutes — false precision helps nobody
+_MIN_EMPIRICAL_SAMPLES = 5    # below this, one slow run would dominate the fit; keep the seed table
+
+
+def estimate_tokens(nbytes: int) -> int:
+    """A crude token estimate from a byte count (bytes / 4). NOT a tokenizer and not exact — it
+    exists to size a timeout and to describe payloads in a unit operators think in."""
+    try:
+        return max(0, int(nbytes) // _BYTES_PER_TOKEN)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _empirical_rate(rows: list, base_s: float) -> tuple:
+    """Fit seconds-per-1k-artifact-tokens from COMPLETED runs in `rows`.
+
+    Returns (rate_p90, sample_count, p50_duration, p90_duration, median_tokens), with rate_p90 None
+    when there aren't enough completed samples. Normalizing to a per-1k-token RATE (rather than
+    averaging raw durations) is what lets a history of small reviews inform a larger one — but only
+    so far, which is why `median_tokens` comes back too: the caller needs to know how far it is
+    extrapolating beyond anything actually observed.
+
+    Timed-out runs are deliberately EXCLUDED from the fit: a timeout records when we stopped
+    waiting, not how long the review needed, so treating it as a duration would bias every future
+    recommendation DOWNWARD — the exact failure this feature exists to prevent. They are not
+    ignored, though: `recommend_wall` separately floors its answer above the longest one.
+    """
+    done = [r for r in rows if r.get("outcome") == "completed"]
+    durations = [r.get("duration_s") for r in done if isinstance(r.get("duration_s"), (int, float))]
+    toks = [r.get("artifact_tokens_est") for r in done
+            if isinstance(r.get("artifact_tokens_est"), (int, float))]
+    median_tokens = _percentile(toks, 0.5)
+    rates = []
+    for r in done:
+        d = r.get("duration_s")
+        tok = r.get("artifact_tokens_est")
+        if not isinstance(d, (int, float)) or not isinstance(tok, (int, float)):
+            continue
+        tok_k = max(float(tok) / 1000.0, 0.1)   # floor so a tiny artifact can't mint a huge rate
+        rates.append(max(0.0, float(d) - base_s) / tok_k)
+    if len(rates) < _MIN_EMPIRICAL_SAMPLES:
+        return (None, len(done), _percentile(durations, 0.5), _percentile(durations, 0.9),
+                median_tokens)
+    return (_percentile(rates, 0.9), len(done),
+            _percentile(durations, 0.5), _percentile(durations, 0.9), median_tokens)
+
+
+def recommend_wall(*, backend: str, artifact_tokens: int, model: str | None = None,
+                   effort: str | None = None, speed: str | None = None,
+                   rows: list | None = None) -> dict:
+    """Recommend a --wall (seconds) for a review of this size on this backend/model.
+
+    Returns {recommended_wall_s, basis, sample_count, p50_s, p90_s, floor_reason, rationale}, where
+    `basis` is "empirical" (fitted from >= _MIN_EMPIRICAL_SAMPLES of the operator's own completed
+    runs at this backend+model+effort+speed) or "heuristic" (the shipped seed table — a padded
+    starting point, not a measurement of this account). Callers MUST surface `basis`: the two
+    deserve different trust.
+
+    EXACT CLAIM, in each mode. Empirical: "runs recorded on this machine at this backend, model,
+    effort and speed finished inside this, with margin" — it is NOT a claim about artifacts unlike
+    those already seen, which is why an extrapolation beyond observed sizes falls back to the seed
+    and says so. Heuristic: "this is a padded starting point chosen so a first run is unlikely to
+    time out" — it is not a measurement of anything. Neither is a guarantee: no wall can bound a
+    provider-side queue, and the ceiling clamp below can return a value known to be insufficient
+    (it says so when it does).
+
+    `rows` are prior metrics rows to fit from; pass None to read the store, which filters to this
+    backend+model+effort+speed. A caller supplying `rows` is responsible for that filtering itself.
+    """
+    base_s, seed_rate = _WALL_SEEDS.get(backend, _WALL_SEED_FALLBACK)
+    if rows is None:
+        rows = load_metrics(backend=backend, model=model, effort=effort, speed=speed)
+    tok_k = max(float(artifact_tokens) / 1000.0, 0.0)
+
+    rate_p90, sample_count, p50, p90, median_tokens = _empirical_rate(rows, base_s)
+
+    # The shipped estimate, always computed — it is the fallback AND the floor when the empirical
+    # fit is asked to extrapolate (below). Effort/speed scale the REASONING half only; CLI startup
+    # and auth don't get faster with a lower effort.
+    seed_est = base_s + seed_rate * tok_k
+    seed_est = base_s + (seed_est - base_s) * _EFFORT_MULTIPLIER.get(effort or "medium", 1.0)
+    seed_est = base_s + (seed_est - base_s) * _SPEED_MULTIPLIER.get(speed or "standard", 1.0)
+
+    extrapolated = False
+    if rate_p90 is not None:
+        basis = "empirical"
+        # Effort/speed are NOT re-applied here: load_metrics filtered the history to this same
+        # effort+speed, so the samples already embody them. (Re-applying a multiplier on top of
+        # matched samples would double-count.)
+        est = base_s + rate_p90 * tok_k
+        # Never recommend below a duration actually observed at these settings. The rate fit
+        # subtracts a fixed `base_s` intercept, so a history of runs SHORTER than that intercept
+        # fits a rate of exactly zero and would otherwise collapse the estimate to the base alone.
+        if p90 is not None:
+            est = max(est, p90)
+        # A history of small, fast reviews fits a near-zero rate (every duration sits below base_s),
+        # which would confidently recommend a short wall for an artifact far larger than anything
+        # measured — the exact failure this feature exists to prevent. Beyond ~2x the largest
+        # typical observed size there is no local evidence, so fall back to the shipped estimate
+        # whenever it is higher, and say that the number is an extrapolation.
+        if median_tokens and artifact_tokens > 2 * median_tokens and seed_est > est:
+            est, extrapolated = seed_est, True
+    else:
+        basis, est = "heuristic", seed_est
+    rec = est * _WALL_SAFETY_MARGIN
+
+    # A run that ALREADY timed out proves the review needs more than that cap. Never recommend a
+    # value a comparable artifact has been observed to exceed — that would re-buy the same failure.
+    # "Comparable" is bounded on BOTH sides (0.5x-2x this artifact): a timeout on something ten
+    # times larger says nothing useful about this review and would inflate every estimate.
+    floor_reason = None
+    timeouts = [r.get("wall_s") for r in rows
+                if r.get("outcome") == "timeout" and isinstance(r.get("wall_s"), (int, float))
+                and isinstance(r.get("artifact_tokens_est"), (int, float))
+                and 0.5 * artifact_tokens <= r["artifact_tokens_est"] <= 2.0 * artifact_tokens]
+    worst = max(timeouts) if timeouts else None
+    if worst is not None and rec <= worst * 1.2:
+        rec = worst * 1.5
+        floor_reason = (f"a comparable artifact already timed out at {worst:.0f}s, so the "
+                        f"recommendation is raised above it")
+
+    rec = max(_WALL_FLOOR_S, rec)
+    capped = rec > _WALL_CEILING_S
+    rec = min(_WALL_CEILING_S, rec)
+    rec = math.ceil(rec / _WALL_ROUNDING_S) * _WALL_ROUNDING_S
+    # The ceiling can clamp BELOW a cap already known to be insufficient. Say so plainly rather than
+    # letting the floor_reason above imply a guarantee the returned number no longer keeps.
+    if worst is not None and rec <= worst:
+        floor_reason = (f"a comparable artifact already timed out at {worst:.0f}s, and the "
+                        f"{_WALL_CEILING_S:.0f}s ceiling clamps the recommendation BELOW that — "
+                        "this wall is not expected to be enough; split the artifact instead")
+
+    if basis == "empirical":
+        rationale = (f"from {sample_count} completed {backend}"
+                     f"{'/' + model if model else ''} run(s) on this machine: "
+                     f"p50 {p50:.0f}s, p90 {p90:.0f}s")
+        if extrapolated:
+            rationale += (f"; but this artifact (~{artifact_tokens} tokens) is far larger than "
+                          f"those runs (~{median_tokens:.0f} tokens typical), so the shipped "
+                          "estimate is used instead — there is no local evidence at this size")
+    else:
+        rationale = (f"no local history for {backend}{'/' + model if model else ''} yet "
+                     f"({sample_count} completed run(s), need {_MIN_EMPIRICAL_SAMPLES}) — "
+                     "using the shipped estimate, which is a padded starting point, not a "
+                     "measurement of this account")
+    if capped:
+        rationale += (f"; capped at {_WALL_CEILING_S:.0f}s — past this, split the artifact rather "
+                      "than wait longer")
+    return {"recommended_wall_s": float(rec), "basis": basis, "sample_count": sample_count,
+            "p50_s": p50, "p90_s": p90, "floor_reason": floor_reason, "rationale": rationale,
+            "artifact_tokens_est": int(artifact_tokens)}

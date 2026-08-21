@@ -43,7 +43,12 @@ are version observations, not a durable API):
   pipe. The runner writes the artifact and closes stdin (or uses `/dev/null`). This is why the
   artifact is piped, not passed as an argv element (also avoids `ARG_MAX`).
 - **`--json`** streams JSONL events; **`--output-last-message`** writes the final answer to a
-  file (the runner reads the answer there and treats the JSONL as telemetry).
+  file (the runner reads the answer there and reads run metadata out of the JSONL). From the event
+  stream the runner recovers the `thread_id` (recorded as the run's request id) and, on a failure,
+  the structured error. As of `codex-cli` 0.148 the stream does **not** name the model that ran, so
+  a codex review reports the model that was *requested* (`model_source: requested`, or
+  `backend_default` when no `--model` was given) and never claims a resolved one — unlike the
+  claude backend, whose envelope does report it. See `docs/glossary.md` on resolved vs requested.
 - **NOT `--output-schema`.** It routes to OpenAI's structured-output mode, which requires a
   *restricted* schema (every property in `required`; no `oneOf`/`allOf`/`if-then`/`minLength`/
   `pattern`). The rich `reviewer-response.v1.json` doesn't qualify (the API returns

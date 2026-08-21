@@ -6,12 +6,18 @@ scannable report that shows the back-and-forth between the two models, the decis
 on each finding, a tally, and the questions escalated to the operator.
 
 Run records contain artifact content — they are sensitive (0600, gitignored). `forget`
-deletes one.
+deletes one. The separate TIMING store (`performance`) holds no artifact content — only
+durations, sizes and outcomes — and is deleted independently.
 
 CLI:
   impasse_report.py list                          # past runs (newest first)
   impasse_report.py show <run_id>                 # the report for one run
+  impasse_report.py findings <file>               # a reviewer-response's raw (UNVERIFIED) findings
+  impasse_report.py escalations <file>            # the deadlocks awaiting the operator, in full
   impasse_report.py save-reconciliation <file>    # persist a reconciliation-result under its review_id
+  impasse_report.py open                          # runs with decisions nobody has answered
+  impasse_report.py prune --older-than N          # delete records older than N days
+  impasse_report.py performance                   # how long reviews take here (timings only)
   impasse_report.py forget <run_id>               # delete a run record
 """
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -409,6 +416,103 @@ def lifetime_recap() -> str:
     return "\n".join(lines)
 
 
+def _fmt_s(v) -> str:
+    return "—" if not isinstance(v, (int, float)) else f"{v:.0f}s"
+
+
+def render_performance(rows: list) -> str:
+    """WHAT IT'S FOR: answering "how long does a review actually take on MY account, and what
+    --wall should I give the next one" from recorded runs instead of a shipped guess.
+
+    Groups by backend + model + effort + speed — the same four keys `recommend_wall` fits on. Model
+    and backend move duration most, but effort and speed move it enough that pooling them makes the
+    displayed recommendation meaningless: a history of low-effort runs would size a high-effort
+    review far too small. The library learned this in issue #11; this report has to group the same
+    way or it silently undoes the filter when it passes `rows=` (which bypasses the store's own
+    filtering — see `recommend_wall`).
+
+    Timeouts are reported SEPARATELY from completions — a timeout records when we stopped waiting,
+    not how long the review needed, so folding it into a duration percentile would understate every
+    future estimate.
+    """
+    if not rows:
+        return ("⏱️  No run timings recorded yet.\n"
+                "    Timings are recorded automatically as you run reviews; once ~5 runs exist for a "
+                "backend+model,\n    `impasse_run.py estimate` switches from the shipped estimate to "
+                "your own measurements.")
+    groups = {}
+    for r in rows:
+        key = (r.get("backend") or "?",
+               r.get("model_resolved") or r.get("model_requested") or "(backend default)",
+               r.get("effort"), r.get("speed"))
+        groups.setdefault(key, []).append(r)
+
+    out = [f"⏱️  Impasse performance — {len(rows)} run(s) recorded",
+           f"    store: {lib.metrics_path()} (0600) — timings and sizes; no artifact content "
+           f"(model/version strings come from the backend, bounded to 200 chars).",
+           "    `performance --forget` deletes it.",
+           "─" * 78]
+    for (backend, model, effort, speed), rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        done = [r for r in rs if r.get("outcome") == "completed"]
+        timeouts = [r for r in rs if r.get("outcome") == "timeout"]
+        errors = [r for r in rs if r.get("outcome") not in ("completed", "timeout")]
+        # Filter to real numbers at the source. A row is a hand-editable file on disk that a crash
+        # can also truncate, so a null or a string where a duration belongs must render as "—",
+        # never raise out of a report the operator ran to diagnose something else.
+        def _nums(rows_, key):
+            # isfinite, not just isinstance: NaN/Infinity ARE floats, and they survive percentile
+            # arithmetic only to raise ValueError/OverflowError at the int() that formats them.
+            return [r.get(key) for r in rows_
+                    if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)
+                    and math.isfinite(r.get(key))]
+        durs = _nums(done, "duration_s")
+        ttfbs = _nums(done, "ttfb_s")
+        toks = _nums(done, "artifact_tokens_est")
+        # `model_source` is the honesty flag: "requested" means an alias/flag we sent, which the
+        # backend never confirmed — two such rows may be different models pooled under one name.
+        srcs = {r.get("model_source") for r in rs}
+        label = f"{_clean(backend)}/{_clean(model)}"
+        # Name the settings this group is fitted at: the recommendation below is only valid for
+        # them, and an unlabelled number invites reuse at settings it was never measured under.
+        _knobs = []
+        if effort:
+            _knobs.append(f"effort {_clean(effort)}")
+        if speed:
+            _knobs.append(f"speed {_clean(speed)}")
+        label += f"  [{' · '.join(_knobs)}]" if _knobs else "  [effort/speed unrecorded]"
+        if srcs and srcs <= {"requested", "backend_default"}:
+            label += "  (requested, not confirmed by the backend)"
+        line = f"  {label}\n     {len(rs)} run(s) · {len(done)} completed"
+        if timeouts:
+            line += f" · ⏰ {len(timeouts)} timed out"
+        if errors:
+            line += f" · ⚠️ {len(errors)} error"
+        out.append(line)
+        if done:
+            _ttfb50, _tok50 = lib._percentile(ttfbs, 0.5), lib._percentile(toks, 0.5)
+            out.append(f"     duration p50 {_fmt_s(lib._percentile(durs, 0.5))} · "
+                       f"p90 {_fmt_s(lib._percentile(durs, 0.9))}"
+                       + (f" · first byte p50 {_ttfb50:.1f}s" if _ttfb50 is not None else "")
+                       + (f" · artifact p50 ~{_tok50:.0f} tokens" if _tok50 is not None else ""))
+            median_tokens = int(_tok50 or 0)
+            # rs is already filtered to one backend/model/effort/speed by the group key above,
+            # which is the filtering `recommend_wall` documents as the caller's job when rows= is
+            # passed. Grouping and fitting must stay on the same four keys.
+            rec = lib.recommend_wall(backend=backend, artifact_tokens=median_tokens,
+                                     model=None if model == "(backend default)" else model,
+                                     effort=effort, speed=speed, rows=rs)
+            out.append(f"     → for a ~{median_tokens}-token review: --wall "
+                       f"{rec['recommended_wall_s']:.0f}s ({rec['basis']})")
+        _t_walls = [t.get("wall_s") for t in timeouts
+                    if isinstance(t.get("wall_s"), (int, float))
+                    and not isinstance(t.get("wall_s"), bool) and math.isfinite(t.get("wall_s"))]
+        if _t_walls:
+            out.append(f"     ⏰ longest cap already exceeded: {max(_t_walls):.0f}s — a retry needs "
+                       "more than that, not the same again")
+        out.append("─" * 78)
+    return "\n".join(out)
+
+
 def _open_escalations(rec: dict) -> list:
     """Items still deadlocked — an escalation the operator hasn't resolved yet. Once the
     operator decides, the host re-saves the reconciliation with that item moved to
@@ -466,6 +570,12 @@ def _main(argv=None) -> int:
     pr = sub.add_parser("prune")
     pr.add_argument("--older-than", type=int, required=True, metavar="DAYS", help="delete records older than N days")
     pr.add_argument("--include-open", action="store_true", help="also delete runs with unresolved escalations")
+    pf = sub.add_parser("performance", help="how long reviews actually take on this machine, per "
+                                            "backend+model — the basis for the --wall recommendation")
+    pf.add_argument("--backend", default=None, choices=["codex", "claude"], help="only this backend")
+    pf.add_argument("--model", default=None, help="only this model (matches requested or resolved)")
+    pf.add_argument("--json", action="store_true", help="emit the raw metric rows instead of a report")
+    pf.add_argument("--forget", action="store_true", help="delete the whole local timing store")
     args = ap.parse_args(argv)
 
     if args.cmd == "list":
@@ -507,6 +617,18 @@ def _main(argv=None) -> int:
         if kept:
             msg += f"; kept {len(kept)} with open escalations (use --include-open to remove)"
         print(msg)
+        return 0
+    if args.cmd == "performance":
+        if args.forget:
+            # A separate opt-in from `forget`/`prune`: this store outlives individual run records
+            # (they can be pruned while their timings remain), so it needs its own delete.
+            print("timing store deleted" if lib.forget_metrics() else "no timing store on disk")
+            return 0
+        rows = lib.load_metrics(backend=args.backend, model=args.model)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        print(render_performance(rows))
         return 0
     if args.cmd == "show":
         print(render(lib.load_run(args.run_id)))
