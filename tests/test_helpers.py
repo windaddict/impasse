@@ -1343,7 +1343,8 @@ def main() -> int:
                     # Literal, NOT lib.KNOWN_HOSTS: an oracle that reads the production table can
                     # never contradict it, which is the whole point of an independent truth table.
                     # Update this list deliberately when a host is added.
-                    if override not in ("claude", "codex", "gemini", "grok", "cursor", "other"):
+                    if override not in ("claude", "codex", "gemini", "grok", "composer",
+                                        "cursor", "other"):
                         return "unknown"
                     if A and A != {override}:
                         return "unknown"
@@ -2368,6 +2369,53 @@ def main() -> int:
               and _hd_grok["confidence"] == "asserted",
               "grok: IMPASSE_HOST=grok is accepted as an ASSERTED host")
         os.environ.pop("IMPASSE_HOST", None)
+
+        # COMPOSER vs AUTO — the distinction the whole Cursor adapter turns on. `composer` is a
+        # real model from a real organization (Anysphere), so it is attributable. `cursor` is the
+        # AUTO ROUTER, which is not a lab at all and picks per request.
+        check("composer" in lib.KNOWN_HOSTS and lib._HOST_PROVIDERS.get("composer") == "Anysphere",
+              "composer: Cursor's own model is attributable to Anysphere")
+        check(lib.independence_tier("composer", "OpenAI") == "cross_provider"
+              and lib.independence_tier("composer", "Anthropic") == "cross_provider",
+              "composer: a Codex/Claude reviewer is cross-provider vs Anysphere")
+        check(lib.independence_tier("composer", "Anysphere") == "same_provider",
+              "composer: an Anysphere reviewer would be same_provider")
+        # THE SAFETY PROPERTY: Auto must NEVER inherit Composer's attributability. They arrive from
+        # the same IDE and are easy to conflate, but Auto's pool contains BOTH reviewer providers —
+        # so a positive tier there could label a Codex reviewer cross-provider on a Codex-routed turn.
+        check(lib.independence_tier("cursor", "OpenAI") == "undetermined"
+              and lib.independence_tier("cursor", "Anthropic") == "undetermined",
+              "AUTO: the cursor host stays undetermined even though composer is attributable")
+        check(lib._HOST_PROVIDERS.get("cursor") is None,
+              "AUTO: the router is deliberately given no provider — it is not a lab")
+        # F001: the provenance uncertainty must ride on the EXECUTABLE claim, not live only in a
+        # source comment and a doc page. A tier is asserted in code; qualifying it elsewhere leaves
+        # the result an operator actually reads unqualified.
+        _comp_notice = lib.independence_notice("cross_provider", "composer", "codex", "OpenAI", "asserted") or ""
+        check("Provenance caveat" in _comp_notice and "not fully public" in _comp_notice,
+              "composer: the positive tier CARRIES its provenance caveat in the notice")
+        check("Provenance caveat" not in (lib.independence_notice(
+                  "cross_provider", "claude", "codex", "OpenAI", "asserted") or ""),
+              "composer: the caveat is host-specific — claude/codex pairings don't inherit it")
+        # Even on a basis that would otherwise owe NO notice, a caveated host must still disclose.
+        check("Provenance caveat" in (lib.independence_notice(
+                  "cross_provider", "composer", "codex", "OpenAI", "strong") or ""),
+              "composer: a caveated host owes a notice even when the basis alone wouldn't")
+
+        # F002: pin the Composer/Auto boundary END TO END through host_detection, not just at
+        # independence_tier with literal strings. Auto and Composer arrive from the same IDE.
+        os.environ["CURSOR_AGENT"] = "1"
+        os.environ["IMPASSE_HOST"] = "composer"
+        _hd_comp = lib.host_detection()
+        check(_hd_comp["host"] == "composer" and _hd_comp["confidence"] == "asserted"
+              and lib.independence_tier(_hd_comp["host"], "OpenAI") == "cross_provider",
+              "composer e2e: asserting composer under CURSOR_AGENT reaches a cross-provider tier")
+        os.environ.pop("IMPASSE_HOST", None)
+        _hd_auto = lib.host_detection()
+        check(_hd_auto["host"] == "cursor"
+              and lib.independence_tier(_hd_auto["host"], "OpenAI") == "undetermined"
+              and lib.independence_tier(_hd_auto["host"], "Anthropic") == "undetermined",
+              "AUTO e2e: with no assertion, a Cursor session cannot reach the composer mapping")
 
         # CURSOR: the marker alone must never buy a positive tier. This is anti-pattern #1 in the
         # proposal and the single most important property of the whole adapter.

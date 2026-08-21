@@ -14,7 +14,7 @@ cross-provider choice**. The runner computes every tier relative to the detected
 (`independence_tier()`).
 
 Host identity (`detect_host()` / `host_detection()`): `IMPASSE_HOST` is authoritative
-(`claude | codex | gemini | grok | cursor | other`), and the four common hosts are **auto-detected** from
+(`claude | codex | gemini | grok | composer | cursor | other`), and the four common hosts are **auto-detected** from
 **strict-value** env markers — deliberately not from `detect_environment()`, whose
 `IMPASSE_ENV` override is a surface-policy knob and must not be able to manufacture a host identity:
 
@@ -24,6 +24,7 @@ Host identity (`detect_host()` / `host_detection()`): `IMPASSE_HOST` is authorit
 | `gemini` | `GEMINI_CLI=1` | strong | Google |
 | `cursor` | `CURSOR_AGENT=1` | — | none (operator-chosen model) |
 | `grok` | *(none — assertion only)* | asserted | xAI |
+| `composer` | *(none — assertion only)* | asserted | Anysphere (Cursor's own model) |
 | `codex` | `CODEX_SANDBOX=seatbelt` or `CODEX_SANDBOX_NETWORK_DISABLED=1` | **heuristic** | OpenAI |
 
 Detection is **fail-safe** — three rules, each resolving ambiguity to `unknown` rather than a guess:
@@ -45,10 +46,13 @@ unattributable endpoint (a custom gateway).
 adapter" section of `SKILL.md` for the assertion rule, consent-without-`AskUserQuestion`, and the
 provisional timeout guidance. `grok` exists in the table for that purpose: it has no marker and is
 never auto-detected, but naming it lets a Grok-driven session label a Codex or Claude reviewer as
-genuinely cross-provider. Cursor support is written from published docs plus a probe of the scripts
-in a Cursor shell — **it has not been dogfooded end to end**, so treat the host-specific parts as
-provisional. Install with `scripts/install-cursor.sh` (symlink-only); Cursor's Claude/Codex compat
-discovery paths may also work, but that is unverified here.
+genuinely cross-provider. **Turn off Cursor's Auto first:** it picks a model per request, so no assertion
+can be truthful, and its pool contains both reviewer providers — asserting under Auto risks calling a
+same-provider reviewer cross-provider. Cursor's Claude-compat discovery was **observed working once**
+(Cursor Desktop, macOS, 2026-08-21: the skill loaded from `~/.claude/skills/impasse` with no
+Cursor-native install) — one data point, not a cross-build guarantee — so `scripts/install-cursor.sh`
+is optional — use it to pin Cursor to a specific checkout. A full review
+has **not** yet been completed from Cursor, so the host-specific timeout guidance stays provisional.
 
 Provenance rides on the result as `host_detection: {method, confidence}`. **Codex is a heuristic:**
 its sandbox-state vars are absent under `--dangerously-bypass-approvals-and-sandbox`, so a

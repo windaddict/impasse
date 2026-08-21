@@ -361,13 +361,19 @@ git clone https://github.com/windaddict/impasse ~/src/impasse
 bash ~/src/impasse/scripts/install-cursor.sh   # symlinks into ~/.cursor/skills/impasse
 ```
 
-Cursor also documents discovery from the Claude and Codex skill locations, so an existing install may
-already be visible — that path is unverified here, which is why the installer exists. **One thing to
-know before trusting a review from Cursor:** Cursor's model picker spans several labs and nothing
-reveals which one is driving your session, so Impasse reports `undetermined` rather than guessing. Tell
-it which model you're on — `export IMPASSE_HOST=claude|codex|gemini|grok` — and the rival backend is
-labeled cross-provider, with a notice recording that the label rests on your assertion rather than a
-detection. See the "Cursor host adapter" section of [`SKILL.md`](SKILL.md).
+Cursor also discovers skills from the Claude location: an existing Claude Code install was observed
+loading in Cursor Desktop with no Cursor-native install present (macOS, 2026-08-21). That is one
+observation on one machine, not a compatibility guarantee across Cursor builds. The installer is for pinning
+Cursor to a specific checkout.
+
+**Before trusting a review from Cursor, switch off Auto.** Cursor's default picks a model per request,
+so nothing can truthfully say which lab is driving your session — and because Auto's pool includes both
+reviewer providers, asserting one anyway risks labeling a same-provider reviewer as independent. Pick a
+named model, then tell Impasse which lab it's from:
+`export IMPASSE_HOST=claude|codex|gemini|grok|composer`. The rival backend is then labeled
+cross-provider, with a notice recording that the label rests on your assertion rather than a detection.
+Leave it unset on Auto and Impasse stays honestly `undetermined`. See the "Cursor host adapter" section
+of [`SKILL.md`](SKILL.md).
 
 **Invoke it through your host** — there is no separate `impasse` binary; it runs inside the agent:
 

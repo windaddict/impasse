@@ -51,7 +51,8 @@ separate, experimental, opt-in capability (`docs/delegate-mode.md`).
 
 Per-finding, not one global loop. Detail + the state machine: `docs/protocol.md`.
 
-1. **Prepare.** Identify the artifact and its `kind`. The runner reports a digest of the exact
+1. **Prepare.** Identify the artifact and its `kind` — see **Choosing the artifact** below, which
+   is where this most often goes wrong. The runner reports a digest of the exact
    bytes sent (in the consent manifest); the **host sets `artifact.revision` in the
    reviewer-response from that digest** (the reviewer can't know it), so findings can't later be
    reconciled against changed content.
@@ -78,6 +79,50 @@ Per-finding, not one global loop. Detail + the state machine: `docs/protocol.md`
    conflict neither can win, or a value/priority call that is the operator's to make — as a
    crisp question. The operator isn't handed the raw list; they get the survivors plus the
    decisions. Record it all against `schemas/reconciliation-result.v1.json`.
+
+### Choosing the artifact
+
+Two mistakes are easy, common, and both produce findings that look authoritative and aren't.
+
+**1. If the operator asked you to DO something, do it first — then review your own output.**
+A request like *"review the README against the code and make a plan to fix any defects — /impasse"*
+contains work (produce the plan) **and** an invocation. Impasse reviews an artifact; it is not a way
+to hand the operator's task to another model. So: produce the plan yourself, then send **the plan**
+(with whatever context it must be judged against) as the artifact. The independent check is on
+*your* work.
+
+Send the raw source material instead only when the operator's request really is "give me a second
+opinion on this thing" with no work of your own in between. When the request is ambiguous, say which
+reading you took, in one line, before you run — the operator can redirect you cheaply, and cannot
+un-spend a review they didn't want.
+
+**2. A RELATIONAL claim needs BOTH sides in the artifact.** "Is the README correct **against the
+software**", "do these docs match the implementation", "does this test actually pin that behavior" —
+each asserts a correspondence between two things. Send only one of them and the reviewer cannot
+check the correspondence at all; it can only judge the one it received for internal plausibility,
+and it will still return confident-looking findings. **Those findings are unfounded, and it is the
+host that made them so.** Bundle both sides — the README *and* the code it describes — or narrow the
+question to something the artifact can actually answer.
+
+If both sides won't fit in one review, that is a real constraint, not a reason to send half: split
+by *claim* (this doc section against that module), so every piece still contains both sides of the
+claim it is testing — and **say in your report that the review was scoped to those claims**, since a
+reader will otherwise assume whole-artifact coverage. Findings from separate pieces are not
+corroboration of each other; each piece was reviewed blind to the rest.
+
+**Preflight — answer these before you spend a review.** They are cheap, and each maps to a way the
+artifact can be silently wrong:
+
+1. **What exact question is the reviewer being asked?** Write it down. If it contains "against",
+   "matches", "consistent with", or "correct for", it is relational — go to 2.
+2. **List every thing that question names.** ("README" and "the software" = two.) For each, name the
+   file or range that is *in the bundle*. Any that isn't → either add it, or narrow the question.
+3. **Did the operator ask you to produce something?** If yes, is your output in the artifact? If it
+   isn't, you are reviewing the source material instead of your own work.
+4. **State your reading in one line before running** when the request was ambiguous.
+
+A review that cannot answer the question asked is worse than no review: it returns confident,
+well-anchored findings about the half it received, and nothing signals the missing half.
 
 **Not everything should be settled.** Strategy and writing often turn on preferences, not
 falsifiable claims. Escalate those as judgment calls (`value_or_priority_tradeoff`,
@@ -387,15 +432,26 @@ never answered. When you use Impasse, it's good practice to:
 
 ## Cursor host adapter (provisional — not yet dogfooded)
 
-Cursor implements the Agent Skills standard. **Per Cursor's published docs** it discovers skills from
-`.cursor/skills/`, `~/.cursor/skills/`, and (compat) `~/.claude/skills/` and `~/.codex/skills/` —
-none of which has been verified here. What *was* observed is narrower: the scripts run in a Cursor
+Cursor implements the Agent Skills standard. It discovers skills from `.cursor/skills/`,
+`~/.cursor/skills/`, and (compat) `~/.claude/skills/` and `~/.codex/skills/`. **The Claude-compat path was observed working
+once** — on 2026-08-21, Cursor Desktop on macOS loaded and ran Impasse from
+`~/.claude/skills/impasse` with no Cursor-native install present. Scope that honestly: it is a single
+observation on a single build, not a guarantee that Cursor generally supports the compat location.
+The other listed paths come from Cursor's docs and were not exercised here. What *was* observed is narrower: the scripts run in a Cursor
 shell (`impasse_run.py mode` returned `host=cursor`). The review path needs no Cursor-specific
 changes, but **no full review has been completed from Cursor**. What needs care is the
 **independence claim**.
 
-**The problem.** Cursor is not one provider. Its model picker offers Anthropic, OpenAI, Google, xAI
-Grok and Cursor's own Composer family in one IDE, and no environment marker reveals which of them is
+**Do this first: turn OFF Auto and pick a named model.** Cursor's default is **Auto**, which selects
+a model **per request** — so there is no stable answer to "which lab is driving this chat," and
+`IMPASSE_HOST` must stay unset. That is not merely a lost upgrade; Auto's pool contains *both*
+reviewer providers (`gpt-5.3-codex-*`, `claude-opus-5-*`, …). Assert `IMPASSE_HOST=claude` while Auto
+silently routes to a Codex model and Impasse will label a Codex reviewer **cross-provider when it is
+same-provider** — the exact overclaim this tool exists to prevent. Picking a named model is what
+makes an assertion *true and stable*, and it costs one click.
+
+**The problem it solves.** Cursor is not one provider. Its picker offers Anthropic, OpenAI, Google,
+xAI Grok and Cursor's own Composer family in one IDE, and no environment marker reveals which is
 driving your session. `CURSOR_AGENT=1` identifies the *IDE*, not the *lab*. So Impasse reports
 `undetermined` under Cursor — correctly. A subprocess cannot identify a driver that won't identify
 itself, and guessing would be worse than admitting it.
@@ -410,11 +466,23 @@ itself, and guessing would be worse than admitting it.
 
    | Model driving **this** Cursor chat | Set | Strongest shipped rival |
    |---|---|---|
-   | Claude / Opus / Sonnet / Fable | `IMPASSE_HOST=claude` | `--backend auto` → **codex** (cross-provider) |
-   | GPT / Codex | `IMPASSE_HOST=codex` | `--backend auto` → **claude** (cross-provider) |
-   | Gemini | `IMPASSE_HOST=gemini` | either shipped backend is cross-provider vs Google |
-   | Grok (xAI) | `IMPASSE_HOST=grok` | either shipped backend is cross-provider vs xAI |
-   | Composer / Auto / unsure | leave unset (or `IMPASSE_HOST=cursor`) | stays `undetermined` — still review, but surface the notice |
+   | `claude-opus-5-*`, `claude-sonnet-5-*`, `claude-fable-5-*` | `IMPASSE_HOST=claude` | `--backend auto` → **codex** (cross-provider) |
+   | `gpt-5.3-codex-*`, `gpt-5.2`, `gpt-5.6-sol-*`, `gpt-5.6-luna-*` | `IMPASSE_HOST=codex` | `--backend auto` → **claude** (cross-provider) |
+   | `gemini-*` | `IMPASSE_HOST=gemini` | either shipped backend is cross-provider vs Google |
+   | `cursor-grok-*` | `IMPASSE_HOST=grok` | either shipped backend is cross-provider vs xAI |
+   | `composer-*` | `IMPASSE_HOST=composer` | either shipped backend is cross-provider vs Anysphere — but read the Composer caveat below |
+   | **Auto**, or unsure | **leave unset** (or `IMPASSE_HOST=cursor`) | stays `undetermined` — still review, but surface the notice |
+
+   Check the current selection with `cursor-agent --list-models` (it marks one `(current)`), or read
+   the chat's model badge. **Caveat on the CLI:** that reports the *CLI's* configured model, which is
+   not necessarily the model driving the IDE chat you are in — prefer the badge, or ask.
+
+   **Composer caveat.** `composer-*` is Anysphere's own model, so it is a different organization from
+   OpenAI and Anthropic and earns `cross_provider`. But Composer's **base-model provenance is not
+   fully public**: Anysphere describes it as trained in-house, and if it were derived from another
+   lab's base model its blind spots would correlate with that base instead. So a Composer-host
+   cross-provider claim is sound on *organizational* separation and less firmly established on
+   *training* correlation than claude-vs-codex. Say so when you report it.
 
 2. **Re-ask or clear `IMPASSE_HOST` when the operator switches model mid-chat.** Nothing detects
    that switch; a stale assertion is a silently wrong independence claim. If the selection is Auto,

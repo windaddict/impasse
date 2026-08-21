@@ -125,5 +125,7 @@ echo "  2. Confirm discovery: look for 'impasse' in Cursor's skills list, or inv
 echo "  3. If it isn't listed, your build may read a different skills root — re-run with"
 echo "     --root ~/.agents/skills (see docs/host-detection.md)."
 echo "  4. BEFORE trusting a review from Cursor, assert which model drives this session:"
-echo "     export IMPASSE_HOST=claude|codex|gemini|grok   # or leave unset to stay 'undetermined'"
+echo "     Turn OFF Auto and pick a NAMED model first — Auto routes per request, so no"
+echo "     assertion can be truthful, and its pool contains both reviewer providers."
+echo "     export IMPASSE_HOST=claude|codex|gemini|grok|composer   # unset on Auto"
 echo "     Impasse cannot detect it, and an unasserted Cursor session never claims cross-provider."

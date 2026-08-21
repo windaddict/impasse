@@ -251,7 +251,7 @@ def get_backend(name: str = "codex") -> Backend:
 # surfaces). A host that DOESN'T declare itself gets 'undetermined', never a positive
 # cross-provider claim: a subprocess cannot identify a driver that won't identify itself, so
 # the only fail-safe answer for an unattributed driver is "we don't know".
-KNOWN_HOSTS = ("claude", "codex", "gemini", "grok", "cursor", "other")
+KNOWN_HOSTS = ("claude", "codex", "gemini", "grok", "composer", "cursor", "other")
 # Hosts attributable to a single model provider. cursor/other run an operator-selected
 # underlying model (a Cursor agent may BE Claude or GPT), so no provider can be attributed.
 #
@@ -260,7 +260,18 @@ KNOWN_HOSTS = ("claude", "codex", "gemini", "grok", "cursor", "other")
 # model picker offers the Grok family). There is no Grok *marker* to auto-detect and no Grok
 # *backend* to review with; naming the host is what lets a Grok-driven session label a Codex or
 # Claude reviewer honestly as cross-provider instead of settling for `undetermined`.
-_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI", "gemini": "Google", "grok": "xAI"}
+#
+# `composer` (Anysphere, the company behind Cursor) is Cursor's own in-house model family, and is
+# likewise assertion-only. Naming it is what separates "I am on Cursor's own model" — a different
+# lab from OpenAI and Anthropic, so a Codex or Claude reviewer is genuinely cross-provider — from
+# "I am on Cursor's Auto router", which is NOT a lab at all and must stay `undetermined`.
+# CAVEAT, deliberately recorded: Composer's base-model provenance is not fully public. Anysphere
+# describes it as trained in-house, but if it were derived from someone else's base model its blind
+# spots would correlate with that base rather than with Anysphere. Treat a Composer-host
+# cross_provider tier as sound on organizational separation and less firmly established on training
+# correlation than, say, claude-vs-codex. The operator asserted it; the notice says so.
+_HOST_PROVIDERS = {"claude": "Anthropic", "codex": "OpenAI", "gemini": "Google", "grok": "xAI",
+                   "composer": "Anysphere"}
 # Providers that can appear as a REVIEWER BACKEND. Only OpenAI (codex) and Anthropic (claude) ship
 # a backend, so Google and xAI are intentionally absent even though both are known HOST providers
 # above: a host provider needs no backend to be nameable, and adding a provider no backend reports
@@ -407,6 +418,21 @@ def independence_tier(host: str, backend_provider: str) -> str:
     return "undetermined"
 
 
+# Per-host provenance caveats that must ride on a POSITIVE tier, in the notice the operator actually
+# reads — not only in a source comment or a doc page. A tier is a claim made in CODE; qualifying it
+# in prose elsewhere leaves the executable result unqualified, which is how a hedged judgement turns
+# into an unhedged one by the time it reaches a person.
+_HOST_TIER_CAVEATS = {
+    "composer": (
+        " Provenance caveat: '{host}' is Anysphere's own model, so this label rests on ORGANIZATIONAL "
+        "separation from {provider}. Composer's base-model provenance is not fully public — if it "
+        "derives from another lab's base model, its blind spots may correlate with that lab rather "
+        "than with Anysphere. Weigh agreement accordingly; this is a weaker basis than a "
+        "claude-vs-codex pairing."
+    ),
+}
+
+
 def independence_notice(tier: str, host: str, backend_name: str, provider: str,
                         confidence: str | None = None) -> str | None:
     """The mandatory disclosure for a tier, or None when none is owed. ONE formatter shared by
@@ -426,13 +452,16 @@ def independence_notice(tier: str, host: str, backend_name: str, provider: str,
     Success for an asserted tier is NOT "notice is null"; it is "the tier is honest AND the operator
     can see it was asserted." A host that prints only this field would otherwise show nothing."""
     if tier == "cross_provider":
+        # A host-specific caveat makes the notice MANDATORY even on a basis that would otherwise owe
+        # nothing, so an acknowledged uncertainty can never be silently dropped from the result.
+        caveat = _HOST_TIER_CAVEATS.get(host, "").format(host=host, provider=provider)
         if confidence == "asserted":
             return (
                 f"⚠ Cross-provider label rests on an ASSERTION, not a detection: the '{host}' host "
                 f"was set via IMPASSE_HOST (reviewer '{backend_name}' via {provider}). Impasse did "
                 "not verify it — if the model actually driving this session is not " + host + ", "
                 "this label is wrong, and it does not update if you switch models mid-session. "
-                "Re-check it when the session's model changes."
+                "Re-check it when the session's model changes." + caveat
             )
         if confidence == "heuristic":
             return (
@@ -441,8 +470,13 @@ def independence_notice(tier: str, host: str, backend_name: str, provider: str,
                 f"via {provider}). The independence is likely real but not firmly established — a "
                 "sandbox-bypassed run would be undetectable. Setting IMPASSE_HOST=" + host + " replaces "
                 "this inference with YOUR assertion (recorded as such, and still disclosed) — it "
-                "removes the guess, not the need to state a basis."
+                "removes the guess, not the need to state a basis." + caveat
             )
+        if caveat:
+            # Reached only if a caveated host were ever DETECTED rather than asserted. The caveat
+            # still owes disclosure, so emit it standalone rather than returning None.
+            return (f"⚠ Cross-provider label for host '{host}' (reviewer '{backend_name}' via "
+                    f"{provider}).".rstrip() + caveat)
         return None
     if tier == "same_provider":
         return (

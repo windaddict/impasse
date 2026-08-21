@@ -21,6 +21,19 @@ and no environment marker reveals which is driving a session, so every Cursor re
   Success for an asserted tier is explicitly *not* "notice is null"; it is "the tier is honest AND the
   operator can see it was asserted." **This is a behavior change:** three existing tests asserted
   `independence_notice is None` for an asserted cross-provider tier and were updated.
+- **Auto is the hazard, and the docs now lead with it.** Cursor's default picks a model **per
+  request**, so no assertion can be truthful — and because Auto's pool contains *both* reviewer
+  providers (`gpt-5.3-codex-*`, `claude-opus-5-*`), asserting one anyway risks labeling a
+  same-provider reviewer as independent. SKILL.md, README and environments now open the Cursor
+  guidance with "turn off Auto and pick a named model", and the mapping table uses real model-ID
+  prefixes.
+- **`composer` is nameable as a host** (Anysphere). Cursor's own model is a different organization
+  from OpenAI and Anthropic, so a Codex or Claude reviewer is genuinely cross-provider against it —
+  previously it collapsed to `undetermined`. Recorded caveat: Composer's base-model provenance is
+  **not fully public**, so that claim is sound on organizational separation and less firmly
+  established on training correlation than claude-vs-codex. `composer` (a model) and `cursor` (the
+  Auto router) are deliberately separate hosts, and a test pins that Auto never inherits Composer's
+  attributability.
 - **`grok` is nameable as a host** (`_HOST_PROVIDERS["grok"] = "xAI"`). It has no marker and is never
   auto-detected — assertion is the only way in — but naming it lets a Grok-driven session label a
   Codex or Claude reviewer as genuinely cross-provider instead of settling for `undetermined`. xAI is
@@ -34,7 +47,18 @@ and no environment marker reveals which is driving a session, so every Cursor re
   `AskUserQuestion`, provisional timeout guidance), plus `README` install, `environments`,
   `host-detection` and a glossary entry for **asserted host**.
 
-**Not dogfooded.** Nothing here has been exercised end to end from inside Cursor — this was built
+- **Choosing the artifact** — new SKILL.md guidance, prompted by a real misfire: asked to "review the
+  README against the code and make a plan", a Cursor-hosted run sent the README alone. Two rules now
+  stated explicitly: if the operator asked you to *do* something, do it first and review **your own
+  output** (Impasse is not a way to hand the operator's task to another model); and a **relational**
+  claim ("docs match code") needs **both sides** in the artifact, or the reviewer cannot check the
+  correspondence and its confident-looking findings are unfounded.
+
+**Partially dogfooded.** Cursor's Claude-compat discovery was **observed working once** — on
+2026-08-21 Impasse loaded and ran in Cursor Desktop (macOS) from `~/.claude/skills/impasse` with no
+Cursor-native install present. One observation on one build; it makes that path likely rather than
+guaranteed. A **full review has still not been
+completed from Cursor** — this was built
 from Cursor's published skill docs plus a probe of the scripts in a Cursor shell. Every
 Cursor-specific claim is marked provisional in the docs, `SKILL.md` still lists only Claude Code and
 Codex as *tested* hosts, and the proposal's Phase A dogfood checklist remains open. A `grok` reviewer
