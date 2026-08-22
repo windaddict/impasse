@@ -910,12 +910,18 @@ def resolve_knobs(backend_name: str, model=None, effort=None, speed=None) -> tup
     return model, effort, speed
 
 
-def _fail(code, message, kind, notice, manifest, termination=None, retryable=None) -> dict:
+def _fail(code, message, kind, notice, manifest, termination=None, retryable=None,
+          revision=None) -> dict:
     failure = {"code": code, "message": message}
     if retryable is not None:
         failure["retryable"] = retryable
     r = {"ok": False, "outcome": "failed", "kind": kind, "impasse_version": lib.version(),
          "failure": failure, "notice": notice, "manifest": manifest}
+    # Prefer the caller's directly-computed revision; fall back to the manifest only for the early
+    # paths that fail before it exists. Same identity on both paths — a retry reviews the same bytes.
+    rev = revision if isinstance(revision, dict) else lib.revision_from_digest((manifest or {}).get("digest"))
+    if rev:
+        r["artifact_revision"] = rev
     if termination:
         r["termination"] = termination
     return r
@@ -950,6 +956,9 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
         raise ValueError(f"speed must be one of {sorted(_ALLOWED_SPEED)}")
 
     manifest = consent.manifest_for_bytes(artifact_bytes)
+    # The identity of the exact bytes sent. Computed once, stamped into the stored record, and
+    # returned on the result so a host copies it rather than deriving it (or guessing at it).
+    artifact_rev = lib.artifact_revision(artifact_bytes)
     hd = lib.host_detection()  # one snapshot up front — every return path reports the host + provenance
     host = hd["host"]
     hdblock = {"method": hd["method"], "confidence": hd["confidence"]}
@@ -1080,7 +1089,10 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
     phases.mark("consent_granted")
 
     def _f(code, message, **kw):
-        return {**_fail(code, message, kind, notice, manifest, **kw), **bmeta}
+        # Pass the DIRECTLY computed revision rather than letting _fail re-derive it from the
+        # manifest: the manifest is a second source for the same bytes, and a claim that both paths
+        # report the same identity should be structural, not a coincidence two call sites maintain.
+        return {**_fail(code, message, kind, notice, manifest, revision=artifact_rev, **kw), **bmeta}
 
     scratch = tempfile.mkdtemp(prefix="impasse-run-", dir=lib.ensure_config_dir())
     try:
@@ -1379,6 +1391,30 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
                 # save off the document's review_id, so the record's review_id must equal the dir name,
                 # or a later reconciliation would land in the wrong directory.
                 parsed["review_id"] = run_id
+                # STAMP the artifact revision authoritatively before persisting. The reviewer
+                # CANNOT know the digest of the bytes it was sent, so anything it puts here is
+                # invented — a real run was observed storing
+                # {"algorithm": "other", "value": "caller-provided-bundle-2026-08-21"}. That field
+                # exists to stop findings being reconciled against changed content, so a fabricated
+                # value defeats it SILENTLY. SKILL.md asked the host to set it; nothing enforced
+                # that, and a host that forgot left the fiction in the permanent record. The runner
+                # already computed this digest for the consent manifest, so it sets it here and the
+                # host cannot get it wrong.
+                # ONLY when the reviewer actually supplied an artifact object. Synthesizing a
+                # missing one would REPAIR a malformed response: `artifact` is schema-REQUIRED but
+                # the runner's shape-check above does not demand it, so filling it in would turn a
+                # response that must fail validation into one that passes — silently, and inside
+                # data whose whole premise is that it is untrusted. Correcting a field the reviewer
+                # cannot know is legitimate; inventing one it never sent is not. A host that needs
+                # the identity for a response this broken still has it on the result.
+                if isinstance(parsed.get("artifact"), dict):
+                    parsed["artifact"]["revision"] = dict(artifact_rev)
+                    # `kind` is caller-owned too — the operator sets it explicitly and the reviewer
+                    # only echoes it, so a disagreement means the reviewer got it wrong. Stamping
+                    # both keeps the runner-owned fields consistent instead of correcting one and
+                    # trusting the other. (An artifact object the reviewer omitted stays omitted:
+                    # see above. Correct what it cannot know; never invent what it never sent.)
+                    parsed["artifact"]["kind"] = kind
                 p = lib.save_run_doc(run_id, "reviewer-response", parsed)
                 lib.save_run_meta(run_id)   # which Impasse produced this record (sibling file)
                 recorded = True
@@ -1411,7 +1447,7 @@ def review(*, kind: str, instruction: str, artifact_bytes: bytes, backend: str =
             "backend_version": be_version,
             "telemetry": telemetry,
             "response": parsed,   # UNTRUSTED — validate against the schema; don't render as trusted content
-            "impasse_version": lib.version(),
+            "impasse_version": lib.version(), "artifact_revision": artifact_rev,
             "run_id": run_id, "recorded": recorded, "record_path": record_path,
             "record_notice": record_notice,
             "notice": notice, "manifest": manifest,

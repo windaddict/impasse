@@ -13,6 +13,51 @@ checked against it by the test suite, so they cannot drift.
 
 ## [Unreleased]
 
+### Host-error removal, from a second real Cursor run
+Two defects and one guidance gap, all surfaced by watching an actual Cursor-hosted run rather than
+by inspection.
+
+- **The runner now stamps `artifact.revision` itself.** `SKILL.md` asked the *host* to set it from
+  the consent digest; nothing enforced that, so a host that forgot left the **reviewer's invented
+  value** in the permanent record — the observed run stored
+  `{"algorithm": "other", "value": "caller-provided-bundle-2026-08-21"}` and only noticed afterwards,
+  patching the stored file by hand. That field exists to stop findings being reconciled against
+  changed content, so a fabricated value defeats it silently. The runner already computed the digest
+  for the consent manifest; it now writes it into the stored response, overwriting whatever the
+  reviewer claimed, and returns it as `artifact_revision` on every result — success and failure
+  alike, from one computed value rather than two sources — so a host copies it rather than deriving
+  it. `kind` is stamped the same way and for the same reason: the operator sets it explicitly and the
+  reviewer only echoes it, so a disagreement means the reviewer is wrong.
+  **Bounded precisely:** the runner corrects fields the reviewer *cannot know*; it does **not** invent
+  ones the reviewer never sent. A response missing `artifact`, or carrying a non-object there, is left
+  exactly as received — `artifact` is schema-required while the runner's shape-check does not demand
+  it, so filling it in would turn a response that must fail validation into one that passes, silently,
+  inside data whose whole premise is that it is untrusted.
+- **`lib.revision_from_digest()`** turns a manifest's `"sha256:<hex>"` into the schema's
+  `{algorithm, value}`, validating length **per algorithm** (sha256 exactly 64 hex; git a full SHA-1
+  or SHA-256 object id) — a shared range would accept `sha256:aaaaaaa`, an abbreviation, which is the
+  one thing an "immutable identity" must not be. The observed run guessed at three different key names and then gave up and
+  recomputed the hash from a temp file; this is the one supported way across, and it returns `None`
+  for junk rather than minting an identity for reviewed content.
+- **"An analysis you could perform yourself is work too", and the ORDER to do it in.** The
+  artifact-selection guidance covered *"do X and review it"* but not *"work out whether X is true"* —
+  which has no separate deliverable, so it reads as "the review IS the task". In **one observed local
+  run** (a Cursor session, reported by the operator; no run record is kept in this repo) the host
+  bundled both sides correctly — the previous fix working — and then let the reviewer do all the
+  thinking, accepting 4 of 4 findings with nothing refuted. That is the anecdote that prompted the
+  change, not evidence for a general rule.
+  The guidance now prescribes an order: **form your view, send the EVIDENCE not your conclusions,
+  compare afterwards.** The obvious-looking alternative — pasting your findings into the instruction
+  and asking the reviewer to challenge them — sounds more rigorous and is strictly worse: it
+  discloses your hypotheses before the reviewer forms its own, so what returns is a critique of your
+  framing rather than an independent look. That is anchoring, and it forfeits the property Impasse
+  exists to provide. An adversarial pass on your reasoning is legitimate as a **second** review after
+  the blind one, reported as anchored.
+  Deliberately **not** shipped: a "no disagreement means only one analysis happened" heuristic. Two
+  genuine analyses can simply agree, and a rule treating agreement as suspicious would push a host to
+  manufacture disagreement. What unanimity means is that a run produced no signal to adjudicate —
+  worth saying plainly, not dressing up as corroboration.
+
 ## [0.5.0] — 2026-08-21
 
 First numbered release. Everything below was previously unreleased work on `main`; the entries are

@@ -125,6 +125,12 @@ content = {
     "valid": '{"schema_version":"1.0","review_id":"r","artifact":{"kind":"code","revision":{"algorithm":"sha256","value":"x"}},"assessment":"approve","summary":"ok","findings":[]}',
     "notjson": "this is not json at all",
     "noshape": '{"hello":"world"}',
+    # passes the runner's shape-check (schema_version + findings) but OMITS the schema-required
+    # `artifact` — the case where "helpfully" filling the field in would mask a malformed response
+    "noartifact": '{"schema_version":"1.0","review_id":"r","assessment":"approve","summary":"ok","findings":[]}',
+    # artifact present but NOT an object, and artifact whose `kind` contradicts the caller's --kind
+    "artifactstr": '{"schema_version":"1.0","review_id":"r","artifact":"not-an-object","assessment":"approve","summary":"ok","findings":[]}',
+    "wrongkind": '{"schema_version":"1.0","review_id":"r","artifact":{"kind":"research","revision":{"algorithm":"other","value":"made-up"}},"assessment":"approve","summary":"ok","findings":[]}',
     "badjson": '{"schema_version":"1.0","review_id":"r","findings":[{"id":"F001" "claim":"missing comma"}]}',
 }.get(mode, "")
 if mode == "oversize":   # a final message that cannot FIT — a retry can't fix this
@@ -389,9 +395,66 @@ def main() -> int:
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] is True and res["response"]["schema_version"] == "1.0", "review: valid backend output -> ok, parsed")
 
+    # artifact.revision is the RUNNER's to set, not the reviewer's. The fake emits a fabricated
+    # value ("x"), exactly as a real run was observed doing — it stored
+    # {"algorithm":"other","value":"caller-provided-bundle-..."}. That field is what stops findings
+    # being reconciled against changed content, so a fabricated value defeats it silently.
+    _rev_bytes = b"revision-stamp-artifact"
+    _rev_res = run.review(kind="code", instruction="review", artifact_bytes=_rev_bytes)
+    _rev_true = lib.artifact_revision(_rev_bytes)
+    check(_rev_res["ok"] and _rev_res.get("artifact_revision") == _rev_true,
+          "revision: the result carries the real digest, so a host copies it instead of deriving it")
+    check(_rev_res["response"]["artifact"]["revision"] == _rev_true,
+          "revision: the runner OVERWRITES the reviewer's invented revision with the real digest")
+    _rev_stored = json.loads(open(_rev_res["record_path"]).read())
+    check(_rev_stored["artifact"]["revision"] == _rev_true
+          and _rev_stored["artifact"]["revision"]["value"] != "x",
+          "revision: the PERSISTED record holds the real digest, not the reviewer's fiction")
+    # The manifest is where a host can see the same identity; it must agree, and the documented
+    # accessor must be the way across (hosts were observed guessing key names, then recomputing).
+    check(lib.revision_from_digest(_rev_res["manifest"]["digest"]) == _rev_true,
+          "revision: revision_from_digest(manifest.digest) yields the same identity")
+    lib.forget_run(_rev_res["run_id"])
+
+    # Correcting a field the reviewer cannot know is legitimate; INVENTING one it never sent is not.
+    # `artifact` is schema-required while the runner's shape-check does not demand it, so
+    # synthesizing it would turn a response that must fail validation into one that passes — inside
+    # data whose whole premise is that it is untrusted.
+    os.environ["FAKE_MODE"] = "noartifact"
+    _na_res = run.review(kind="code", instruction="review", artifact_bytes=b"no-artifact-case")
+    check(_na_res["ok"] and "artifact" not in _na_res["response"],
+          "revision: a response MISSING artifact is left missing, not repaired into schema-validity")
+    check(_na_res.get("artifact_revision") == lib.artifact_revision(b"no-artifact-case"),
+          "revision: the identity is still on the result even when the response omits artifact")
+    _na_stored = json.loads(open(_na_res["record_path"]).read())
+    check("artifact" not in _na_stored,
+          "revision: the stored record preserves the reviewer's omission for validation to catch")
+    lib.forget_run(_na_res["run_id"])
+
+    # A non-object artifact must NOT be replaced either — same rule, different shape.
+    os.environ["FAKE_MODE"] = "artifactstr"
+    _as_res = run.review(kind="code", instruction="review", artifact_bytes=b"artifact-not-object")
+    check(_as_res["ok"] and _as_res["response"]["artifact"] == "not-an-object",
+          "revision: a non-object artifact is left alone, not replaced with a synthesized one")
+    lib.forget_run(_as_res["run_id"])
+
+    # `kind` is caller-owned: the reviewer echoes it, so a disagreement means the reviewer is wrong.
+    # Both runner-owned fields are corrected, not one corrected and the other trusted.
+    os.environ["FAKE_MODE"] = "wrongkind"
+    _wk_bytes = b"wrong-kind-case"
+    _wk_res = run.review(kind="code", instruction="review", artifact_bytes=_wk_bytes)
+    check(_wk_res["ok"] and _wk_res["response"]["artifact"]["kind"] == "code",
+          "revision: a reviewer `kind` contradicting the caller is corrected, not preserved")
+    check(_wk_res["response"]["artifact"]["revision"] == lib.artifact_revision(_wk_bytes),
+          "revision: the invented 'other'/'made-up' revision is replaced by the real digest")
+    lib.forget_run(_wk_res["run_id"])
+    os.environ["FAKE_MODE"] = "valid"
+
     os.environ["FAKE_MODE"] = "notjson"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
     check(res["ok"] is False and res["failure"]["code"] == "invalid_response", "review: non-JSON output -> invalid_response")
+    check(res.get("artifact_revision") == lib.artifact_revision(b"code"),
+          "revision: a FAILED review still identifies the bytes it tried to review")
 
     os.environ["FAKE_MODE"] = "noshape"
     res = run.review(kind="code", instruction="review", artifact_bytes=b"code")
@@ -2540,6 +2603,24 @@ def main() -> int:
         lib._VERSION_CACHED.update(_ver_prev)
 
     # It must reach the surfaces a host and a stored record actually read.
+    # revision_from_digest must refuse to mint an identity for reviewed content from junk.
+    check(lib.revision_from_digest("sha256:" + "a" * 64)["algorithm"] == "sha256",
+          "revision_from_digest: a well-formed sha256 digest parses")
+    check(all(lib.revision_from_digest(_b) is None for _b in
+              (None, "", "nonsense", "md5:" + "a" * 32, "sha256:", "sha256:zzzz", 12345, b"sha256:aa")),
+          "revision_from_digest: junk yields None, never a fabricated identity")
+    # Length is per ALGORITHM. A shared range would accept an ABBREVIATION as an immutable identity
+    # — the one thing this field must never be, since abbreviations stop distinguishing revisions.
+    check(lib.revision_from_digest("sha256:" + "a" * 7) is None
+          and lib.revision_from_digest("sha256:" + "a" * 63) is None
+          and lib.revision_from_digest("sha256:" + "a" * 65) is None
+          and lib.revision_from_digest("sha256:" + "a" * 128) is None,
+          "revision_from_digest: sha256 must be EXACTLY 64 hex — no abbreviations, no overlong")
+    check(lib.revision_from_digest("git:" + "a" * 40) is not None
+          and lib.revision_from_digest("git:" + "a" * 64) is not None
+          and lib.revision_from_digest("git:" + "a" * 7) is None,
+          "revision_from_digest: git accepts a full SHA-1 or SHA-256 object id, not an abbreviation")
+
     check("impasse_version" in lib._METRIC_FIELDS,
           "version: the timing store is allowed to record which version produced each row")
     # ...and prove it actually ARRIVES on the surfaces, by driving the real code paths. Membership

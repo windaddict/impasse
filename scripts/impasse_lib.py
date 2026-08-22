@@ -774,6 +774,30 @@ def artifact_revision(data: bytes) -> dict:
     return {"algorithm": "sha256", "value": hashlib.sha256(data).hexdigest()}
 
 
+def revision_from_digest(digest) -> dict | None:
+    """Turn a consent manifest's `digest` ("sha256:<hex>") into the schema's {algorithm, value}.
+
+    WHAT IT'S FOR: the reconciliation needs the reviewed bytes' identity, and the manifest is where
+    a host can see it — but the manifest stores ONE string while the schema wants two fields, and
+    hosts were observed guessing at key names and then recomputing the hash from a temp file rather
+    than finding it. This is the one supported way to cross that gap; `review()` also puts the
+    finished object on its result as `artifact_revision`, which is easier still.
+
+    Returns None for anything that isn't a recognizable "<algorithm>:<hex>" pair, so a malformed
+    manifest degrades to "no revision" instead of minting a false identity for reviewed content."""
+    if not isinstance(digest, str) or ":" not in digest:
+        return None
+    algorithm, _, value = digest.partition(":")
+    # Length is checked PER ALGORITHM. A shared 7-128 range would accept `sha256:aaaaaaa` as a
+    # SHA-256 digest and a 7-character git abbreviation as an object id — neither is the immutable,
+    # collision-resistant identity this field is documented to be, and an abbreviation is exactly
+    # the kind of value that silently stops distinguishing two revisions.
+    expected = {"sha256": (64,), "git": (40, 64)}.get(algorithm)   # git: SHA-1 or SHA-256 object id
+    if not expected or len(value) not in expected or not re.fullmatch(r"[0-9a-f]+", value):
+        return None
+    return {"algorithm": algorithm, "value": value}
+
+
 # --- Run records (the audit trail) -------------------------------------------------
 # A run is persisted under config_dir()/runs/<run_id>/ as reviewer-response.json and
 # reconciliation-result.json, keyed by the review_id that links them. These files

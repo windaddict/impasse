@@ -69,8 +69,13 @@ Per-finding, not one global loop. Detail + the state machine: `docs/protocol.md`
 
 1. **Prepare.** Identify the artifact and its `kind` — see **Choosing the artifact** below, which
    is where this most often goes wrong. The runner reports a digest of the exact
-   bytes sent (in the consent manifest); the **host sets `artifact.revision` in the
-   reviewer-response from that digest** (the reviewer can't know it), so findings can't later be
+   bytes sent (in the consent manifest), and **stamps `artifact.revision` into the stored
+   reviewer-response itself** — the reviewer cannot know the digest of the bytes it was sent, so
+   anything it writes there is invented, and a real run was observed storing exactly that fiction.
+   Do not compute it and do not parse the manifest by hand: **copy `artifact_revision` off the
+   result** (present on success and failure alike) straight into your reconciliation. Given only a
+   manifest, `lib.revision_from_digest(manifest["digest"])` is the one supported way across; it
+   returns `None` rather than minting an identity from junk. This is what stops findings being
    reconciled against changed content.
 2. **Review.** The reviewer returns structured **observations** — findings, each with
    *anchored evidence* (a location in the artifact **plus** an observation; a bare location
@@ -107,10 +112,36 @@ to hand the operator's task to another model. So: produce the plan yourself, the
 (with whatever context it must be judged against) as the artifact. The independent check is on
 *your* work.
 
-Send the raw source material instead only when the operator's request really is "give me a second
-opinion on this thing" with no work of your own in between. When the request is ambiguous, say which
-reading you took, in one line, before you run — the operator can redirect you cheaply, and cannot
-un-spend a review they didn't want.
+**An ANALYSIS you could perform yourself is work too — this is the case that gets missed.** *"Review
+the README and see if it is out of date with respect to the codebase"* has no separate deliverable, so
+it reads as "the review IS the task" and tempts you to send the raw material and let the reviewer do
+the thinking. Then you have one opinion plus a fact-check, not a second opinion.
+
+**Do it in this order — the order matters more than the rule:**
+
+1. **Form your own view and write it down BEFORE you send anything.** Actually do the comparison.
+2. **Send the reviewer the EVIDENCE, not your conclusions.** Both sides of the claim, and the
+   question — but not what you concluded.
+3. **Compare the two afterwards.** Where you agree, you have two independent analyses that converged.
+   Where you differ is the signal worth the operator's attention.
+
+**Do not paste your findings into the instruction and ask the reviewer to challenge them.** It sounds
+more rigorous and is strictly worse: it tells the reviewer your hypotheses before it forms its own,
+so what comes back is a critique of your framing rather than an independent look. You lose exactly
+the property you invoked Impasse for. (If you want an adversarial pass on your reasoning, that is a
+legitimate *second* review, run after the blind one — and it must be reported as anchored, not as
+independent.)
+
+**On agreement.** Do not read unanimity as proof that only one analysis happened; two genuine
+analyses can simply agree, and treating agreement as suspicious would push a host to manufacture
+disagreement. What unanimity *does* mean is that this run produced no independent signal to
+adjudicate — say so plainly rather than presenting it as strong corroboration. Agreement is evidence,
+never proof.
+
+Send raw source material with no analysis of your own only when the operator explicitly wants a cold
+read — *"what does another model make of this?"*. When the request is ambiguous, say which reading
+you took, in one line, before you run: the operator can redirect you cheaply, and cannot un-spend a
+review they didn't want.
 
 **2. A RELATIONAL claim needs BOTH sides in the artifact.** "Is the README correct **against the
 software**", "do these docs match the implementation", "does this test actually pin that behavior" —
@@ -133,8 +164,10 @@ artifact can be silently wrong:
    "matches", "consistent with", or "correct for", it is relational — go to 2.
 2. **List every thing that question names.** ("README" and "the software" = two.) For each, name the
    file or range that is *in the bundle*. Any that isn't → either add it, or narrow the question.
-3. **Did the operator ask you to produce something?** If yes, is your output in the artifact? If it
-   isn't, you are reviewing the source material instead of your own work.
+3. **Did the operator ask you to produce something, or to work something out?** If they asked for a
+   deliverable, your output belongs in the artifact. If they asked you to work something out, form
+   your view first and keep it back — send the evidence, compare afterwards (see rule 1). Either
+   way: never send only source material and call the result a second opinion.
 4. **State your reading in one line before running** when the request was ambiguous.
 
 A review that cannot answer the question asked is worse than no review: it returns confident,
