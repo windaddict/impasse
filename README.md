@@ -282,9 +282,13 @@ Impasse performs on *your* work.
 
 ## Requirements
 
-- A **host**: [Claude Code](https://claude.com/claude-code) or the [OpenAI Codex CLI](https://github.com/openai/codex)
-  — both implement the open [Agent Skills standard](https://agentskills.io). Independence is computed
-  *relative to your host*, so which of the two tools counts as the cross-provider **backend** below inverts accordingly.
+- A **host**: [Claude Code](https://claude.com/claude-code), the
+  [OpenAI Codex CLI](https://github.com/openai/codex), or [Cursor](https://cursor.com) — each
+  implements the open [Agent Skills standard](https://agentskills.io). Claude Code and Codex are the
+  **tested** hosts; Cursor runs the same review path but has not been dogfooded end to end, and needs
+  one extra step because its model is operator-chosen (see Install). Independence is computed
+  *relative to your host*, so which tool counts as the cross-provider **backend** below depends on
+  which one is driving your session.
 - At least one **reviewer backend** installed and logged in, ideally the one that *differs* from your
   host (the cross-provider rung): the **Codex CLI** for a Claude host
   ([`docs/backends/codex.md`](docs/backends/codex.md)), or the **Claude CLI** for a Codex host
@@ -317,18 +321,25 @@ different provider is the point; the fallbacks trade independence for reach.
 
 ```mermaid
 flowchart TB
-    B1["Different provider — Codex<br/>strongest independence · default"] --> B2["Same provider, fresh process<br/>Claude fallback · breadth, not independence"]
-    B2 --> B3["Self-review<br/>last resort · sandbox/Cowork only · refused for code"]
+    B1["Different provider — Codex<br/>strongest independence · default"] --> B2["Undetermined<br/>host won't identify itself · no positive claim"]
+    B2 --> B3["Same provider, fresh process<br/>Claude fallback · breadth, not independence"]
+    B3 --> B4["Self-review<br/>last resort · sandbox/Cowork only · refused for code"]
     style B1 fill:#16a34a,color:#fff
-    style B2 fill:#eab308,color:#111
-    style B3 fill:#dc2626,color:#fff
+    style B2 fill:#64748b,color:#fff
+    style B3 fill:#eab308,color:#111
+    style B4 fill:#dc2626,color:#fff
 ```
 
-For the usual Claude host, genuine independence needs a Codex login; the weaker rungs run on
+**`undetermined` ranks second deliberately** — above same-provider, not below it. It does not mean
+"probably bad"; it means *unknown*, and an unknown pairing may well be cross-provider. Same-provider
+is ranked lower because it is a known correlation. This is the rung a **Cursor** session lands on
+until you tell Impasse which model is driving it.
+
+For the usual Claude host, genuine independence needs a Codex login; the lower rungs run on
 Claude alone. The rungs are labeled **relative to the host** driving the protocol (the diagram
-shows the Claude-host case): to a Codex host, the Claude backend is the different-provider rung.
-The runner **auto-detects** which agent it runs under — Claude and Codex (the supported hosts), and also
-Gemini and Cursor, so a non-supported host is never misread as a supported one — from their env markers — best-effort for Codex, which ships no branded flag — and `IMPASSE_HOST` stays
+names the backends for the Claude-host case): to a Codex host, the Claude backend is the different-provider rung.
+The runner **auto-detects** which agent it runs under — Claude and Codex (the *tested* hosts), and also
+Gemini and Cursor, so an untested or unattributable host is never misread as a tested one — from their env markers — best-effort for Codex, which ships no branded flag — and `IMPASSE_HOST` stays
 authoritative (validated and conflict-checked). Detection is fail-safe: ambiguity or a
 marker/override conflict yields `undetermined`, never an overstated cross-provider claim, and
 because detection reads environment variables, its confidence is only as good as the environment's integrity. Detail:
@@ -366,7 +377,7 @@ the Codex skills root), and restart Codex:
 
 ```bash
 git clone https://github.com/windaddict/impasse ~/src/impasse
-bash ~/src/impasse/scripts/install-codex.sh   # symlinks into ~/.codex/skills/impasse
+bash ~/src/impasse/scripts/install-codex.sh   # symlink; ~/.codex/skills/impasse by default
 ```
 
 **Cursor** *(supported, not yet dogfooded)* — clone anywhere, then run the symlink installer and
@@ -374,8 +385,13 @@ restart Cursor:
 
 ```bash
 git clone https://github.com/windaddict/impasse ~/src/impasse
-bash ~/src/impasse/scripts/install-cursor.sh   # symlinks into ~/.cursor/skills/impasse
+bash ~/src/impasse/scripts/install-cursor.sh   # symlink; ~/.cursor/skills/impasse by default
 ```
+
+Both installers **detect** the skills root rather than assuming one: they may choose `~/.agents/skills`
+if that is what exists, honor `CODEX_HOME` or an explicit `--root`, and **refuse** when both candidate
+directories exist and the right one is ambiguous. `--dry-run` prints the destination without touching
+anything.
 
 Cursor also discovers skills from the Claude location: an existing Claude Code install was observed
 loading in Cursor Desktop with no Cursor-native install present (macOS, 2026-08-21). That is one
@@ -542,6 +558,13 @@ past runs (flagging which still have open escalations); `forget` deletes one. `o
 runs with decisions you haven't answered yet; `prune --older-than N` cleans up old records
 (keeping any with open escalations unless `--include-open`). Records contain artifact content —
 they're kept `0600` and never committed.
+
+Two subcommands carry the protocol itself rather than reporting on it. **`save-reconciliation
+<file>`** is how a reconciliation becomes a record at all — "once you save it" above means this
+command, and without it a run stores only the reviewer's raw findings, never what you decided.
+**`escalations <reconciliation>`** renders each deadlocked finding in full — the claim, its anchored
+evidence, both positions and the question — and **refuses** unless it can show that context for every
+one, so you are never asked to rule on a question stripped of what it is about.
 
 Every `show` closes with a **running recap across your reconciled runs** — findings reviewed,
 accepted, refuted with evidence, resolved, and awaiting you — a plain reminder of what independent

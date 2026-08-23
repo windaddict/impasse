@@ -13,6 +13,28 @@ checked against it by the test suite, so they cannot drift.
 
 ## [Unreleased]
 
+### README accuracy — the defects a Cursor-hosted review found
+Four inaccuracies, all raised by an independent review of the README against the code and verified
+against the live files before fixing.
+
+- **Requirements contradicted Install about whether Cursor is a host.** Requirements named only
+  Claude Code and Codex while Install documented Cursor and shipped `install-cursor.sh`. Requirements
+  now lists all three and marks Claude Code and Codex as the *tested* ones, which is the distinction
+  that was actually being made.
+- **The independence-ladder diagram omitted `undetermined`.** It showed three rungs where
+  `INDEPENDENCE_TIERS` has four, so the diagram described an ordering the code does not implement.
+  `undetermined` is now shown in its real position — **second, above same-provider** — with a note on
+  why: it means *unknown*, and an unknown pairing may well be cross-provider, whereas same-provider
+  is a known correlation. It is also the rung a Cursor session occupies until the operator asserts a
+  host.
+- **`save-reconciliation` and `escalations` were undocumented.** The Audit trail section listed six
+  reporting subcommands and omitted the two that carry the protocol: without `save-reconciliation` a
+  run stores only the reviewer's raw findings and never what you decided, and `escalations` is what
+  refuses to let you be asked to rule on a question stripped of its context.
+- **The install comments asserted a destination the installers only default to.** Both detect the
+  skills root, may choose `~/.agents/skills`, honor `CODEX_HOME`/`--root`, and refuse when the choice
+  is ambiguous.
+
 ### Host-error removal, from a second real Cursor run
 Two defects and one guidance gap, all surfaced by watching an actual Cursor-hosted run rather than
 by inspection.
