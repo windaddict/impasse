@@ -422,6 +422,35 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    tally, and the escalated questions. `report list` shows past runs; `report forget <id>`
    deletes a record. Records live in the config dir and contain artifact content — sensitive.
 
+   **Your reconciliation's `review_id` must be the exact string the runner assigned this run** — copy
+   it from `record_notice` / `record_path` (or the reviewer-response's own `review_id`), never invent
+   or retype one. `save-reconciliation` validates the pair before writing and **refuses** (non-zero
+   exit, nothing written) when: the `review_id` has no reviewer-response recorded under it; a
+   `finding_id` doesn't match anything that review raised; two items share a `finding_id`; a
+   `rejected` item carries no verification that contradicts the finding; or a reconciliation already
+   exists there. A mistyped `review_id` used to silently create a fresh, orphaned run directory
+   holding only your reconciliation — this is what stops that.
+   - **`--partial`** saves before every raised finding is dispositioned — legitimate mid-protocol
+     (you're still working through a large finding set), but it can never pair with
+     `outcome: converged`: use `incomplete` (or `deadlocked` if something is escalated). The success
+     line always reports `N of M findings dispositioned` so a partial save is self-identifying, not
+     silent.
+   - **Completing a partial record needs no flag.** A save that *supersedes* an interim one — the
+     existing record's `outcome` isn't `converged`, and yours dispositions every finding it did —
+     replaces it directly and reports `superseded`, still keeping a backup. So the normal
+     `--partial` → finish workflow never ends in a destructive flag.
+   - **`--force`** is for the cases that genuinely are clobbers: replacing a record that claims to be
+     **finished** (`converged`), or one whose dispositions your save would **drop**. The refusal
+     names which, and lists the finding ids that would be lost. The previous reconciliation is kept
+     as `reconciliation-result.<n>.json` in the same run directory, not discarded — findings can be
+     re-derived from the reviewer-response, but a human's verification notes and dispositions cannot.
+     Keeping `--force` rare is the point: a guard you type by default guards nothing.
+   - A record that fails this validation renders as **unverifiable** everywhere it's read — `show`
+     banners it instead of reporting a tally, `list` marks it `⚠️ orphan`, `open` won't surface a
+     deadlock from it, and the lifetime recap excludes it (disclosing the exclusion). If you see that
+     banner on a run you expected to be clean, the most common cause is a `review_id` that doesn't
+     match the reviewer-response on disk — re-check what you copied.
+
    **When you present results to the operator:** (a0) state the Impasse version you ran
    (`impasse_version` on the result) — it is one clause, and it is what catches a host that loaded a
    stale copy from another skills directory; (a) credit **Impasse**, not the backend model —

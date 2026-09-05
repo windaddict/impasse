@@ -1670,7 +1670,9 @@ def main() -> int:
 
     drid = _json.load(open("schemas/examples/decision.reviewer-response.json"))["review_id"]
     lib.save_run_doc(drid, "reviewer-response", _json.load(open("schemas/examples/decision.reviewer-response.json")))
-    lib.save_run_doc(drid, "reconciliation-result", _json.load(open("schemas/examples/decision.reconciliation-result.json")))
+    lib.save_run_doc(drid, "reconciliation-result",
+                     _json.load(open("schemas/examples/decision.reconciliation-result.json")),
+                     _sanctioned=lib._RECONCILIATION_TOKEN)
     out = report.render(lib.load_run(drid))
     check("Decisions:" in out and "escalated to you" in out, "report: renders the decisions tally")
     check("reviewer ▶" in out and "you      ◀" in out, "report: shows the reviewer/host back-and-forth")
@@ -1679,23 +1681,37 @@ def main() -> int:
 
     # --- report credits operator-decided items (issue #5): a resolved item carrying an escalation
     # object was decided BY the operator, not settled between the models — the tally + footer must say so ---
-    _b_run1 = {"reviewer_response": {}, "reconciliation_result": {"review_id": "b-1", "items": [
+    # A matching reviewer_response (review_id + the referenced finding ids) is now required for
+    # render() to treat the record as verified at all (issue #16/D4) — the original fixtures used
+    # `{}` as a stand-in for "don't care", which is now indistinguishable from a genuine pairing
+    # mismatch, so each fixture below is a minimal but properly PAIRED record instead.
+    def _b_rev(review_id, ids):
+        return {"review_id": review_id, "findings": [{"id": fid} for fid in ids]}
+
+    _b_run1 = {"reviewer_response": _b_rev("b-1", ["F1", "F2"]),
+               "reconciliation_result": {"schema_version": "1.0", "reconciliation_id": "b1",
+               "review_id": "b-1", "outcome": "converged", "items": [
         {"finding_id": "F1", "state": "resolved", "resolution": "Operator chose repair A over B.",
          "escalation": {"dispute_kind": "value_or_priority_tradeoff",
                         "stop_reason": "operator_authority_required", "operator_question": "A or B?"}},
         {"finding_id": "F2", "state": "accepted"}]}}
     _b_out1 = report.render(_b_run1)
+    check("UNVERIFIABLE" not in _b_out1, "report: a properly paired record is not flagged unverifiable")
     check("decided by you" in _b_out1 and "you decided" in _b_out1
           and "Nothing is waiting on you" in _b_out1 and "Nothing needed you" not in _b_out1,
           "report: operator-decided (resolved + escalation) item is credited, not counted as autonomous")
-    _b_run2 = {"reviewer_response": {}, "reconciliation_result": {"review_id": "b-2", "items": [
+    _b_run2 = {"reviewer_response": _b_rev("b-2", ["F1", "F2"]),
+               "reconciliation_result": {"schema_version": "1.0", "reconciliation_id": "b2",
+               "review_id": "b-2", "outcome": "converged", "items": [
         {"finding_id": "F1", "state": "resolved", "resolution": "host fix"},
         {"finding_id": "F2", "state": "accepted"}]}}
     _b_out2 = report.render(_b_run2)
     check("Nothing needed you — the models settled all 2 between themselves." in _b_out2
           and "decided by you" not in _b_out2,
           "report: genuinely-autonomous run still says 'Nothing needed you'")
-    _b_run3 = {"reviewer_response": {}, "reconciliation_result": {"review_id": "b-3", "items": [
+    _b_run3 = {"reviewer_response": _b_rev("b-3", ["F1", "F2"]),
+               "reconciliation_result": {"schema_version": "1.0", "reconciliation_id": "b3",
+               "review_id": "b-3", "outcome": "deadlocked", "items": [
         {"finding_id": "F1", "state": "deadlocked",
          "escalation": {"dispute_kind": "x", "stop_reason": "y", "operator_question": "q1?"}},
         {"finding_id": "F2", "state": "resolved", "resolution": "op ruling",
@@ -1715,10 +1731,27 @@ def main() -> int:
     _prev_cfg = os.environ["IMPASSE_CONFIG_DIR"]
     os.environ["IMPASSE_CONFIG_DIR"] = recap_dir
     check(report.lifetime_recap() == "", "recap: empty when nothing reconciled")
+    # Each reconciliation now needs a matching, PAIRED reviewer-response to count as verified at all
+    # (D5) — a rejected item also needs contradicting verification (D6), which the original fixture
+    # left implicit; both are made explicit here rather than narrowing what the test checks.
+    lib.save_run_doc("recap-a", "reviewer-response",
+                     {"schema_version": "1.0", "review_id": "recap-a",
+                      "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                      "assessment": "needs_attention", "summary": "s", "findings": [
+                          {"id": "F1", "severity": "low", "category": "x", "claim": "c", "evidence": []},
+                          {"id": "F2", "severity": "low", "category": "x", "claim": "c", "evidence": []},
+                          {"id": "F3", "severity": "low", "category": "x", "claim": "c", "evidence": []}]})
+    lib.save_run_doc("recap-b", "reviewer-response",
+                     {"schema_version": "1.0", "review_id": "recap-b",
+                      "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                      "assessment": "needs_attention", "summary": "s", "findings": [
+                          {"id": "F1", "severity": "low", "category": "x", "claim": "c", "evidence": []},
+                          {"id": "F2", "severity": "low", "category": "x", "claim": "c", "evidence": []}]})
     rec_a = {"schema_version": "1.0", "reconciliation_id": "a", "review_id": "recap-a",
              "outcome": "deadlocked", "items": [
                  {"finding_id": "F1", "state": "accepted"},
-                 {"finding_id": "F2", "state": "rejected"},
+                 {"finding_id": "F2", "state": "rejected",
+                  "verification": [{"method": "artifact_inspection", "result": "contradicts", "detail": "checked"}]},
                  {"finding_id": "F3", "state": "deadlocked",
                   "escalation": {"dispute_kind": "value_or_priority_tradeoff",
                                  "stop_reason": "operator_authority_required", "operator_question": "q?"}}]}
@@ -1726,12 +1759,45 @@ def main() -> int:
              "outcome": "converged", "items": [
                  {"finding_id": "F1", "state": "accepted"},
                  {"finding_id": "F2", "state": "resolved", "resolution": "done"}]}
-    lib.save_run_doc("recap-a", "reconciliation-result", rec_a)
-    lib.save_run_doc("recap-b", "reconciliation-result", rec_b)
+    lib.save_run_doc("recap-a", "reconciliation-result", rec_a, _sanctioned=lib._RECONCILIATION_TOKEN)
+    lib.save_run_doc("recap-b", "reconciliation-result", rec_b, _sanctioned=lib._RECONCILIATION_TOKEN)
     recap = report.lifetime_recap()
     check("2 reviews reconciled" in recap, "recap: counts reconciled runs")
     check("5 findings reviewed" in recap and "2 accepted" in recap, "recap: sums findings + accepted")
     check("1 refuted with evidence" in recap and "1 resolved" in recap and "1 awaiting you" in recap, "recap: resolved and escalated counted separately (not conflated)")
+
+    # --- D5 [R]: eligibility comes from the VALIDATOR, not from "does a sibling file exist" — and
+    # the exclusion is DISCLOSED, never silent (a number that quietly stopped counting something is
+    # exactly the failure mode issue #16 is about). ---
+    orphan_rec = {"schema_version": "1.0", "reconciliation_id": "o", "review_id": "recap-orphan",
+                  "outcome": "converged", "items": [{"finding_id": "F1", "state": "accepted"},
+                                                     {"finding_id": "F2", "state": "accepted"}]}
+    lib.save_run_doc("recap-orphan", "reconciliation-result", orphan_rec, _sanctioned=lib._RECONCILIATION_TOKEN)   # no reviewer-response saved: an orphan
+    _recap_o = report.lifetime_recap()
+    check("2 reviews reconciled" in _recap_o,
+          "recap [R/D5]: an orphan's items don't inflate the reconciled-review count (still 2, not 3)")
+    check("5 findings reviewed" in _recap_o,
+          "recap [R/D5]: an orphan's 2 findings don't inflate the findings-reviewed total (still 5)")
+    check("1 record" in _recap_o and "quarantined" in _recap_o,
+          "recap [R/D5]: the excluded orphan is disclosed by name/count, not dropped silently")
+
+    # --- F005 [R]: quarantine is not ONLY "missing sibling" — a fabricated finding_id must trigger
+    # it too, via the SAME validator (a record can be paired to the right review and still be lying
+    # about which findings it disposed of). ---
+    lib.save_run_doc("recap-fake-fid", "reviewer-response",
+                     {"schema_version": "1.0", "review_id": "recap-fake-fid",
+                      "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                      "assessment": "needs_attention", "summary": "s",
+                      "findings": [{"id": "F1", "severity": "low", "category": "x", "claim": "c", "evidence": []}]})
+    fake_fid_rec = {"schema_version": "1.0", "reconciliation_id": "f", "review_id": "recap-fake-fid",
+                    "outcome": "converged", "items": [{"finding_id": "F999", "state": "accepted"}]}
+    lib.save_run_doc("recap-fake-fid", "reconciliation-result", fake_fid_rec, _sanctioned=lib._RECONCILIATION_TOKEN)
+    _recap_f = report.lifetime_recap()
+    check("2 reviews reconciled" in _recap_f,
+          "recap [R/F005]: a fabricated finding_id quarantines the record too, not only a missing sibling")
+    check("2 record" in _recap_f and "quarantined" in _recap_f,
+          "recap [R/F005]: both quarantined records (orphan + fabricated finding_id) are disclosed")
+
     lib.save_run_doc("recap-review-only", "reviewer-response",
                      {"schema_version": "1.0", "review_id": "recap-review-only",
                       "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
@@ -1742,26 +1808,37 @@ def main() -> int:
     check(lib.forget_run(drid) is True and lib.load_run(drid)["reviewer_response"] is None, "run record: forget deletes it")
 
     # --- housekeeping: open-escalation detection + prune ---
+    # A matching reviewer-response is required so this run is a VALID (verifiable) record under
+    # reconciliation_problems() — without one it would now be an orphan and excluded from open_runs().
+    lib.save_run_doc("open-run", "reviewer-response",
+                     {"schema_version": "1.0", "review_id": "open-run",
+                      "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                      "assessment": "needs_attention", "summary": "s",
+                      "findings": [{"id": "F001", "severity": "medium", "category": "x", "claim": "c",
+                                    "evidence": [{"anchor": {"type": "file_range", "path": "p", "line_start": 1},
+                                                  "observation": "o", "grounding": "artifact_observed"}]}]})
     open_rec = {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "open-run",
                 "outcome": "deadlocked", "items": [{"finding_id": "F001", "state": "deadlocked",
                 "escalation": {"dispute_kind": "value_or_priority_tradeoff",
                                "stop_reason": "operator_authority_required", "operator_question": "pick one?"}}]}
-    lib.save_run_doc("open-run", "reconciliation-result", open_rec)
+    lib.save_run_doc("open-run", "reconciliation-result", open_rec, _sanctioned=lib._RECONCILIATION_TOKEN)
     check(any(r["run_id"] == "open-run" for r in report.open_runs()), "housekeeping: open_runs detects an unresolved escalation")
     resolved_rec = {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "open-run",
                     "outcome": "converged", "items": [{"finding_id": "F001", "state": "resolved", "resolution": "decided"}]}
-    lib.save_run_doc("open-run", "reconciliation-result", resolved_rec)
+    lib.save_run_doc("open-run", "reconciliation-result", resolved_rec, _sanctioned=lib._RECONCILIATION_TOKEN)
     check(not any(r["run_id"] == "open-run" for r in report.open_runs()), "housekeeping: resolving clears the open flag")
     old = time.time() - 3 * 86400
     os.utime(os.path.join(lib.runs_dir(), "open-run"), (old, old))
-    deleted, _kept = report.prune(1)
+    deleted, _kept, _invalid = report.prune(1)
     check("open-run" in deleted, "housekeeping: prune deletes an old resolved record")
-    lib.save_run_doc("old-open", "reconciliation-result", open_rec)
+    lib.save_run_doc("old-open", "reconciliation-result", open_rec, _sanctioned=lib._RECONCILIATION_TOKEN)
     os.utime(os.path.join(lib.runs_dir(), "old-open"), (old, old))
-    deleted2, kept2 = report.prune(1)
+    deleted2, kept2, _invalid2 = report.prune(1)
     check("old-open" in kept2 and "old-open" not in deleted2, "housekeeping: prune KEEPS old runs with open escalations")
-    deleted3, _k = report.prune(1, include_open=True)
+    deleted3, _k, _invalid3 = report.prune(1, include_open=True)
     check("old-open" in deleted3, "housekeeping: prune --include-open removes even open runs")
+    check("old-open" in _invalid3, "housekeeping [R]: prune discloses an invalid record among what it deletes "
+          "('old-open' reuses open_rec's review_id 'open-run', so it has no reviewer-response of its own)")
 
     # --- escalations view: GUARANTEE full deadlock context BEFORE the operator decides (symmetric with `show`) ---
     esc_rev = {"schema_version": "1.0", "review_id": "esc-run", "findings": [
@@ -1900,6 +1977,245 @@ def main() -> int:
     with open(_badf, "w") as f:
         f.write('{"hello": "world"}')
     check(report._main(["escalations", _badf]) == 2, "escalations CLI: a non-reconciliation file -> exit 2")
+
+    # --- issues #16/#17/#18: reconciliation write/read integrity -----------------------------------
+    # All three are one defect seen from three sides: a reconciliation can become separated from the
+    # reviewer-response it claims to reconcile, and nothing used to notice. lib.reconciliation_problems
+    # is the one shared validator; lib.save_reconciliation_doc is the one sanctioned way to write.
+
+    def _rt_rev(review_id, ids=("F001", "F002", "F003")):
+        return {"schema_version": "1.0", "review_id": review_id,
+                "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "x"}},
+                "assessment": "needs_attention", "summary": "s",
+                "findings": [{"id": fid, "severity": "medium", "category": "x", "claim": f"claim {fid}",
+                              "evidence": [{"anchor": {"type": "file_range", "path": "p", "line_start": 1},
+                                            "observation": "o", "grounding": "artifact_observed"}]}
+                             for fid in ids]}
+
+    def _rt_item(fid, state, **kw):
+        it = {"finding_id": fid, "state": state}
+        it.update(kw)
+        return it
+
+    def _save_cli(doc, *extra_args):
+        p = os.path.join(tmp, "save-rec-input.json")
+        with open(p, "w") as f:
+            _json.dump(doc, f)
+        ob, eb = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(ob), contextlib.redirect_stderr(eb):
+            rc = report._main(["save-reconciliation", p, *extra_args])
+        return rc, ob.getvalue(), eb.getvalue()
+
+    def _list_cli():
+        ob, eb = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(ob), contextlib.redirect_stderr(eb):
+            rc = report._main(["list"])
+        return rc, ob.getvalue()
+
+    def _open_cli():
+        ob, eb = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(ob), contextlib.redirect_stderr(eb):
+            rc = report._main(["open"])
+        return rc, ob.getvalue()
+
+    # --- lib.reconciliation_problems(): the shared validator, checked in isolation first (D6) ---
+    check(lib.reconciliation_problems("not a dict", None) == ["reconciliation is not an object"],
+          "reconciliation_problems: non-dict input is total, returns exactly the one reason")
+    check(lib.reconciliation_problems({"schema_version": "1.0", "reconciliation_id": "x", "review_id": "y",
+                                       "outcome": "converged", "items": "not a list"}, None) != [],
+          "reconciliation_problems [hardening]: non-list 'items' is flagged, never raises")
+    check(lib.reconciliation_problems({"schema_version": "1.0", "reconciliation_id": "x", "review_id": "y",
+                                       "outcome": "converged",
+                                       "items": [{"finding_id": None, "state": "accepted"}]}, None) != [],
+          "reconciliation_problems [hardening]: a null finding_id is flagged, never raises")
+    check(lib.reconciliation_problems({"review_id": "y",
+                                       "items": [{"finding_id": ["not", "hashable"], "state": "accepted"}]}, None) != [],
+          "reconciliation_problems [hardening]: an unhashable finding_id is flagged, not crashed")
+    check(lib.reconciliation_problems({}, None) != [],
+          "reconciliation_problems: missing required top-level fields is flagged")
+    check(any("no escalation" in p for p in lib.reconciliation_problems(
+        {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "y", "outcome": "deadlocked",
+         "items": [{"finding_id": "F1", "state": "deadlocked"}]}, None)),
+          "reconciliation_problems [D6]: a deadlocked item with no escalation object is flagged")
+    check(any("converged" in p and "deadlocked" in p for p in lib.reconciliation_problems(
+        {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "y", "outcome": "converged",
+         "items": [{"finding_id": "F1", "state": "deadlocked",
+                    "escalation": {"dispute_kind": "x", "stop_reason": "y", "operator_question": "q?"}}]}, None)),
+          "reconciliation_problems [D6]: outcome 'converged' alongside a deadlocked item is inconsistent")
+    check(any("no item is in state deadlocked" in p for p in lib.reconciliation_problems(
+        {"schema_version": "1.0", "reconciliation_id": "x", "review_id": "y", "outcome": "deadlocked",
+         "items": [{"finding_id": "F1", "state": "accepted"}]}, None)),
+          "reconciliation_problems [D6]: outcome 'deadlocked' with no deadlocked item is inconsistent")
+
+    # --- #17.1: an unknown review_id is refused, and refusing must NOT create an orphan run dir ---
+    os.makedirs(lib.runs_dir(), exist_ok=True)
+    _before_dirs = set(os.listdir(lib.runs_dir()))
+    _rc, _out, _err = _save_cli({"schema_version": "1.0", "reconciliation_id": "z1", "review_id": "rt-unknown",
+                                 "outcome": "converged", "items": [{"finding_id": "F001", "state": "accepted"}]})
+    check(_rc != 0, "save-reconciliation [#17.1]: an unknown review_id is refused (exit != 0)")
+    check(not os.path.isdir(lib._run_dir("rt-unknown")),
+          "save-reconciliation [#17.1]: refusing does NOT create the orphan run directory")
+    check(set(os.listdir(lib.runs_dir())) == _before_dirs,
+          "save-reconciliation [#17.1]: no run directory of ANY name appeared as a side effect")
+
+    lib.save_run_doc("rt-run", "reviewer-response", _rt_rev("rt-run"))
+
+    # --- #17.2: a fabricated finding_id is refused, naming it ---
+    _rc, _out, _err = _save_cli({"schema_version": "1.0", "reconciliation_id": "z2", "review_id": "rt-run",
+                                 "outcome": "converged",
+                                 "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted"),
+                                           _rt_item("F003", "accepted"), _rt_item("F999", "accepted")]})
+    check(_rc != 0 and "F999" in _err, "save-reconciliation [#17.2]: a fabricated finding_id is refused, naming it")
+    check(not os.path.isfile(os.path.join(lib._run_dir("rt-run"), "reconciliation-result.json")),
+          "save-reconciliation [#17.2]: the refused document was not written")
+
+    # --- #17.3: duplicate finding_ids are refused ---
+    _rc, _out, _err = _save_cli({"schema_version": "1.0", "reconciliation_id": "z3", "review_id": "rt-run",
+                                 "outcome": "converged",
+                                 "items": [_rt_item("F001", "accepted"), _rt_item("F001", "accepted"),
+                                           _rt_item("F002", "accepted"), _rt_item("F003", "accepted")]})
+    check(_rc != 0 and "duplicate" in _err and "F001" in _err,
+          "save-reconciliation [#17.3]: a duplicate finding_id is refused, naming it")
+
+    # --- #17.4: partial coverage is refused; --partial allows it and reports N of M ---
+    _partial_doc = {"schema_version": "1.0", "reconciliation_id": "z4", "review_id": "rt-run",
+                    "outcome": "incomplete", "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted")]}
+    _rc, _out, _err = _save_cli(_partial_doc)
+    check(_rc != 0 and "partial" in _err,
+          "save-reconciliation [#17.4]: partial coverage (2 of 3) is refused without --partial")
+    check(not os.path.isfile(os.path.join(lib._run_dir("rt-run"), "reconciliation-result.json")),
+          "save-reconciliation [#17.4]: the refused partial document was not written")
+    _rc2, _out2, _err2 = _save_cli(_partial_doc, "--partial")
+    check(_rc2 == 0 and "2 of 3" in _out2,
+          "save-reconciliation [#17.4]: --partial allows it and the success line reports 'N of M'")
+
+    # --- [R] F002: --partial may not write outcome:'converged' — the exact bug class behind a flag ---
+    _conv_partial = {"schema_version": "1.0", "reconciliation_id": "z5", "review_id": "rt-run",
+                     "outcome": "converged", "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted")]}
+    _rc, _out, _err = _save_cli(_conv_partial, "--partial")
+    check(_rc != 0 and "converged" in _err,
+          "save-reconciliation [R/F002]: --partial refuses outcome:'converged' with incomplete coverage")
+
+    # --- [R] D6: a 'rejected' item with no contradicting verification is refused (the protocol invariant) ---
+    _rej_doc = {"schema_version": "1.0", "reconciliation_id": "z6", "review_id": "rt-run",
+               "outcome": "converged",
+               "items": [_rt_item("F001", "rejected"), _rt_item("F002", "accepted"), _rt_item("F003", "accepted")]}
+    _rc, _out, _err = _save_cli(_rej_doc)
+    check(_rc != 0 and "contradicts" in _err,
+          "save-reconciliation [R/D6]: a rejected item with no contradicting verification is refused")
+
+    # --- [R] F008: the sibling reviewer-response's OWN review_id disagreeing is refused (not just absence) ---
+    lib.save_run_doc("rt-mismatch", "reviewer-response", _rt_rev("OTHER-REVIEW-ID"))
+    _mm_doc = {"schema_version": "1.0", "reconciliation_id": "z7", "review_id": "rt-mismatch",
+              "outcome": "converged",
+              "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted"), _rt_item("F003", "accepted")]}
+    _rc, _out, _err = _save_cli(_mm_doc)
+    check(_rc != 0 and "does not" in _err and "match" in _err,
+          "save-reconciliation [R/F008]: a reviewer-response whose own review_id disagrees is refused")
+
+    # --- [R] F001: the guard is at the STORAGE BOUNDARY — lib.save_reconciliation_doc refuses directly,
+    # not only when called via the CLI ---
+    _res_f001 = lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "z8",
+                                             "review_id": "rt-no-such-review", "outcome": "converged",
+                                             "items": [{"finding_id": "F001", "state": "accepted"}]})
+    check(_res_f001.get("ok") is False and bool(_res_f001.get("reasons")),
+          "lib.save_reconciliation_doc [R/F001]: refuses a bad pair directly at the library boundary")
+
+    # --- #18: overwrite is refused without --force; --force writes AND backs up the old content ---
+    lib.save_run_doc("rt-force", "reviewer-response", _rt_rev("rt-force"))
+    _first_doc = {"schema_version": "1.0", "reconciliation_id": "first", "review_id": "rt-force",
+                 "outcome": "converged",
+                 "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted"), _rt_item("F003", "accepted")]}
+    _rc1, _out1, _err1 = _save_cli(_first_doc)
+    check(_rc1 == 0 and _out1.startswith("saved:"),
+          "save-reconciliation [#18]: the first save succeeds and says 'saved' (not 'replaced')")
+    _second_doc = {"schema_version": "1.0", "reconciliation_id": "second", "review_id": "rt-force",
+                  "outcome": "converged",
+                  "items": [_rt_item("F001", "rejected", verification=[
+                                {"method": "artifact_inspection", "result": "contradicts", "detail": "x"}]),
+                            _rt_item("F002", "accepted"), _rt_item("F003", "accepted")]}
+    _rc2, _out2, _err2 = _save_cli(_second_doc)
+    check(_rc2 != 0 and "reconciliation_id='first'" in _err2,
+          "save-reconciliation [#18]: overwrite refused WITHOUT --force, naming the existing reconciliation_id")
+    check(_json.load(open(os.path.join(lib._run_dir("rt-force"), "reconciliation-result.json")))["reconciliation_id"] == "first",
+          "save-reconciliation [#18]: the ORIGINAL content is untouched after a refused overwrite")
+    _rc3, _out3, _err3 = _save_cli(_second_doc, "--force")
+    check(_rc3 == 0 and "replaced:" in _out3,
+          "save-reconciliation [#18]: --force writes and the success line says 'replaced' (not 'saved')")
+    _backup_path = os.path.join(lib._run_dir("rt-force"), "reconciliation-result.1.json")
+    check(os.path.isfile(_backup_path),
+          "save-reconciliation [#18]: --force leaves reconciliation-result.1.json behind")
+    check(_json.load(open(_backup_path))["reconciliation_id"] == "first",
+          "save-reconciliation [#18]: the backup holds the OLD content, not the new")
+    check(_json.load(open(os.path.join(lib._run_dir("rt-force"), "reconciliation-result.json")))["reconciliation_id"] == "second",
+          "save-reconciliation [#18]: the primary now holds the NEW content")
+    if os.name == "posix":
+        check(stat.S_IMODE(os.stat(_backup_path).st_mode) == 0o600,
+              "save-reconciliation [R/F007]: the backup file is 0600 like every other record")
+    _lr_force = lib.load_run("rt-force")
+    check(_lr_force["reconciliation_result"]["reconciliation_id"] == "second",
+          "[R/F007]: load_run reads the PRIMARY reconciliation-result.json, ignoring the numbered backup")
+    check(sum(1 for r in lib.list_runs() if r["run_id"] == "rt-force") == 1,
+          "[R/F007]: list_runs counts the run directory once, not once per backup file inside it")
+    check(lib.forget_run("rt-force") is True and not os.path.isdir(lib._run_dir("rt-force")),
+          "forget [Group B, no regression]: still deletes a run directory that contains backup files")
+
+    # --- #16: show() on an orphan prints the banner, renders '?', and never a number == len(items) ---
+    _orphan_show_rec = {"schema_version": "1.0", "reconciliation_id": "o1", "review_id": "rt-orphan-show",
+                        "outcome": "converged",
+                        "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted"), _rt_item("F999", "accepted")]}
+    lib.save_run_doc("rt-orphan-show", "reconciliation-result", _orphan_show_rec, _sanctioned=lib._RECONCILIATION_TOKEN)   # no reviewer-response: an orphan
+    _orphan_out = report.render(lib.load_run("rt-orphan-show"))
+    check("?" in _orphan_out and "UNVERIFIABLE" in _orphan_out,
+          "show [#16]: an orphan prints the banner and renders '?' for the raised count")
+    check(f"{len(_orphan_show_rec['items'])} finding(s) raised" not in _orphan_out,
+          "show [#16]: never prints a number equal to len(items) as the raised count")
+    check("⚠️ unverifiable (stored: converged)" in _orphan_out,
+          "show [R/F002]: the stored outcome line is suppressed to 'unverifiable', not shown as converged")
+    check("Cannot verify what was settled" in _orphan_out and "Nothing needed you" not in _orphan_out,
+          "show [R/F002]: the all-settled footer is replaced, not left reading as a passed gate")
+
+    # --- Group B (regression guard, no behaviour change): show on a well-formed record still prints
+    # the TRUE raised count — before this change `n = len(findings)` already for a non-empty findings
+    # list, so a valid record's tally is unaffected. ---
+    lib.save_run_doc("rt-wellformed", "reviewer-response", _rt_rev("rt-wellformed"))
+    _wf_rec = {"schema_version": "1.0", "reconciliation_id": "wf", "review_id": "rt-wellformed",
+              "outcome": "converged",
+              "items": [_rt_item("F001", "accepted"), _rt_item("F002", "accepted"),
+                        _rt_item("F003", "resolved", resolution="done")]}
+    lib.save_run_doc("rt-wellformed", "reconciliation-result", _wf_rec, _sanctioned=lib._RECONCILIATION_TOKEN)
+    _wf_out = report.render(lib.load_run("rt-wellformed"))
+    check("3 finding(s) raised" in _wf_out and "UNVERIFIABLE" not in _wf_out,
+          "show [Group B, no regression]: a well-formed record still prints the TRUE raised count")
+
+    # --- [R] F006: 'list' marks an orphan explicitly, and leaves a well-formed run unmarked ---
+    # Check for the full marker phrase, not a bare "orphan" substring — the fixture's own run_id
+    # ("rt-orphan-show") contains that substring, which would make the check pass even with the
+    # marker code removed (a false positive the revert-check caught).
+    _lrc, _lout = _list_cli()
+    _orphan_line = next((ln for ln in _lout.splitlines() if "rt-orphan-show" in ln), "")
+    _wf_line = next((ln for ln in _lout.splitlines() if "rt-wellformed" in ln), "")
+    check(bool(_orphan_line) and "orphan (unverifiable)" in _orphan_line,
+          "list [R/F006]: marks the orphan record's own line explicitly")
+    check(bool(_wf_line) and "orphan (unverifiable)" not in _wf_line,
+          "list [R/F006]: does not mark a well-formed run as orphan")
+
+    # --- [R] F006: 'open' refuses to surface a deadlock from an unverifiable (orphan) record, but
+    # discloses that it skipped one rather than going silent ---
+    _orphan_deadlock_rec = {"schema_version": "1.0", "reconciliation_id": "od", "review_id": "rt-orphan-deadlock",
+                            "outcome": "deadlocked",
+                            "items": [{"finding_id": "F001", "state": "deadlocked",
+                                       "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                                                      "stop_reason": "operator_authority_required",
+                                                      "operator_question": "pick?"}}]}
+    lib.save_run_doc("rt-orphan-deadlock", "reconciliation-result", _orphan_deadlock_rec, _sanctioned=lib._RECONCILIATION_TOKEN)   # orphan: no reviewer-response
+    check(not any(r["run_id"] == "rt-orphan-deadlock" for r in report.open_runs()),
+          "open [R/F006]: refuses to surface a deadlock from an unverifiable (orphan) record")
+    check("rt-orphan-deadlock" in report.unverifiable_open_run_ids(),
+          "open [R/F006]: the skipped record is disclosed by id via unverifiable_open_run_ids(), not silently dropped")
+    _orc, _oout = _open_cli()
+    check("rt-orphan-deadlock" in _oout,
+          "open CLI [R/F006]: discloses the unverifiable run's id in its own output")
 
     # --- issue #11: timeout diagnosability, wall recommendation, duration telemetry ---
     # The defect: a Claude review that blew its wall returned "backend wall_timeout after 605s" and
@@ -2662,6 +2978,314 @@ def main() -> int:
         else:
             os.environ["IMPASSE_CONFIG_DIR"] = _vm_prev
         shutil.rmtree(_vm_dir, ignore_errors=True)
+
+    # A record that PARSES but is not an object crashed `show` AND `list` with AttributeError —
+    # so the command you would run to FIND the bad record was the one that died on it. Found while
+    # verifying the #16/#17/#18 work; not part of that plan.
+    _nd_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _nd_dir = tempfile.mkdtemp(prefix="impasse-nondict-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _nd_dir
+        _nd_run = os.path.join(_nd_dir, "runs", "corrupt")
+        os.makedirs(_nd_run, exist_ok=True)
+        with open(os.path.join(_nd_run, "reconciliation-result.json"), "w") as _f:
+            _f.write('["not", "an", "object"]')
+        _nd_loaded = lib.load_run("corrupt")
+        check(_nd_loaded["reconciliation_result"] is None,
+              "load_run: a record that parses but isn't an object reads as unreadable, not raw")
+        _nd_ok = True
+        try:
+            report.render(lib.load_run("corrupt"))
+            [r["run_id"] for r in lib.list_runs()]
+        except AttributeError:
+            _nd_ok = False
+        check(_nd_ok, "load_run: a non-object record no longer crashes show/list with AttributeError")
+    finally:
+        if _nd_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _nd_prev
+        shutil.rmtree(_nd_dir, ignore_errors=True)
+
+    # --- fixes from the cross-provider review OF the #16/#17/#18 implementation ---
+    # R-F001 (critical): the plan guarded the CLI, leaving save_run_doc — a PUBLIC writer — able to
+    # re-create the exact orphan of #17, outside the per-run lock. Advice is not an invariant.
+    _bp_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _bp_dir = tempfile.mkdtemp(prefix="impasse-bypass-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _bp_dir
+        _bp_refused = False
+        try:
+            lib.save_run_doc("bypass-run", "reconciliation-result",
+                             {"schema_version": "1.0", "review_id": "bypass-run",
+                              "outcome": "converged", "items": []})
+        except ValueError as _e:
+            _bp_refused = "save_reconciliation_doc" in str(_e)
+        check(_bp_refused,
+              "R-F001: save_run_doc REFUSES a reconciliation-result — the guard is at the writer")
+        check(not os.path.isdir(os.path.join(_bp_dir, "runs", "bypass-run")),
+              "R-F001: the refused bypass creates no orphan directory")
+        check(bool(lib.save_run_doc("rev-ok", "reviewer-response",
+                                    {"schema_version": "1.0", "review_id": "rev-ok"})),
+              "R-F001: reviewer-responses still write through the same primitive")
+    finally:
+        if _bp_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _bp_prev
+        shutil.rmtree(_bp_dir, ignore_errors=True)
+
+    # R-F002 (high): every reader did `rec.get("items") or []` then `it.get(...)`, so a malformed
+    # collection raised AttributeError BEFORE the unverifiable banner could print — `show` and
+    # `list` crashed on precisely the records they were being taught to report honestly.
+    for _mal_name, _mal in (("string", "nope"), ("non-dict entry", [42]),
+                            ("dict", {"a": 1}), ("int", 7), ("None", None)):
+        check(lib.reconciliation_items({"items": _mal}) == [],
+              f"R-F002: reconciliation_items({_mal_name}) degrades to [] rather than raising")
+    _mal_ok = True
+    try:
+        for _mal in ("nope", [42], {"a": 1}, 7):
+            report.render({"run_id": "x", "reviewer_response": None,
+                           "reconciliation_result": {"schema_version": "1.0", "review_id": "x",
+                                                     "outcome": "converged", "items": _mal}})
+    except AttributeError:
+        _mal_ok = False
+    check(_mal_ok, "R-F002: show renders a malformed items collection instead of crashing")
+
+    # R-F003 (high): a sibling FILE is not a usable reviewer-response. Without this, a structurally
+    # broken response certified a reconciliation as a verified pair.
+    check(any("findings" in p for p in lib.reconciliation_problems(
+              {"schema_version": "1.0", "review_id": "r", "outcome": "converged", "items": []},
+              {"review_id": "r"})),
+          "R-F003: a reviewer-response with no findings list cannot certify a pair")
+    check(any("string 'id'" in p for p in lib.reconciliation_problems(
+              {"schema_version": "1.0", "review_id": "r", "outcome": "converged", "items": []},
+              {"review_id": "r", "findings": [{"no": "id"}]})),
+          "R-F003: findings without string ids cannot be used for coverage")
+
+    # R-F004 (medium): the closing line branched only on unverifiable + pending deadlocks, so a
+    # record whose OWN outcome says the protocol never finished still signed off "nothing needed you".
+    _f4 = report.render({"run_id": "f4", "reviewer_response":
+                         {"schema_version": "1.0", "review_id": "f4", "assessment": "approve",
+                          "findings": [{"id": "F001", "claim": "c",
+                                        "evidence": [{"location": "l", "observation": "o"}]}]},
+                         "reconciliation_result":
+                         {"schema_version": "1.0", "reconciliation_id": "rc-f4",
+                          "review_id": "f4", "outcome": "failed",
+                          "items": [{"finding_id": "F001", "state": "resolved"}]}})
+    check("Nothing needed you" not in _f4 and "Not a completed review" in _f4,
+          "R-F004: a failed/incomplete outcome never renders as an all-settled review")
+
+    # R-F005/R-F006 (medium): both live inside functions documented TOTAL, and both were reachable
+    # from a hand-edited file — a truthy non-sized `items`, and a repr that blows the stack.
+    check(len(lib.reconciliation_items({"items": 1})) == 0,
+          "R-F005: a truthy non-sized items value counts as 0 rather than raising TypeError")
+    _deep = []
+    _cur = _deep
+    for _ in range(200000):
+        _nxt = []
+        _cur.append(_nxt)
+        _cur = _nxt
+    _deep_ok = True
+    try:
+        lib.reconciliation_problems({"items": [{"finding_id": _deep, "state": "bogus"}]},
+                                    {"findings": []})
+    except RecursionError:
+        _deep_ok = False
+    check(_deep_ok, "R-F006: a deeply nested value in a diagnostic can't RecursionError out")
+
+    # --- fixes from the same-provider (Fable) depth review of PR #19 ---
+    _fb_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _fb_dir = tempfile.mkdtemp(prefix="impasse-fable-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _fb_dir
+        _fb_rev = {"schema_version": "1.0", "review_id": "fb", "assessment": "approve", "summary": "s",
+                   "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "a" * 64}},
+                   "findings": [{"id": "F001", "severity": "low", "claim": "c", "confidence": "high",
+                                 "evidence": [{"location": "l", "observation": "o"}]}]}
+        lib.save_run_doc("fb", "reviewer-response", _fb_rev)
+        lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "rc-fb",
+                                     "review_id": "fb", "outcome": "converged",
+                                     "items": [{"finding_id": "F001", "state": "resolved"}]})
+
+        # FB-F1: "absent" and "present but unreadable" are OPPOSITE facts about a run. Collapsing
+        # them made `show` state that a recorded, converged reconciliation was "not yet recorded" —
+        # a false claim of exactly the class this whole change exists to stop — while `list` called
+        # the same run an orphan.
+        with open(os.path.join(_fb_dir, "runs", "fb", "reconciliation-result.json"), "w") as _f:
+            _f.write("[1,2,3]")
+        _fb_run = lib.load_run("fb")
+        check(_fb_run["reconciliation_result"] is None
+              and _fb_run["reconciliation_result_unreadable"] is True,
+              "FB-F1: load_run distinguishes an unreadable record from an absent one")
+        _fb_show = report.render(lib.load_run("fb"))
+        check("UNVERIFIABLE" in _fb_show and "not yet recorded" not in _fb_show,
+              "FB-F1: a corrupt reconciliation renders unverifiable, never 'not yet recorded'")
+        check("quarantined" in report.lifetime_recap(),
+              "FB-F1: a corrupt record is disclosed as quarantined, not silently dropped")
+
+        # FB-F6: 0-of-N is the NORMAL state before a reconciliation exists; warning on it spends the
+        # ⚠️ signal the rest of this change depends on.
+        _fb_fresh = report.render({"run_id": "fresh", "reviewer_response": _fb_rev,
+                                   "reconciliation_result": None})
+        check("partial:" not in _fb_fresh and "not yet recorded" in _fb_fresh,
+              "FB-F6: a healthy un-reconciled run carries no spurious partial warning")
+
+        # FB-F3: a forget landing between validation and write let makedirs recreate the directory
+        # holding a reconciliation ALONE — issue #17's orphan, from two commands each behaving as
+        # documented. Deterministic in one process, contrary to the CHANGELOG's original claim that
+        # this needed multi-process orchestration.
+        lib.save_run_doc("fb2", "reviewer-response", dict(_fb_rev, review_id="fb2"))
+        _fb_real = lib.save_run_doc
+
+        def _fb_racing(run_id, name, doc, **kw):
+            if name == "reconciliation-result":
+                lib.forget_run(run_id)          # the interleaving
+            return _fb_real(run_id, name, doc, **kw)
+
+        lib.save_run_doc = _fb_racing
+        try:
+            _fb_res = lib.save_reconciliation_doc(
+                {"schema_version": "1.0", "reconciliation_id": "rc-fb2", "review_id": "fb2",
+                 "outcome": "converged", "items": [{"finding_id": "F001", "state": "resolved"}]})
+        finally:
+            lib.save_run_doc = _fb_real
+        _fb_d = os.path.join(_fb_dir, "runs", "fb2")
+        _fb_files = sorted(os.listdir(_fb_d)) if os.path.isdir(_fb_d) else []
+        check(_fb_res.get("ok") is False and _fb_files != ["reconciliation-result.json"],
+              "FB-F3: a forget racing a save cannot recreate the #17 orphan")
+        check("disappeared while writing" in " ".join(_fb_res.get("reasons") or []),
+              "FB-F3: the racing save refuses with a reason, leaving nothing behind")
+
+        # The lock must be reentrant WITHIN a process: forget_run now takes the same per-run lock a
+        # caller may already hold, and a self-deadlock in a records tool is worse than the race.
+        with lib._interprocess_lock("run-reentry-test.lock"):
+            with lib._interprocess_lock("run-reentry-test.lock"):
+                check(True, "FB-F3: the per-run lock is reentrant in-process (no self-deadlock)")
+    finally:
+        if _fb_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _fb_prev
+        shutil.rmtree(_fb_dir, ignore_errors=True)
+
+    # FB-F4: the validator's enums are a SECOND copy of the schema's. They gate every write and
+    # quarantine every read, so silent drift would refuse every new-format record and brand it
+    # unverifiable on six surfaces. Turn drift into a red gate instead.
+    _fb_schema = json.load(open("schemas/reconciliation-result.v1.json"))
+    check(set(lib.RECOGNIZED_OUTCOMES) == set(_fb_schema["properties"]["outcome"]["enum"]),
+          "FB-F4: RECOGNIZED_OUTCOMES matches the schema's outcome enum (drift is a failure)")
+    check(set(lib.RECOGNIZED_ITEM_STATES)
+          == set(_fb_schema["$defs"]["item"]["properties"]["state"]["enum"]),
+          "FB-F4: RECOGNIZED_ITEM_STATES matches the schema's state enum (drift is a failure)")
+
+    # --- FB-F2: completing a --partial reconciliation must not require the destructive flag ---
+    # The finished record conflicts with the operator's own interim one, so the normal workflow's
+    # last step became --force. A guard everyone types by default guards nothing.
+    _sp_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _sp_dir = tempfile.mkdtemp(prefix="impasse-supersede-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _sp_dir
+        _sp_rev = {"schema_version": "1.0", "review_id": "sp", "assessment": "approve", "summary": "s",
+                   "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "a" * 64}},
+                   "findings": [{"id": f"F00{i}", "severity": "low", "claim": "c",
+                                 "confidence": "high",
+                                 "evidence": [{"location": "l", "observation": "o"}]}
+                                for i in (1, 2, 3)]}
+        lib.save_run_doc("sp", "reviewer-response", _sp_rev)
+        lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "rc-i",
+                                     "review_id": "sp", "outcome": "incomplete",
+                                     "items": [{"finding_id": "F001", "state": "resolved"}]},
+                                    partial=True)
+        _sp_done = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-done", "review_id": "sp",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_done.get("ok") and _sp_done.get("superseded") is True,
+              "FB-F2: completing an interim reconciliation needs no --force")
+        check(bool(_sp_done.get("backup_path")),
+              "FB-F2: superseding still keeps the interim record as a backup")
+
+        # The two rails that must NOT open. A converged record claims to be finished, and a save
+        # that would DROP dispositions is a clobber whatever the existing outcome says.
+        _sp_clob = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-other", "review_id": "sp",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_clob.get("conflict") is True and _sp_clob.get("existing_outcome") == "converged",
+              "FB-F2: replacing a CONVERGED record still requires --force")
+
+        lib.save_run_doc("sp2", "reviewer-response", dict(_sp_rev, review_id="sp2"))
+        lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "rc-i2",
+                                     "review_id": "sp2", "outcome": "incomplete",
+                                     "items": [{"finding_id": "F001", "state": "resolved"},
+                                               {"finding_id": "F002", "state": "resolved"}]},
+                                    partial=True)
+        _sp_drop = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-drop", "review_id": "sp2",
+             "outcome": "incomplete", "items": [{"finding_id": "F003", "state": "resolved"}]},
+            partial=True)
+        check(_sp_drop.get("conflict") is True
+              and sorted(_sp_drop.get("would_drop") or []) == ["F001", "F002"],
+              "FB-F2: a save that would DROP dispositions still requires --force, and names them")
+
+        # IDENTITY BY ID IS NOT IDENTITY OF WORK. A bare item is an id-superset of one carrying an
+        # operator's ruling and a paragraph of verification notes — exactly the content --force
+        # exists to protect, since findings can be re-derived from the reviewer-response and a
+        # human's reasoning cannot. Found while probing my own supersede predicate.
+        lib.save_run_doc("sp3", "reviewer-response", dict(_sp_rev, review_id="sp3"))
+        _sp_rich = {"schema_version": "1.0", "reconciliation_id": "rc-rich", "review_id": "sp3",
+                    "outcome": "deadlocked",
+                    "items": [{"finding_id": "F001", "state": "deadlocked",
+                               "host_position": "hours of verification reasoning",
+                               "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                                              "stop_reason": "operator_authority_required",
+                                              "operator_question": "Runway or speed?"}}]}
+        lib.save_reconciliation_doc(_sp_rich, partial=True)
+        _sp_thin = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-thin", "review_id": "sp3",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_thin.get("conflict") is True
+              and _sp_thin.get("would_impoverish") == ["F001"],
+              "FB-F2: an id-superset that STRIPS an operator ruling is not a supersede")
+        # ...but answering the deadlock while keeping the content IS the normal forward step.
+        _sp_answered = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-answered", "review_id": "sp3",
+             "outcome": "converged",
+             "items": [{"finding_id": "F001", "state": "resolved",
+                        "host_position": "hours of verification reasoning",
+                        "resolution": "Operator ruled: protect runway.",
+                        "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                                       "stop_reason": "operator_authority_required",
+                                       "operator_question": "Runway or speed?"}}]
+             + [{"finding_id": f, "state": "resolved"} for f in ("F002", "F003")]})
+        check(_sp_answered.get("ok") and _sp_answered.get("superseded") is True,
+              "FB-F2: answering a deadlock and keeping its content supersedes without --force")
+        # An existing record we cannot READ is never supersedable: reconciliation_items degrades a
+        # corrupt collection to [], which would make the superset test hold VACUOUSLY — the more
+        # damaged the old record, the easier it would have been to overwrite unflagged.
+        lib.save_run_doc("sp4", "reviewer-response", dict(_sp_rev, review_id="sp4"))
+        with open(os.path.join(_sp_dir, "runs", "sp4", "reconciliation-result.json"), "w") as _f:
+            _f.write(json.dumps({"review_id": "sp4", "items": "corrupt-but-truthy"}))
+        _sp_corrupt = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-x", "review_id": "sp4",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_corrupt.get("conflict") is True
+              and _sp_corrupt.get("existing_unreadable") is True,
+              "FB-F2: an UNREADABLE existing record is never superseded vacuously")
+
+        check(lib._item_loses_substance({"escalation": {"a": 1}}, {"state": "resolved"}) is True
+              and lib._item_loses_substance({"state": "resolved"}, {"escalation": {"a": 1}}) is False
+              and lib._item_loses_substance("nope", 7) is False,
+              "FB-F2: _item_loses_substance detects loss, permits gain, and is total")
+    finally:
+        if _sp_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _sp_prev
+        shutil.rmtree(_sp_dir, ignore_errors=True)
 
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")

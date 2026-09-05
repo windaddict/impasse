@@ -13,6 +13,145 @@ checked against it by the test suite, so they cannot drift.
 
 ## [Unreleased]
 
+### Reconciliation write/read integrity — issues #16, #17, #18
+
+*(Implemented from a plan that was independently reviewed before any code was written — 8 findings,
+all accepted — and then reviewed again as a finished diff — 7 findings, all accepted. The
+plan-review caught a `--partial` flag that would have re-created the bug behind an opt-in; the
+implementation-review caught that the guard had been put in the command rather than the writer, so
+the bug was still reachable. Both are described below.)*
+
+#### Fixes from the implementation review
+- **The guard moved from the command to the WRITER.** The first implementation validated inside
+  `save-reconciliation` and reduced `save_run_doc` to a docstring saying "don't use me for
+  reconciliations". Advice is not an invariant: one call to the public writer still created a
+  complete orphan directory, outside the per-run lock — i.e. **issues #17 and #18 were still
+  reproducible**. `save_run_doc` now raises on a `reconciliation-result` write unless it carries a
+  private module sentinel that only `save_reconciliation_doc` holds (a sentinel object, not a
+  boolean, so it cannot arrive from JSON, a flag, or reviewer output).
+- **The report no longer crashes on the records it exists to describe.** Every reader did
+  `rec.get("items") or []` and then `it.get(...)`, so a malformed collection raised `AttributeError`
+  **before** the unverifiable banner could print — `show` and `list` died on exactly the corrupt
+  records they were being taught to report honestly. One total accessor,
+  `lib.reconciliation_items()`, now serves them all. The same class of bug in `load_run` (a file
+  that parses but isn't an object) was found and fixed alongside it.
+- **A sibling file is not a usable reviewer-response.** A response with no findings list, or findings
+  without string ids, could certify a pair. Scoped deliberately to the pairing invariant: an
+  `assessment` check was tried and withdrawn, because whether a response carries one has no bearing
+  on whether the two halves belong together, and whole-document conformance is CI's job.
+- **A record whose outcome says it never finished no longer signs off as complete.** The closing line
+  branched on unverifiable and pending deadlocks but never on the outcome, so a `failed` or
+  `incomplete` record still printed "Nothing needed you — the models settled all N" — the same shape
+  as the original #16 bug.
+- **Two totality holes**, both reachable from a hand-edited file: `len()` over a truthy non-sized
+  `items` raised `TypeError` out of the branch whose job is a controlled refusal, and `repr()` of a
+  deeply nested value raised `RecursionError` from inside a diagnostic string.
+
+#### Fixes from the same-provider depth review
+A third review — a stronger model, but **same-provider, so breadth rather than independence** — went
+after concept and residual honesty rather than correctness. It found the following, and corrected the
+record on a limitation this changelog had previously overstated.
+
+- **The lock discipline was one-sided, so #17 was NOT fully closed.** `save_reconciliation_doc` took
+  a per-run lock; `forget_run` — reachable from `forget`, `prune` and the runner's cleanup — did not.
+  A delete landing between the writer's pair validation and its write let `makedirs(exist_ok=True)`
+  recreate the directory holding a reconciliation **alone**: issue #17's orphan, produced by two
+  commands each behaving exactly as documented. Reproduced, then closed three ways — `forget_run`
+  takes the lock, the lock is **reentrant within a process** (taking it twice on two fds otherwise
+  self-deadlocks, and a deadlock in a records tool is worse than the race), and the writer re-checks
+  the sibling immediately **before and after** the write, undoing its own file if the pair broke
+  mid-write.
+- **Correction: this was testable all along.** The previous entry said a concurrency test "needs
+  multi-process orchestration this stdlib suite has no harness for." That was wrong, and it
+  functioned as a justification for not testing the property. A single-process test that patches the
+  write to interleave a `forget_run` exercises the race deterministically — it now exists, and it
+  fails against the pre-fix code.
+- **A corrupt reconciliation reported itself as never recorded.** `load_run` mapped both "no file"
+  and "file present but unreadable" to `None`, but those are opposite facts: absent means the step
+  never happened, unreadable means it did and the evidence is damaged. So `show` printed
+  "reconciliation not yet recorded" for a **recorded, converged** record — a false statement of the
+  exact class this change exists to eliminate — while `list` called the same run an orphan and the
+  lifetime recap dropped it without disclosure, contradicting its own stated rule.
+- **The ⚠️ signal was being spent on healthy runs.** A not-yet-reconciled run printed
+  "partial: only 0 of N dispositioned" directly above the correct "not yet recorded" footer.
+- **The validator's enums are a second copy of the schema's**, gating every write and quarantining
+  every read, with nothing checking them against it. A test now asserts they match, so adding an
+  outcome or state to the schema fails loudly instead of silently refusing every new-format record.
+
+- **Completing a partial reconciliation no longer requires `--force`.** The finished record
+  conflicted with the operator's own interim one, so the sanctioned `--partial` workflow ended in the
+  flag that exists to mark a dangerous replace — and a guard everyone types by default guards
+  nothing. A save now *supersedes* without a flag when both hold: the existing record does not claim
+  to be finished (`outcome` isn't `converged`), and the new one dispositions every finding the old
+  one did, so it can only move forward. It reports `superseded` (distinct from both `saved` and
+  `replaced`) and still writes a backup. `--force` is now reserved for the two real clobbers —
+  replacing a finished record, or dropping dispositions — and the refusal says which, naming the
+  finding ids at risk.
+  Two corrections came out of reviewing that relaxation, both closing holes it opened:
+  **identity by id is not identity of work** — a bare `{finding_id, state}` item is an id-superset of
+  one carrying an operator's ruling and a paragraph of verification notes, so the predicate also
+  requires that no shared item LOSES human-written content (`escalation`, `host_position`,
+  `resolution`, `verification`); gaining content and answering a deadlock remain ordinary forward
+  steps. And **an unreadable existing record is never superseded** — a corrupt collection degrades to
+  an empty item list, which would make the superset test hold vacuously, so the more damaged the old
+  record the easier it would have been to overwrite unflagged.
+  Stated rather than hidden: the interim test reads the existing record's own `outcome`, which is
+  self-reported. The content and coverage checks are what actually protect the work, and they do not
+  rest on self-reporting.
+
+**Known limitation, still not fixed:** no test injects a failure *between* the backup and the
+primary replacement, so crash-safety in that window remains verified by inspection. Unlike the race
+above, that one does need process-level fault injection.
+
+#### The original three
+
+One defect seen from three sides: a reconciliation could become separated from the reviewer-response
+it claims to reconcile, and nothing anywhere noticed. All three were hit in one real session, from an
+ordinary mistake — inventing a `review_id` instead of copying the one the runner assigned.
+
+- **`save-reconciliation` validates before writing, instead of accepting almost anything.**
+  Previously it checked only "is a dict with a truthy `review_id`", then wrote via `save_run_doc`,
+  which creates the run directory if it doesn't exist. An unknown `review_id` therefore silently
+  created an orphan directory holding a reconciliation with no findings behind it; a fabricated
+  `finding_id` was accepted and later rendered as a real resolved finding; duplicate `finding_id`s
+  were silently collapsed; and partial coverage went unremarked. It now refuses (non-zero exit,
+  nothing written) on all four, naming the specific problem. New `lib.reconciliation_problems()` is
+  the shared check — a hand-written structural validator, not a `jsonschema` dependency (stdlib-only
+  in `scripts/` is a hard invariant here; full schema conformance stays in
+  `tests/validate_schemas.py`, where a validation engine belongs). New `lib.save_reconciliation_doc()`
+  is now the only sanctioned way to write a reconciliation — the guard lives at this storage boundary,
+  not only in the CLI, so any other caller gets it too.
+- **Partial coverage is a flag, not silent.** Saving before every raised finding is dispositioned is
+  refused unless you pass `--partial` — a deliberately partial reconciliation mid-protocol is
+  legitimate. It can never pair with `outcome: converged`, though: that combination is the original
+  bug (9-of-13 findings, stored as converged) behind a flag instead of behind a typo. The success line
+  always reports `N of M findings dispositioned`, so a partial record identifies itself.
+- **Re-saving over an existing reconciliation is refused without `--force`.** Previously it was
+  replaced with no prompt, no backup, and an identical `saved:` line either way. With `--force`, the
+  previous reconciliation is kept as `reconciliation-result.<n>.json` in the same run directory
+  (`0600`, permanent — removed only when the whole run is forgotten). Findings can be re-derived from
+  the reviewer-response; a human's verification notes and dispositions cannot, which is why this is a
+  kept copy rather than a discarded one.
+- **`show` no longer invents a denominator.** It used to compute the "findings raised" tally as
+  `len(findings) if findings else len(items)` — when the reviewer-response was missing, that count
+  silently became the host's own dispositions, so an under-covered record read as complete. It now
+  renders `?` and a prominent banner instead, and — since the denominator was only half of it — also
+  suppresses the stored `outcome: converged` line (shown as `⚠️ unverifiable (stored: converged)`) and
+  the "nothing needed you" footer, so a broken record can no longer read as a passed gate.
+- **The same validator gates every other surface that reads a reconciliation.** `list` marks an
+  orphan `⚠️ orphan (unverifiable)`; `open` won't surface a deadlock from a record it can't verify
+  (you'd be asked to rule on a question that might not even name the finding it claims to); `prune`
+  discloses how many of the records it inspected were invalid; `escalations` now checks pairing even
+  when there is nothing currently deadlocked to render (previously it skipped that check whenever
+  there were zero open escalations, which let a fabricated but non-deadlocked reconciliation pass
+  silently); and the lifetime recap on `show` excludes an unverifiable run's items from its totals
+  rather than counting them, disclosing how many records were excluded.
+- **Risk, stated plainly: this moves numbers you've already seen.** Existing on-disk records that
+  don't pass the new validator — most commonly a mismatched `review_id` — will now render as
+  unverifiable instead of contributing a confident tally, and the lifetime recap's totals will drop
+  by however many records that affects. That is the fix working as intended, not a regression, but it
+  is a visible change to numbers you've already looked at.
+
 ### README accuracy — the defects a Cursor-hosted review found
 Four inaccuracies, all raised by an independent review of the README against the code and verified
 against the live files before fixing.
