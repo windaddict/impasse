@@ -185,6 +185,15 @@ def render(run: dict) -> str:
     # the check when there's no reconciliation yet — that's the normal "not yet recorded" case below,
     # not an integrity problem.
     problems = lib.reconciliation_problems(rec, rev_raw) if rec_raw else []
+    # A reconciliation FILE that exists but cannot be read is not "not yet recorded" — the step
+    # happened and its evidence is damaged. Saying otherwise is an affirmatively false statement
+    # about the record, and `list` already calls the same run an orphan.
+    if run.get("reconciliation_result_unreadable"):
+        problems = problems + ["reconciliation-result.json is present but unreadable (corrupt, "
+                               "not an object, or too large) — it was recorded and cannot be read"]
+    if run.get("reviewer_response_unreadable"):
+        problems = problems + ["reviewer-response.json is present but unreadable — coverage cannot "
+                               "be checked against it"]
     unverifiable = bool(problems)
 
     out = ["⚖️  Impasse run report"]
@@ -223,7 +232,10 @@ def render(run: dict) -> str:
     if decided_by_you:
         tally += f" · 🧑‍⚖️ {decided_by_you} decided by you"
     out.append(tally)
-    if not unverifiable and findings and len(items) < len(findings):
+    # `rec_raw` too: with no reconciliation yet, 0-of-N is the NORMAL mid-protocol state, not a
+    # warning. Firing ⚠️ on every healthy un-reconciled run spends the signal this change relies on
+    # everywhere else, and the honest footer below already says the reconciliation isn't recorded.
+    if rec_raw and not unverifiable and findings and len(items) < len(findings):
         out.append(f"    ⚠️  partial: only {len(items)} of {len(findings)} findings dispositioned")
     if rec.get("failure"):
         out.append(f"⚠️ Failure: {rec['failure'].get('code')} — {rec['failure'].get('message')}")
@@ -435,6 +447,9 @@ def lifetime_recap() -> str:
     for r in lib.list_runs():
         run = lib.load_run(r["run_id"])
         rec = run.get("reconciliation_result")
+        if run.get("reconciliation_result_unreadable"):
+            quarantined += 1          # present but unreadable IS a record, and a damaged one
+            continue
         if not rec:
             continue
         if lib.reconciliation_problems(rec, run.get("reviewer_response")):

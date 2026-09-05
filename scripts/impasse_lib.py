@@ -896,6 +896,10 @@ def get_default_speed(backend: str) -> str | None:
     return s if s in ALLOWED_SPEED else None
 
 
+# Lock paths this interpreter currently holds — see the re-entrancy note in _interprocess_lock.
+_HELD_LOCKS: set = set()
+
+
 def _interprocess_lock(lock_name: str):
     """An exclusive interprocess lock file in the config dir, so two hosts (e.g. a Claude Code and a
     Codex host sharing one config dir) can't lose an update via interleaved read-modify-replace
@@ -909,13 +913,26 @@ def _interprocess_lock(lock_name: str):
         import contextlib
         return contextlib.nullcontext()
 
+    # REENTRANT WITHIN THIS PROCESS. flock is per open-file-description, so taking the same lock
+    # twice in one process on two fds blocks forever — and these locks legitimately nest now:
+    # forget_run() takes the per-run lock, and a caller already holding it (the reconciliation
+    # writer) can reach forget_run through a cleanup path. A self-deadlock in a records tool is
+    # worse than the race it prevents, so a re-entry is a no-op context while the outermost holder
+    # keeps the real lock for the whole nested duration. Cross-PROCESS exclusion is unchanged: this
+    # set is per-interpreter.
+    if lock_path in _HELD_LOCKS:
+        import contextlib
+        return contextlib.nullcontext()
+
     class _Lock:
         def __enter__(self):
             self._fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             fcntl.flock(self._fd, fcntl.LOCK_EX)
+            _HELD_LOCKS.add(lock_path)
             return self
 
         def __exit__(self, *exc):
+            _HELD_LOCKS.discard(lock_path)
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
             finally:
@@ -1258,10 +1275,10 @@ def reconciliation_problems(rec, rev) -> list:
             if rev.get("review_id") != rid:
                 problems.append(f"reviewer-response review_id {rev.get('review_id')!r} does not "
                                 f"match the reconciliation's {rid!r} — refusing to treat them as a pair")
-            revf = rev.get("findings")
-            if not isinstance(revf, list):
-                problems.append("reviewer-response 'findings' is not a list")
-            else:
+            # Reuses `_f` from the shape check above rather than re-testing it — the duplicate
+            # test appended two different messages for one condition (review F5).
+            if isinstance(_f, list):
+                revf = _f
                 known = {f["id"] for f in revf if isinstance(f, dict) and isinstance(f.get("id"), str)}
                 unknown = sorted({it.get("finding_id") for it in items
                                   if isinstance(it, dict) and isinstance(it.get("finding_id"), str)
@@ -1382,8 +1399,29 @@ def save_reconciliation_doc(doc: dict, *, partial: bool = False, force: bool = F
                         "item_count": len(reconciliation_items(existing))}
             backup_path = _backup_reconciliation(d, target)
 
+        # RE-VERIFY the sibling immediately around the write. The per-run lock serializes other
+        # PROCESSES, but it cannot help when a delete interleaves inside this one (forget_run is
+        # reachable from a cleanup path, and re-entry is deliberately a no-op to avoid a
+        # self-deadlock). Without this, `forget_run` landing between validation and write let
+        # save_run_doc's makedirs(exist_ok=True) recreate the directory holding a reconciliation
+        # ALONE — reproducing issue #17's orphan from two commands each behaving as documented.
+        # Checking before AND after is what makes the pair invariant hold at the moment of writing
+        # rather than at the moment of validating.
+        sibling = os.path.join(d, "reviewer-response.json")
+        if not os.path.isfile(sibling):
+            return {"ok": False, "reasons": [MISSING_REVIEWER_RESPONSE_MSG.format(rid=rid)]}
         path = save_run_doc(rid, "reconciliation-result", doc,
                             _sanctioned=_RECONCILIATION_TOKEN)
+        if not os.path.isfile(sibling):
+            # It vanished DURING the write, so we just created the orphan ourselves. Undo it: a
+            # refusal that leaves corrupt state behind is a louder version of the same bug.
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            return {"ok": False, "reasons": [
+                "the reviewer-response disappeared while writing (a concurrent forget/prune?) — "
+                "nothing was saved, so no orphan record was left behind"]}
         return {"ok": True, "path": path, "replaced": replaced, "backup_path": backup_path,
                 "dispositioned": dispositioned, "raised": raised}
 
@@ -1409,33 +1447,56 @@ def list_runs() -> list:
 def load_run(run_id: str) -> dict:
     d = _run_dir(run_id)
 
+    unreadable = set()
+
     def _load(p):
+        if not os.path.exists(p):
+            return None                 # genuinely absent — a different fact from "present but junk"
         try:
             with open(p, encoding="utf-8") as f:
                 doc = json.loads(f.read(_MAX_STORE_BYTES))
         except (OSError, ValueError):   # JSONDecodeError + UnicodeDecodeError are ValueError subclasses
+            unreadable.add(p)
             return None
         # A record that PARSES but isn't an object is unusable in the same way an unparseable one is,
         # and every caller here immediately does `.get(...)` on the result. Returning the raw value
         # made a hand-corrupted file (e.g. a JSON array) raise AttributeError out of `show` AND
         # `list` — so the tool you would run to FIND the bad record was the one that crashed on it.
         # Treat it as unreadable, which routes it into the same "unverifiable" reporting path.
-        return doc if isinstance(doc, dict) else None
+        if not isinstance(doc, dict):
+            unreadable.add(p)
+            return None
+        return doc
 
+    rev_path = os.path.join(d, "reviewer-response.json")
+    rec_path = os.path.join(d, "reconciliation-result.json")
+    rev, rec = _load(rev_path), _load(rec_path)
+    # `*_unreadable` distinguishes "no such file" from "the file is there and is junk". Both yield a
+    # None document, but they are opposite facts about the run: absent means the step never happened,
+    # unreadable means it DID and the evidence is damaged. Collapsing them made `show` report a
+    # recorded, converged reconciliation as "not yet recorded" — a false statement of the exact kind
+    # this whole change exists to stop, and one `list` contradicted on the same run.
     return {
         "run_id": _safe_id(run_id),
-        "reviewer_response": _load(os.path.join(d, "reviewer-response.json")),
-        "reconciliation_result": _load(os.path.join(d, "reconciliation-result.json")),
+        "reviewer_response": rev,
+        "reconciliation_result": rec,
+        "reviewer_response_unreadable": rev_path in unreadable,
+        "reconciliation_result_unreadable": rec_path in unreadable,
     }
 
 
 def forget_run(run_id: str) -> bool:
     d = _run_dir(run_id)
-    # Don't rmtree THROUGH a symlinked record dir, and report success only if it's actually gone.
-    if os.path.isdir(d) and not os.path.islink(d):
-        shutil.rmtree(d, ignore_errors=True)
-        return not os.path.exists(d)
-    return False
+    # Under the SAME per-run lock the reconciliation writer takes. Without it, a delete could land
+    # between that writer's pair validation and its write — and `save_run_doc`'s
+    # `makedirs(exist_ok=True)` would then recreate the directory holding a reconciliation alone,
+    # reproducing issue #17's orphan from two commands each behaving exactly as documented.
+    with _interprocess_lock(f"run-{_safe_id(run_id)}.lock"):
+        # Don't rmtree THROUGH a symlinked record dir, and report success only if it's actually gone.
+        if os.path.isdir(d) and not os.path.islink(d):
+            shutil.rmtree(d, ignore_errors=True)
+            return not os.path.exists(d)
+        return False
 
 
 # --- Duration telemetry: the metrics store ---------------------------------------------------

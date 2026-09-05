@@ -3094,6 +3094,91 @@ def main() -> int:
         _deep_ok = False
     check(_deep_ok, "R-F006: a deeply nested value in a diagnostic can't RecursionError out")
 
+    # --- fixes from the same-provider (Fable) depth review of PR #19 ---
+    _fb_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _fb_dir = tempfile.mkdtemp(prefix="impasse-fable-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _fb_dir
+        _fb_rev = {"schema_version": "1.0", "review_id": "fb", "assessment": "approve", "summary": "s",
+                   "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "a" * 64}},
+                   "findings": [{"id": "F001", "severity": "low", "claim": "c", "confidence": "high",
+                                 "evidence": [{"location": "l", "observation": "o"}]}]}
+        lib.save_run_doc("fb", "reviewer-response", _fb_rev)
+        lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "rc-fb",
+                                     "review_id": "fb", "outcome": "converged",
+                                     "items": [{"finding_id": "F001", "state": "resolved"}]})
+
+        # FB-F1: "absent" and "present but unreadable" are OPPOSITE facts about a run. Collapsing
+        # them made `show` state that a recorded, converged reconciliation was "not yet recorded" —
+        # a false claim of exactly the class this whole change exists to stop — while `list` called
+        # the same run an orphan.
+        with open(os.path.join(_fb_dir, "runs", "fb", "reconciliation-result.json"), "w") as _f:
+            _f.write("[1,2,3]")
+        _fb_run = lib.load_run("fb")
+        check(_fb_run["reconciliation_result"] is None
+              and _fb_run["reconciliation_result_unreadable"] is True,
+              "FB-F1: load_run distinguishes an unreadable record from an absent one")
+        _fb_show = report.render(lib.load_run("fb"))
+        check("UNVERIFIABLE" in _fb_show and "not yet recorded" not in _fb_show,
+              "FB-F1: a corrupt reconciliation renders unverifiable, never 'not yet recorded'")
+        check("quarantined" in report.lifetime_recap(),
+              "FB-F1: a corrupt record is disclosed as quarantined, not silently dropped")
+
+        # FB-F6: 0-of-N is the NORMAL state before a reconciliation exists; warning on it spends the
+        # ⚠️ signal the rest of this change depends on.
+        _fb_fresh = report.render({"run_id": "fresh", "reviewer_response": _fb_rev,
+                                   "reconciliation_result": None})
+        check("partial:" not in _fb_fresh and "not yet recorded" in _fb_fresh,
+              "FB-F6: a healthy un-reconciled run carries no spurious partial warning")
+
+        # FB-F3: a forget landing between validation and write let makedirs recreate the directory
+        # holding a reconciliation ALONE — issue #17's orphan, from two commands each behaving as
+        # documented. Deterministic in one process, contrary to the CHANGELOG's original claim that
+        # this needed multi-process orchestration.
+        lib.save_run_doc("fb2", "reviewer-response", dict(_fb_rev, review_id="fb2"))
+        _fb_real = lib.save_run_doc
+
+        def _fb_racing(run_id, name, doc, **kw):
+            if name == "reconciliation-result":
+                lib.forget_run(run_id)          # the interleaving
+            return _fb_real(run_id, name, doc, **kw)
+
+        lib.save_run_doc = _fb_racing
+        try:
+            _fb_res = lib.save_reconciliation_doc(
+                {"schema_version": "1.0", "reconciliation_id": "rc-fb2", "review_id": "fb2",
+                 "outcome": "converged", "items": [{"finding_id": "F001", "state": "resolved"}]})
+        finally:
+            lib.save_run_doc = _fb_real
+        _fb_d = os.path.join(_fb_dir, "runs", "fb2")
+        _fb_files = sorted(os.listdir(_fb_d)) if os.path.isdir(_fb_d) else []
+        check(_fb_res.get("ok") is False and _fb_files != ["reconciliation-result.json"],
+              "FB-F3: a forget racing a save cannot recreate the #17 orphan")
+        check("disappeared while writing" in " ".join(_fb_res.get("reasons") or []),
+              "FB-F3: the racing save refuses with a reason, leaving nothing behind")
+
+        # The lock must be reentrant WITHIN a process: forget_run now takes the same per-run lock a
+        # caller may already hold, and a self-deadlock in a records tool is worse than the race.
+        with lib._interprocess_lock("run-reentry-test.lock"):
+            with lib._interprocess_lock("run-reentry-test.lock"):
+                check(True, "FB-F3: the per-run lock is reentrant in-process (no self-deadlock)")
+    finally:
+        if _fb_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _fb_prev
+        shutil.rmtree(_fb_dir, ignore_errors=True)
+
+    # FB-F4: the validator's enums are a SECOND copy of the schema's. They gate every write and
+    # quarantine every read, so silent drift would refuse every new-format record and brand it
+    # unverifiable on six surfaces. Turn drift into a red gate instead.
+    _fb_schema = json.load(open("schemas/reconciliation-result.v1.json"))
+    check(set(lib.RECOGNIZED_OUTCOMES) == set(_fb_schema["properties"]["outcome"]["enum"]),
+          "FB-F4: RECOGNIZED_OUTCOMES matches the schema's outcome enum (drift is a failure)")
+    check(set(lib.RECOGNIZED_ITEM_STATES)
+          == set(_fb_schema["$defs"]["item"]["properties"]["state"]["enum"]),
+          "FB-F4: RECOGNIZED_ITEM_STATES matches the schema's state enum (drift is a failure)")
+
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
     check("/" not in lib._safe_id("a/b/../../etc"), "safe_id: path separators collapsed")

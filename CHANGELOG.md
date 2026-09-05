@@ -47,12 +47,40 @@ the bug was still reachable. Both are described below.)*
   `items` raised `TypeError` out of the branch whose job is a controlled refusal, and `repr()` of a
   deeply nested value raised `RecursionError` from inside a diagnostic string.
 
-**Known limitation, not fixed:** the overwrite path holds a per-run lock across
-inspect-backup-replace and reserves backups with `O_EXCL`, but there is **no concurrency test** — no
-competing processes, and no injected failure between the backup and the replacement. Those need
-multi-process orchestration this stdlib suite has no harness for, and a test that inspected a single
-sequential replacement would assert the property without exercising it. The serialization is verified
-by inspection only.
+#### Fixes from the same-provider depth review
+A third review — a stronger model, but **same-provider, so breadth rather than independence** — went
+after concept and residual honesty rather than correctness. It found the following, and corrected the
+record on a limitation this changelog had previously overstated.
+
+- **The lock discipline was one-sided, so #17 was NOT fully closed.** `save_reconciliation_doc` took
+  a per-run lock; `forget_run` — reachable from `forget`, `prune` and the runner's cleanup — did not.
+  A delete landing between the writer's pair validation and its write let `makedirs(exist_ok=True)`
+  recreate the directory holding a reconciliation **alone**: issue #17's orphan, produced by two
+  commands each behaving exactly as documented. Reproduced, then closed three ways — `forget_run`
+  takes the lock, the lock is **reentrant within a process** (taking it twice on two fds otherwise
+  self-deadlocks, and a deadlock in a records tool is worse than the race), and the writer re-checks
+  the sibling immediately **before and after** the write, undoing its own file if the pair broke
+  mid-write.
+- **Correction: this was testable all along.** The previous entry said a concurrency test "needs
+  multi-process orchestration this stdlib suite has no harness for." That was wrong, and it
+  functioned as a justification for not testing the property. A single-process test that patches the
+  write to interleave a `forget_run` exercises the race deterministically — it now exists, and it
+  fails against the pre-fix code.
+- **A corrupt reconciliation reported itself as never recorded.** `load_run` mapped both "no file"
+  and "file present but unreadable" to `None`, but those are opposite facts: absent means the step
+  never happened, unreadable means it did and the evidence is damaged. So `show` printed
+  "reconciliation not yet recorded" for a **recorded, converged** record — a false statement of the
+  exact class this change exists to eliminate — while `list` called the same run an orphan and the
+  lifetime recap dropped it without disclosure, contradicting its own stated rule.
+- **The ⚠️ signal was being spent on healthy runs.** A not-yet-reconciled run printed
+  "partial: only 0 of N dispositioned" directly above the correct "not yet recorded" footer.
+- **The validator's enums are a second copy of the schema's**, gating every write and quarantining
+  every read, with nothing checking them against it. A test now asserts they match, so adding an
+  outcome or state to the schema fails loudly instead of silently refusing every new-format record.
+
+**Known limitation, still not fixed:** no test injects a failure *between* the backup and the
+primary replacement, so crash-safety in that window remains verified by inspection. Unlike the race
+above, that one does need process-level fault injection.
 
 #### The original three
 
