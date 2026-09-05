@@ -435,10 +435,16 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
      `outcome: converged`: use `incomplete` (or `deadlocked` if something is escalated). The success
      line always reports `N of M findings dispositioned` so a partial save is self-identifying, not
      silent.
-   - **`--force`** re-saves over an existing reconciliation for this `review_id`. The previous one is
-     kept as `reconciliation-result.<n>.json` in the same run directory, not discarded — findings can
-     be re-derived from the reviewer-response, but a human's verification notes and dispositions
-     cannot.
+   - **Completing a partial record needs no flag.** A save that *supersedes* an interim one — the
+     existing record's `outcome` isn't `converged`, and yours dispositions every finding it did —
+     replaces it directly and reports `superseded`, still keeping a backup. So the normal
+     `--partial` → finish workflow never ends in a destructive flag.
+   - **`--force`** is for the cases that genuinely are clobbers: replacing a record that claims to be
+     **finished** (`converged`), or one whose dispositions your save would **drop**. The refusal
+     names which, and lists the finding ids that would be lost. The previous reconciliation is kept
+     as `reconciliation-result.<n>.json` in the same run directory, not discarded — findings can be
+     re-derived from the reviewer-response, but a human's verification notes and dispositions cannot.
+     Keeping `--force` rare is the point: a guard you type by default guards nothing.
    - A record that fails this validation renders as **unverifiable** everywhere it's read — `show`
      banners it instead of reporting a tally, `list` marks it `⚠️ orphan`, `open` won't surface a
      deadlock from it, and the lifetime recap excludes it (disclosing the exclusion). If you see that

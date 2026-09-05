@@ -3179,6 +3179,114 @@ def main() -> int:
           == set(_fb_schema["$defs"]["item"]["properties"]["state"]["enum"]),
           "FB-F4: RECOGNIZED_ITEM_STATES matches the schema's state enum (drift is a failure)")
 
+    # --- FB-F2: completing a --partial reconciliation must not require the destructive flag ---
+    # The finished record conflicts with the operator's own interim one, so the normal workflow's
+    # last step became --force. A guard everyone types by default guards nothing.
+    _sp_prev = os.environ.get("IMPASSE_CONFIG_DIR")
+    _sp_dir = tempfile.mkdtemp(prefix="impasse-supersede-")
+    try:
+        os.environ["IMPASSE_CONFIG_DIR"] = _sp_dir
+        _sp_rev = {"schema_version": "1.0", "review_id": "sp", "assessment": "approve", "summary": "s",
+                   "artifact": {"kind": "code", "revision": {"algorithm": "sha256", "value": "a" * 64}},
+                   "findings": [{"id": f"F00{i}", "severity": "low", "claim": "c",
+                                 "confidence": "high",
+                                 "evidence": [{"location": "l", "observation": "o"}]}
+                                for i in (1, 2, 3)]}
+        lib.save_run_doc("sp", "reviewer-response", _sp_rev)
+        lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "rc-i",
+                                     "review_id": "sp", "outcome": "incomplete",
+                                     "items": [{"finding_id": "F001", "state": "resolved"}]},
+                                    partial=True)
+        _sp_done = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-done", "review_id": "sp",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_done.get("ok") and _sp_done.get("superseded") is True,
+              "FB-F2: completing an interim reconciliation needs no --force")
+        check(bool(_sp_done.get("backup_path")),
+              "FB-F2: superseding still keeps the interim record as a backup")
+
+        # The two rails that must NOT open. A converged record claims to be finished, and a save
+        # that would DROP dispositions is a clobber whatever the existing outcome says.
+        _sp_clob = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-other", "review_id": "sp",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_clob.get("conflict") is True and _sp_clob.get("existing_outcome") == "converged",
+              "FB-F2: replacing a CONVERGED record still requires --force")
+
+        lib.save_run_doc("sp2", "reviewer-response", dict(_sp_rev, review_id="sp2"))
+        lib.save_reconciliation_doc({"schema_version": "1.0", "reconciliation_id": "rc-i2",
+                                     "review_id": "sp2", "outcome": "incomplete",
+                                     "items": [{"finding_id": "F001", "state": "resolved"},
+                                               {"finding_id": "F002", "state": "resolved"}]},
+                                    partial=True)
+        _sp_drop = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-drop", "review_id": "sp2",
+             "outcome": "incomplete", "items": [{"finding_id": "F003", "state": "resolved"}]},
+            partial=True)
+        check(_sp_drop.get("conflict") is True
+              and sorted(_sp_drop.get("would_drop") or []) == ["F001", "F002"],
+              "FB-F2: a save that would DROP dispositions still requires --force, and names them")
+
+        # IDENTITY BY ID IS NOT IDENTITY OF WORK. A bare item is an id-superset of one carrying an
+        # operator's ruling and a paragraph of verification notes — exactly the content --force
+        # exists to protect, since findings can be re-derived from the reviewer-response and a
+        # human's reasoning cannot. Found while probing my own supersede predicate.
+        lib.save_run_doc("sp3", "reviewer-response", dict(_sp_rev, review_id="sp3"))
+        _sp_rich = {"schema_version": "1.0", "reconciliation_id": "rc-rich", "review_id": "sp3",
+                    "outcome": "deadlocked",
+                    "items": [{"finding_id": "F001", "state": "deadlocked",
+                               "host_position": "hours of verification reasoning",
+                               "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                                              "stop_reason": "operator_authority_required",
+                                              "operator_question": "Runway or speed?"}}]}
+        lib.save_reconciliation_doc(_sp_rich, partial=True)
+        _sp_thin = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-thin", "review_id": "sp3",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_thin.get("conflict") is True
+              and _sp_thin.get("would_impoverish") == ["F001"],
+              "FB-F2: an id-superset that STRIPS an operator ruling is not a supersede")
+        # ...but answering the deadlock while keeping the content IS the normal forward step.
+        _sp_answered = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-answered", "review_id": "sp3",
+             "outcome": "converged",
+             "items": [{"finding_id": "F001", "state": "resolved",
+                        "host_position": "hours of verification reasoning",
+                        "resolution": "Operator ruled: protect runway.",
+                        "escalation": {"dispute_kind": "value_or_priority_tradeoff",
+                                       "stop_reason": "operator_authority_required",
+                                       "operator_question": "Runway or speed?"}}]
+             + [{"finding_id": f, "state": "resolved"} for f in ("F002", "F003")]})
+        check(_sp_answered.get("ok") and _sp_answered.get("superseded") is True,
+              "FB-F2: answering a deadlock and keeping its content supersedes without --force")
+        # An existing record we cannot READ is never supersedable: reconciliation_items degrades a
+        # corrupt collection to [], which would make the superset test hold VACUOUSLY — the more
+        # damaged the old record, the easier it would have been to overwrite unflagged.
+        lib.save_run_doc("sp4", "reviewer-response", dict(_sp_rev, review_id="sp4"))
+        with open(os.path.join(_sp_dir, "runs", "sp4", "reconciliation-result.json"), "w") as _f:
+            _f.write(json.dumps({"review_id": "sp4", "items": "corrupt-but-truthy"}))
+        _sp_corrupt = lib.save_reconciliation_doc(
+            {"schema_version": "1.0", "reconciliation_id": "rc-x", "review_id": "sp4",
+             "outcome": "converged",
+             "items": [{"finding_id": f, "state": "resolved"} for f in ("F001", "F002", "F003")]})
+        check(_sp_corrupt.get("conflict") is True
+              and _sp_corrupt.get("existing_unreadable") is True,
+              "FB-F2: an UNREADABLE existing record is never superseded vacuously")
+
+        check(lib._item_loses_substance({"escalation": {"a": 1}}, {"state": "resolved"}) is True
+              and lib._item_loses_substance({"state": "resolved"}, {"escalation": {"a": 1}}) is False
+              and lib._item_loses_substance("nope", 7) is False,
+              "FB-F2: _item_loses_substance detects loss, permits gain, and is total")
+    finally:
+        if _sp_prev is None:
+            os.environ.pop("IMPASSE_CONFIG_DIR", None)
+        else:
+            os.environ["IMPASSE_CONFIG_DIR"] = _sp_prev
+        shutil.rmtree(_sp_dir, ignore_errors=True)
+
     # --- hardening fixes surfaced by the cross-provider code audit ---
     check(lib._safe_id("..") == "unknown" and lib._safe_id(".") == "unknown", "safe_id: '.'/'..' collapse to 'unknown' (no traversal)")
     check("/" not in lib._safe_id("a/b/../../etc"), "safe_id: path separators collapsed")

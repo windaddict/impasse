@@ -826,16 +826,40 @@ def _main(argv=None) -> int:
         res = lib.save_reconciliation_doc(doc, partial=args.partial, force=args.force)
         if not res.get("ok"):
             if res.get("conflict"):
+                # Name WHAT would be lost. The old message was identical whether you were completing
+                # your own interim record or about to clobber someone's finished one, which is what
+                # trained the reflex to append --force.
+                _out = res.get("existing_outcome")
+                _drop = res.get("would_drop") or []
                 print("save-reconciliation: a reconciliation already exists for this review_id "
-                      f"(reconciliation_id={res.get('reconciliation_id')!r}, "
-                      f"{res.get('item_count')} item(s)) — pass --force to replace it; the previous "
-                      "one is kept as a numbered backup, never silently discarded.", file=sys.stderr)
+                      f"(reconciliation_id={res.get('reconciliation_id')!r}, outcome={_out!r}, "
+                      f"{res.get('item_count')} item(s)).", file=sys.stderr)
+                _poor = res.get("would_impoverish") or []
+                if _poor:
+                    print(f"  this save would STRIP human-written content (escalation, verification "
+                          f"or resolution) from {len(_poor)} item(s): "
+                          f"{', '.join(_poor[:8])}{' …' if len(_poor) > 8 else ''}", file=sys.stderr)
+                if _drop:
+                    print(f"  this save would DROP {len(_drop)} disposition(s) it does not carry: "
+                          f"{', '.join(_drop[:8])}{' …' if len(_drop) > 8 else ''}", file=sys.stderr)
+                if res.get("existing_unreadable"):
+                    print("  the existing record cannot be read, so it is impossible to show that "
+                          "this save loses nothing.", file=sys.stderr)
+                if _out == "converged":
+                    print("  the existing record claims to be finished, so replacing it is not a "
+                          "routine step.", file=sys.stderr)
+                print("  pass --force to replace it; the previous one is kept as a numbered backup, "
+                      "never silently discarded.", file=sys.stderr)
             else:
                 print("save-reconciliation: refusing to save:", file=sys.stderr)
                 for r in res.get("reasons", []):
                     print(f"  - {r}", file=sys.stderr)
             return 2
-        verb = "replaced" if res["replaced"] else "saved"
+        # "superseded" is its own event: it replaced an INTERIM record with one that carries every
+        # disposition the old one had. Printing it as a plain "replaced" would hide that no work was
+        # lost, and printing it as "saved" would hide that a file was overwritten.
+        verb = ("superseded" if res.get("superseded")
+                else "replaced" if res["replaced"] else "saved")
         line = f"{verb}: {res['path']}"
         if res.get("backup_path"):
             line += f" (previous kept as {res['backup_path']})"

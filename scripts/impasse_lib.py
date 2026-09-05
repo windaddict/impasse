@@ -1334,6 +1334,29 @@ def _backup_reconciliation(d: str, target: str) -> str:
             raise
 
 
+def _item_loses_substance(old: dict, new: dict) -> bool:
+    """True if `new` drops human-authored content that `old` carried for the same finding.
+
+    WHAT IT'S FOR: deciding whether one reconciliation item genuinely supersedes another, or merely
+    shares its `finding_id`. The fields checked are the ones a person writes and that cannot be
+    re-derived from the reviewer-response — an escalation (the operator's question, and the ruling
+    that answers it), the host's verification reasoning, and the resolution text. Gaining any of
+    these is progress; losing one is the silent data loss `--force` exists to gate.
+
+    TOTAL: never raises; a non-dict on either side is treated as carrying nothing."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return False
+
+    def _has(d, key):
+        v = d.get(key)
+        if isinstance(v, dict):
+            return bool(v)
+        return isinstance(v, str) and bool(v.strip())
+
+    return any(_has(old, k) and not _has(new, k)
+               for k in ("escalation", "host_position", "resolution", "verification"))
+
+
 def save_reconciliation_doc(doc: dict, *, partial: bool = False, force: bool = False) -> dict:
     """The ONLY sanctioned way to persist a reconciliation-result (issues #16/#17/#18). Loads the
     sibling reviewer-response itself, validates the pair with reconciliation_problems(), and refuses
@@ -1341,10 +1364,24 @@ def save_reconciliation_doc(doc: dict, *, partial: bool = False, force: bool = F
     mismatched reviewer-response. Coverage and overwrite are separate, opt-in escape hatches rather
     than hard errors, because both are legitimate mid-protocol: partial coverage needs `partial=True`
     (and then still refuses `outcome: 'converged'` — a partial record cannot claim convergence, the
-    exact bug class this closes); replacing an existing reconciliation needs `force=True`, and the
-    previous one is backed up first, never silently discarded. The whole read-validate-write sequence
-    runs under the run's interprocess lock, so two concurrent callers can't interleave a lost update
-    or a lost backup.
+    exact bug class this closes).
+
+    OVERWRITE, exactly. A save SUPERSEDES an existing reconciliation with no flag when all of:
+    the existing one does not claim to be finished (`outcome` != 'converged'); the new one
+    dispositions every finding_id the old one did; no shared item loses human-written content
+    (`_item_loses_substance`); and the existing record is readable enough to establish those things.
+    That is the ordinary `partial` -> finish path, and it can only move the record forward.
+    Everything else — a finished record, a save that drops dispositions or strips a ruling, or an
+    existing record too damaged to compare — needs `force=True`. Either way the previous file is
+    backed up first, never silently discarded. The result reports `superseded` separately from
+    `replaced`, because "no work was lost" and "a file was overwritten" are different facts.
+
+    A known limit, stated rather than hidden: the interim test reads the existing record's OWN
+    `outcome`. A record could under-report itself to look interim — but the content and coverage
+    checks above are what actually protect the work, and they do not rest on self-reporting.
+
+    The whole read-validate-write sequence runs under the run's interprocess lock, so two concurrent
+    callers can't interleave a lost update or a lost backup.
 
     save_run_doc remains the general write primitive (the runner still uses it for reviewer-
     responses); this is the boundary EVERY reconciliation write must go through — CLI or any other
@@ -1388,11 +1425,55 @@ def save_reconciliation_doc(doc: dict, *, partial: bool = False, force: bool = F
         target = os.path.join(d, "reconciliation-result.json")
         replaced = os.path.isfile(target)
         backup_path = None
+        superseded = False
         if replaced:
-            if not force:
-                existing = run.get("reconciliation_result") or {}
+            existing = run.get("reconciliation_result") or {}
+            # SUPERSEDING AN INTERIM RECORD IS NOT A CLOBBER. Completing a --partial reconciliation
+            # otherwise ended in --force: the finished record conflicts with the operator's own
+            # interim one, so the normal workflow's last step became the flag that exists to mark a
+            # dangerous replace. Operators habituate to appending it, and that reflex is exactly what
+            # re-creates issue #18's exposure — a guard everyone types by default guards nothing.
+            #
+            # So a save may replace WITHOUT --force when both hold, which together mean it can only
+            # move the record forward:
+            #   1. the existing record does not claim to be finished (outcome is not `converged`), and
+            #   2. the new one dispositions every finding the existing one did — a superset, so no
+            #      verification note, disposition or operator ruling can be dropped.
+            # A backup is still written. Anything else — replacing a converged record, or one whose
+            # dispositions this save would lose — still requires --force.
+            _old_by_id = {it["finding_id"]: it for it in reconciliation_items(existing)
+                          if isinstance(it.get("finding_id"), str)}
+            _new_by_id = {it["finding_id"]: it for it in reconciliation_items(doc)
+                          if isinstance(it.get("finding_id"), str)}
+            _existing_ids, _new_ids = set(_old_by_id), set(_new_by_id)
+            _interim = existing.get("outcome") != "converged"
+            # IDENTITY BY ID IS NOT IDENTITY OF WORK. A superset of finding_ids says nothing about
+            # what each item CONTAINS: a bare {"finding_id": "F001", "state": "resolved"} is a
+            # superset of an item carrying an operator's ruling and a paragraph of verification
+            # notes, and would have silently replaced it. Those are precisely the fields --force
+            # exists to protect — findings can be re-derived from the reviewer-response, a human's
+            # reasoning cannot. So an item may GAIN content, and a deadlock may become resolved (the
+            # normal forward step once the operator answers), but it may not become poorer.
+            _impoverished = sorted(fid for fid in _existing_ids & _new_ids
+                                   if _item_loses_substance(_old_by_id[fid], _new_by_id[fid]))
+            # An existing record we cannot READ is never supersedable. `reconciliation_items`
+            # degrades a corrupt collection to [], which would make the superset test hold
+            # VACUOUSLY — so the emptier and more damaged the old record, the easier it would be to
+            # overwrite without a flag. The whole supersede argument is "no work is lost", and that
+            # cannot be established about content that will not parse. Fall back to --force, whose
+            # backup then preserves whatever was there.
+            _existing_unreadable = (run.get("reconciliation_result_unreadable")
+                                    or not isinstance(existing.get("items"), list))
+            superseded = (_interim and _existing_ids <= _new_ids and not _impoverished
+                          and not _existing_unreadable)
+            if not force and not superseded:
+                _lost = sorted(_existing_ids - _new_ids)
                 return {"ok": False, "conflict": True,
                         "reconciliation_id": existing.get("reconciliation_id"),
+                        "existing_outcome": existing.get("outcome"),
+                        "would_drop": _lost,
+                        "would_impoverish": _impoverished,
+                        "existing_unreadable": bool(_existing_unreadable),
                         # reconciliation_items(), not len(... or []): `existing` is a hand-editable
                         # file, and a truthy non-sized `items` (e.g. `"items": 1`) made len() raise
                         # TypeError out of the branch whose whole job is a controlled refusal.
@@ -1423,6 +1504,7 @@ def save_reconciliation_doc(doc: dict, *, partial: bool = False, force: bool = F
                 "the reviewer-response disappeared while writing (a concurrent forget/prune?) — "
                 "nothing was saved, so no orphan record was left behind"]}
         return {"ok": True, "path": path, "replaced": replaced, "backup_path": backup_path,
+                "superseded": superseded,
                 "dispositioned": dispositioned, "raised": raised}
 
 

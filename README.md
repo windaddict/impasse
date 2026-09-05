@@ -569,10 +569,13 @@ with no evidence that contradicts the finding. Saving before every raised findin
 also refused unless you pass `--partial` — a deliberately partial reconciliation mid-protocol is
 legitimate, so it's a flag rather than a hard error, but it can never write `outcome: converged`
 (that combination is the exact defect this closes: a record silently under-covering while claiming to
-be done). Re-saving over an existing reconciliation is refused unless you pass `--force`; with it, the
-previous reconciliation is kept as `reconciliation-result.<n>.json` in the same run directory — a
-human's verification notes and dispositions can't be re-derived the way findings can, so a forced
-replace never discards them. **`escalations <reconciliation>`** renders each deadlocked finding in
+be done). Finishing a partial record needs no flag: a save that *supersedes* an interim one — the existing
+`outcome` isn't `converged`, and yours dispositions everything it did — replaces it directly, reports
+`superseded`, and still keeps a backup. `--force` is reserved for genuine clobbers: replacing a record
+that claims to be finished, or one whose dispositions your save would drop (the refusal names them).
+Either way the previous reconciliation is kept as `reconciliation-result.<n>.json` in the same run
+directory — a human's verification notes and dispositions can't be re-derived the way findings can, so
+a replace never discards them. **`escalations <reconciliation>`** renders each deadlocked finding in
 full — the claim, its anchored evidence, both positions and the question — and **refuses** unless it
 can show that context for every one, so you are never asked to rule on a question stripped of what it
 is about.

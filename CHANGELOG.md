@@ -78,6 +78,27 @@ record on a limitation this changelog had previously overstated.
   every read, with nothing checking them against it. A test now asserts they match, so adding an
   outcome or state to the schema fails loudly instead of silently refusing every new-format record.
 
+- **Completing a partial reconciliation no longer requires `--force`.** The finished record
+  conflicted with the operator's own interim one, so the sanctioned `--partial` workflow ended in the
+  flag that exists to mark a dangerous replace — and a guard everyone types by default guards
+  nothing. A save now *supersedes* without a flag when both hold: the existing record does not claim
+  to be finished (`outcome` isn't `converged`), and the new one dispositions every finding the old
+  one did, so it can only move forward. It reports `superseded` (distinct from both `saved` and
+  `replaced`) and still writes a backup. `--force` is now reserved for the two real clobbers —
+  replacing a finished record, or dropping dispositions — and the refusal says which, naming the
+  finding ids at risk.
+  Two corrections came out of reviewing that relaxation, both closing holes it opened:
+  **identity by id is not identity of work** — a bare `{finding_id, state}` item is an id-superset of
+  one carrying an operator's ruling and a paragraph of verification notes, so the predicate also
+  requires that no shared item LOSES human-written content (`escalation`, `host_position`,
+  `resolution`, `verification`); gaining content and answering a deadlock remain ordinary forward
+  steps. And **an unreadable existing record is never superseded** — a corrupt collection degrades to
+  an empty item list, which would make the superset test hold vacuously, so the more damaged the old
+  record the easier it would have been to overwrite unflagged.
+  Stated rather than hidden: the interim test reads the existing record's own `outcome`, which is
+  self-reported. The content and coverage checks are what actually protect the work, and they do not
+  rest on self-reporting.
+
 **Known limitation, still not fixed:** no test injects a failure *between* the backup and the
 primary replacement, so crash-safety in that window remains verified by inspection. Unlike the race
 above, that one does need process-level fault injection.
