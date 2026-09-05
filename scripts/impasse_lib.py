@@ -1045,10 +1045,35 @@ def save_run_meta(run_id: str) -> str | None:
         return None
 
 
-def save_run_doc(run_id: str, name: str, doc: dict) -> str:
+# A private sentinel, not a boolean: a caller cannot pass it by accident, and it cannot be reached
+# from JSON, a CLI flag, or reviewer output. Only save_reconciliation_doc() holds it.
+_RECONCILIATION_TOKEN = object()
+
+
+def save_run_doc(run_id: str, name: str, doc: dict, *, _sanctioned=None) -> str:
     """Persist one run document (name = 'reviewer-response' | 'reconciliation-result').
     The initial reviewer-response should use a run_id from reserve_run_id() so it can't clobber another
-    run; reconciliation reuses that same run_id to land in the same directory."""
+    run; reconciliation reuses that same run_id to land in the same directory.
+
+    This is a general, UNVALIDATED write primitive — it writes exactly what it is given, including
+    into a run directory that does not yet exist (`makedirs(exist_ok=True)`). That is correct for a
+    reviewer-response (the runner creates the directory via reserve_run_id() first). It is NOT the
+    sanctioned way to write a reconciliation-result: calling it directly for one can silently create
+    an orphan run directory holding a reconciliation with no reviewer-response beside it (issue #17).
+    Use save_reconciliation_doc() for that — it validates the pair, enforces coverage/overwrite
+    policy, and backs up before replacing, THEN calls this.
+
+    That instruction used to be advice, and advice is not an invariant: a caller could still write a
+    reconciliation here and re-create the exact orphan of issue #17, outside the per-run lock. So it
+    is now ENFORCED — a `reconciliation-result` write raises unless it comes from
+    save_reconciliation_doc(), which passes the private token. An invariant guarded in one command is
+    guarded for one caller; guarded in the storage primitive it is guarded for all of them."""
+    if name == "reconciliation-result" and _sanctioned is not _RECONCILIATION_TOKEN:
+        raise ValueError(
+            "save_run_doc cannot write a reconciliation-result: that would bypass pair validation, "
+            "the overwrite/backup policy and the per-run lock (issues #17/#18). "
+            "Use save_reconciliation_doc(doc, partial=..., force=...) instead."
+        )
     d = _run_dir(run_id)
     os.makedirs(d, exist_ok=True)
     for path in (runs_dir(), d):
@@ -1075,6 +1100,294 @@ def save_run_doc(run_id: str, name: str, doc: dict) -> str:
     return target
 
 
+# --- Reconciliation integrity (issues #16/#17/#18) -----------------------------------------------
+#
+# WHAT IT'S FOR: a reconciliation-result on disk is only meaningful paired with the reviewer-response
+# it claims to reconcile — the findings it disposes of have to actually have been raised, once each,
+# by that review. Before this, nothing checked that pairing at the point a reconciliation was written
+# (save_run_doc validates nothing), so a mistyped review_id created an ORPHAN run directory holding a
+# reconciliation with no sibling findings, a fabricated finding_id was accepted and later rendered as
+# a real resolved finding, and a report over such a record fell back to counting the host's own
+# dispositions as if they were the reviewer's raised count — a broken record that reads as a passed
+# gate. reconciliation_problems() is the one check every write AND every read-side report shares, so
+# an orphan can't slip past the CLI, the library, or a stored record's lifetime totals by three
+# different routes.
+
+RECOGNIZED_ITEM_STATES = frozenset({"accepted", "rejected", "resolved", "deadlocked", "withdrawn"})
+RECOGNIZED_OUTCOMES = frozenset({"converged", "deadlocked", "incomplete", "failed"})
+
+# Shared verbatim with impasse_report._escalation_problems' identical refusal, so an operator sees the
+# same words whether the pairing failure surfaces from `save-reconciliation`, `escalations`, or `show`.
+MISSING_REVIEWER_RESPONSE_MSG = (
+    "reviewer-response not found for review_id {rid!r} — run the FULL protocol so "
+    "the findings are recorded, or point at the correct review_id"
+)
+
+
+def reconciliation_items(rec) -> list:
+    """The reconciliation's items as a list of DICTS — the only shape every reader assumes.
+
+    WHAT IT'S FOR: readers used to write `rec.get("items") or []` and then `it.get(...)`, which
+    raises AttributeError the moment `items` is a string, a dict, or a list holding a non-dict.
+    Those files exist (a record is a hand-editable file on disk), and the crash landed in `show` and
+    `list` — the very commands you would run to FIND the bad record. Validation reports the problem;
+    this makes reading it survivable in the first place, so the report can get far enough to say so.
+    TOTAL: never raises. A malformed collection yields [], which the validator separately flags."""
+    items = rec.get("items") if isinstance(rec, dict) else None
+    if not isinstance(items, list):
+        return []
+    return [it for it in items if isinstance(it, dict)]
+
+
+def _safe_repr(v, limit: int = 80) -> str:
+    """A bounded repr for a diagnostic message. `repr` on untrusted nested data can raise
+    RecursionError (or anything at all, via a hostile __repr__), and these strings are built inside
+    functions documented TOTAL — so a diagnostic must never be the thing that crashes the report."""
+    try:
+        text = repr(v)
+    except Exception:      # noqa: BLE001 — a diagnostic string is never worth propagating an error
+        return f"<unreprable {type(v).__name__}>"
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def reconciliation_problems(rec, rev) -> list:
+    """The reasons a reconciliation-result CANNOT be trusted as a complete record correctly paired
+    with the reviewer-response it claims to reconcile — empty means safe to persist or report on.
+    This is the STORAGE-BOUNDARY guard behind issues #16/#17/#18: save_reconciliation_doc (the only
+    sanctioned way to write a reconciliation) refuses on any of these, and impasse_report's `show`
+    and `lifetime_recap` use the same emptiness test to decide whether a STORED record's totals can
+    be trusted at all — so a fabricated finding_id or a missing sibling disqualifies a record from
+    every surface that reads it, not only the write path that created it.
+
+    Deliberately narrower than full JSON-Schema validation (see tests/validate_schemas.py, which is
+    where a real validation ENGINE belongs — stdlib-only in scripts/ forbids shipping one, not hand-
+    written validation, see CLAUDE.md). This hand-checks the bounded, runtime-critical subset a
+    report or a save would otherwise trust blindly: required top-level fields and their types, the
+    `outcome` enum, item shape, the deadlock-needs-escalation and rejection-needs-contradicting-
+    evidence protocol invariants, `outcome` consistency with the items, and — given `rev`, the
+    sibling reviewer-response — that this reconciliation is the one that review produced, and every
+    finding_id it disposes of was actually raised by it.
+
+    TOTAL: never raises, for any input, including malformed/hostile shapes — a hand-edited
+    reconciliation file and the reviewer's own output are both UNTRUSTED. `rev` is None when no
+    sibling reviewer-response is on disk, a dict when one is, or (malformed) anything else."""
+    problems = []
+    if not isinstance(rec, dict):
+        return ["reconciliation is not an object"]
+
+    for key in ("schema_version", "reconciliation_id", "review_id", "outcome"):
+        v = rec.get(key)
+        if not (isinstance(v, str) and v):
+            problems.append(f"'{key}' is missing or not a non-empty string")
+    outcome = rec.get("outcome")
+    if isinstance(outcome, str) and outcome and outcome not in RECOGNIZED_OUTCOMES:
+        problems.append(f"outcome {_safe_repr(outcome)} is not one of {sorted(RECOGNIZED_OUTCOMES)}")
+
+    items = rec.get("items")
+    if not isinstance(items, list):
+        problems.append("reconciliation 'items' is not a list")
+        return problems
+
+    seen = {}
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            problems.append(f"item[{i}] is not an object")
+            continue
+        fid = it.get("finding_id")
+        if isinstance(fid, str) and fid:
+            seen[fid] = seen.get(fid, 0) + 1
+        else:
+            problems.append(f"item[{i}] is missing a string finding_id")
+        state = it.get("state")
+        # isinstance guard first: a non-string state (e.g. a JSON list) is unhashable and would raise
+        # on the set membership test below — this function must stay total.
+        if not (isinstance(state, str) and state in RECOGNIZED_ITEM_STATES):
+            problems.append(f"item[{i}] (finding {_safe_repr(fid)}) has an unrecognized state {_safe_repr(state)}")
+            continue
+        if state == "deadlocked":
+            esc = it.get("escalation")
+            if not isinstance(esc, dict):
+                problems.append(f"item {_safe_repr(fid)} is deadlocked but has no escalation object")
+            else:
+                for k in ("dispute_kind", "stop_reason", "operator_question"):
+                    if not (isinstance(esc.get(k), str) and esc[k]):
+                        problems.append(f"item {_safe_repr(fid)} escalation is missing '{k}'")
+        elif state == "rejected":
+            vers = it.get("verification")
+            ok = isinstance(vers, list) and any(
+                isinstance(v, dict) and v.get("result") == "contradicts" for v in vers)
+            if not ok:
+                problems.append(f"item {_safe_repr(fid)} is rejected but carries no verification with "
+                                "result: contradicts — a refutation resting only on host judgment "
+                                "is a deadlock (dispute_kind unverified_refutation), not a rejection")
+    problems += [f"duplicate finding_id {_safe_repr(k)} across items" for k, n in sorted(seen.items()) if n > 1]
+
+    if isinstance(outcome, str):
+        has_deadlock = any(isinstance(it, dict) and it.get("state") == "deadlocked" for it in items)
+        if outcome == "converged" and has_deadlock:
+            problems.append("outcome is 'converged' but at least one item is still deadlocked")
+        if outcome == "deadlocked" and not has_deadlock:
+            problems.append("outcome is 'deadlocked' but no item is in state deadlocked")
+
+    # Pairing: this reconciliation must be tied to the ONE reviewer-response it claims to reconcile.
+    rid = rec.get("review_id")
+    if isinstance(rid, str) and rid:
+        if rev is None:
+            problems.append(MISSING_REVIEWER_RESPONSE_MSG.format(rid=rid))
+        elif not isinstance(rev, dict):
+            problems.append("reviewer-response is malformed (not an object)")
+        else:
+            # A sibling FILE is not the same as a usable reviewer-response. Without these checks a
+            # structurally broken response (no findings list, entries without ids) certified a
+            # reconciliation as a verified pair — so "verified" could rest on a document that could
+            # not itself have come from a real review.
+            #
+            # Scoped deliberately to what PAIRING needs: the findings list and its ids are what
+            # coverage is checked against. Other schema-required fields (assessment, summary,
+            # artifact) are not re-checked here — whole-document conformance is CI's job, and
+            # duplicating it would make this validator refuse records over fields that have no
+            # bearing on whether the two halves belong together.
+            _f = rev.get("findings")
+            if not isinstance(_f, list):
+                problems.append("reviewer-response has no 'findings' list — it cannot establish "
+                                "what was raised, so this pair cannot be verified")
+            elif any(not (isinstance(f, dict) and isinstance(f.get("id"), str) and f.get("id"))
+                     for f in _f):
+                problems.append("reviewer-response has finding(s) without a string 'id' — coverage "
+                                "cannot be checked against them")
+            if rev.get("review_id") != rid:
+                problems.append(f"reviewer-response review_id {rev.get('review_id')!r} does not "
+                                f"match the reconciliation's {rid!r} — refusing to treat them as a pair")
+            revf = rev.get("findings")
+            if not isinstance(revf, list):
+                problems.append("reviewer-response 'findings' is not a list")
+            else:
+                known = {f["id"] for f in revf if isinstance(f, dict) and isinstance(f.get("id"), str)}
+                unknown = sorted({it.get("finding_id") for it in items
+                                  if isinstance(it, dict) and isinstance(it.get("finding_id"), str)
+                                  and it["finding_id"] not in known})
+                if unknown:
+                    problems.append(f"unknown finding_id(s) not raised by this review: {unknown}")
+                # A converged outcome asserts every raised finding was settled — that assertion is
+                # checkable only here, once the sibling's real finding count is known. This is the
+                # exact issue #16 shape (9-of-13 stored as converged), caught for good regardless of
+                # how the record reached this state: save_reconciliation_doc refuses it at write time
+                # (below), and this makes an already-stored one just as unverifiable to `show`/
+                # `lifetime_recap` as a missing sibling would be.
+                if outcome == "converged" and len(items) < len(revf):
+                    problems.append(f"outcome is 'converged' but only {len(items)} of {len(revf)} "
+                                    "raised findings are dispositioned")
+    # else: already reported above as a missing/invalid top-level 'review_id'.
+    return problems
+
+
+def _backup_reconciliation(d: str, target: str) -> str:
+    """Copy the reconciliation-result about to be replaced to the next free
+    reconciliation-result.<n>.json in the same run directory (n starting at 1), so a forced replace
+    (save_reconciliation_doc, force=True) never destroys the human-written verification notes and
+    dispositions in the old record — findings can be re-derived from the reviewer-response; those
+    cannot (issue #18). The backup slot is reserved with O_EXCL, not just picked as the first free
+    name observed, so two concurrent forced replacements in the same run directory can't choose the
+    same slot and clobber each other's copy. The caller must hold the run's interprocess lock for the
+    whole reserve-copy-replace sequence. 0600 like every other record; permanent — kept by `prune`,
+    removed only when the whole run is forgotten via `forget_run`'s rmtree."""
+    with open(target, "rb") as f:
+        data = f.read()
+    i = 1
+    while True:
+        bpath = os.path.join(d, f"reconciliation-result.{i}.json")
+        try:
+            fd = os.open(bpath, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            i += 1
+            continue
+        try:
+            with os.fdopen(fd, "wb") as bf:
+                bf.write(data)
+                bf.flush()
+                os.fsync(bf.fileno())
+            os.chmod(bpath, 0o600)
+            fsync_dir(d)
+            return bpath
+        except BaseException:
+            try:
+                os.remove(bpath)
+            except OSError:
+                pass
+            raise
+
+
+def save_reconciliation_doc(doc: dict, *, partial: bool = False, force: bool = False) -> dict:
+    """The ONLY sanctioned way to persist a reconciliation-result (issues #16/#17/#18). Loads the
+    sibling reviewer-response itself, validates the pair with reconciliation_problems(), and refuses
+    (rather than writing) on any structural problem, an unknown/duplicate finding_id, or a missing/
+    mismatched reviewer-response. Coverage and overwrite are separate, opt-in escape hatches rather
+    than hard errors, because both are legitimate mid-protocol: partial coverage needs `partial=True`
+    (and then still refuses `outcome: 'converged'` — a partial record cannot claim convergence, the
+    exact bug class this closes); replacing an existing reconciliation needs `force=True`, and the
+    previous one is backed up first, never silently discarded. The whole read-validate-write sequence
+    runs under the run's interprocess lock, so two concurrent callers can't interleave a lost update
+    or a lost backup.
+
+    save_run_doc remains the general write primitive (the runner still uses it for reviewer-
+    responses); this is the boundary EVERY reconciliation write must go through — CLI or any other
+    caller — so the orphan/overwrite defects can't resurface through a path other than the CLI.
+
+    Returns a result dict. Never raises for an expected refusal (the input is UNTRUSTED — a hand-
+    edited or reviewer-influenced file must produce a controlled refusal, not a traceback):
+      {"ok": False, "reasons": [...]}                                                -- refused
+      {"ok": False, "conflict": True, "reconciliation_id": ..., "item_count": ...}   -- exists, no force
+      {"ok": True, "path": ..., "replaced": bool, "backup_path": str | None,
+       "dispositioned": int, "raised": int}
+    A genuine filesystem failure (disk full, permissions) still raises OSError — that is not an
+    expected outcome and must not be swallowed."""
+    if not isinstance(doc, dict) or not (isinstance(doc.get("review_id"), str) and doc["review_id"]):
+        return {"ok": False, "reasons": ["reconciliation must be a JSON object with a review_id"]}
+    rid = doc["review_id"]
+
+    with _interprocess_lock(f"run-{_safe_id(rid)}.lock"):
+        run = load_run(rid)   # re-read INSIDE the lock — see the primary fresh, not a stale read
+        rev = run.get("reviewer_response")
+        problems = reconciliation_problems(doc, rev)
+        if problems:
+            return {"ok": False, "reasons": problems}
+
+        # reconciliation_problems() already refuses outcome:'converged' paired with partial coverage
+        # (it can check that once the sibling's real finding count is known) — so the only coverage
+        # gate left here is: a non-converged partial save (e.g. outcome:'incomplete') still needs an
+        # explicit partial=True, since a deliberately partial reconciliation mid-protocol is
+        # legitimate but must never be the silent default.
+        # Both counts come from hand-editable files, so both use a shape-safe count: a truthy
+        # non-sized value here would raise TypeError on the coverage path rather than refusing.
+        _revf = rev.get("findings") if isinstance(rev, dict) else None
+        raised = len(_revf) if isinstance(_revf, list) else 0
+        dispositioned = len(reconciliation_items(doc))
+        if raised and dispositioned < raised and not partial:
+            return {"ok": False, "reasons": [
+                f"only {dispositioned} of {raised} findings are dispositioned — pass partial=True "
+                "(--partial on the CLI) if this is a deliberately partial reconciliation mid-protocol"]}
+
+        d = _run_dir(rid)
+        target = os.path.join(d, "reconciliation-result.json")
+        replaced = os.path.isfile(target)
+        backup_path = None
+        if replaced:
+            if not force:
+                existing = run.get("reconciliation_result") or {}
+                return {"ok": False, "conflict": True,
+                        "reconciliation_id": existing.get("reconciliation_id"),
+                        # reconciliation_items(), not len(... or []): `existing` is a hand-editable
+                        # file, and a truthy non-sized `items` (e.g. `"items": 1`) made len() raise
+                        # TypeError out of the branch whose whole job is a controlled refusal.
+                        "item_count": len(reconciliation_items(existing))}
+            backup_path = _backup_reconciliation(d, target)
+
+        path = save_run_doc(rid, "reconciliation-result", doc,
+                            _sanctioned=_RECONCILIATION_TOKEN)
+        return {"ok": True, "path": path, "replaced": replaced, "backup_path": backup_path,
+                "dispositioned": dispositioned, "raised": raised}
+
+
 def list_runs() -> list:
     d = runs_dir()
     if not os.path.isdir(d):
@@ -1099,9 +1412,15 @@ def load_run(run_id: str) -> dict:
     def _load(p):
         try:
             with open(p, encoding="utf-8") as f:
-                return json.loads(f.read(_MAX_STORE_BYTES))
+                doc = json.loads(f.read(_MAX_STORE_BYTES))
         except (OSError, ValueError):   # JSONDecodeError + UnicodeDecodeError are ValueError subclasses
             return None
+        # A record that PARSES but isn't an object is unusable in the same way an unparseable one is,
+        # and every caller here immediately does `.get(...)` on the result. Returning the raw value
+        # made a hand-corrupted file (e.g. a JSON array) raise AttributeError out of `show` AND
+        # `list` — so the tool you would run to FIND the bad record was the one that crashed on it.
+        # Treat it as unreadable, which routes it into the same "unverifiable" reporting path.
+        return doc if isinstance(doc, dict) else None
 
     return {
         "run_id": _safe_id(run_id),

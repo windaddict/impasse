@@ -561,14 +561,35 @@ they're kept `0600` and never committed.
 
 Two subcommands carry the protocol itself rather than reporting on it. **`save-reconciliation
 <file>`** is how a reconciliation becomes a record at all — "once you save it" above means this
-command, and without it a run stores only the reviewer's raw findings, never what you decided.
-**`escalations <reconciliation>`** renders each deadlocked finding in full — the claim, its anchored
-evidence, both positions and the question — and **refuses** unless it can show that context for every
-one, so you are never asked to rule on a question stripped of what it is about.
+command, and without it a run stores only the reviewer's raw findings, never what you decided. It
+**validates the reconciliation against its reviewer-response before writing**: it refuses an unknown
+`review_id` (rather than silently creating a directory that holds a reconciliation with no findings
+behind it), a `finding_id` the review never raised, a duplicate `finding_id`, and a `rejected` item
+with no evidence that contradicts the finding. Saving before every raised finding is dispositioned is
+also refused unless you pass `--partial` — a deliberately partial reconciliation mid-protocol is
+legitimate, so it's a flag rather than a hard error, but it can never write `outcome: converged`
+(that combination is the exact defect this closes: a record silently under-covering while claiming to
+be done). Re-saving over an existing reconciliation is refused unless you pass `--force`; with it, the
+previous reconciliation is kept as `reconciliation-result.<n>.json` in the same run directory — a
+human's verification notes and dispositions can't be re-derived the way findings can, so a forced
+replace never discards them. **`escalations <reconciliation>`** renders each deadlocked finding in
+full — the claim, its anchored evidence, both positions and the question — and **refuses** unless it
+can show that context for every one, so you are never asked to rule on a question stripped of what it
+is about.
+
+A reconciliation that fails that validation — most often because its `review_id` doesn't match the
+reviewer-response beside it, or because it names findings that review never raised — is an
+**unverifiable record**, and every surface that reads it says so rather than reporting confident
+numbers it can't back: `show` prints a banner and renders the raised count as `?` instead of
+falling back to a count of its own dispositions; `list` marks its line `⚠️ orphan (unverifiable)`;
+`open` won't surface a deadlock from one (you'd be asked to rule on a question that may not even be
+the finding it claims to be); and the lifetime recap below excludes its items from the totals while
+disclosing how many records were excluded.
 
 Every `show` closes with a **running recap across your reconciled runs** — findings reviewed,
 accepted, refuted with evidence, resolved, and awaiting you — a plain reminder of what independent
-review has surfaced.
+review has surfaced. Runs that fail the validation above are quarantined out of these totals rather
+than counted, and the recap says how many were.
 
 `performance` reports the other longitudinal view: **how long reviews actually take on your
 machine**, grouped by backend and model, with timeouts counted separately from completions (a

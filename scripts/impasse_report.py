@@ -160,8 +160,10 @@ def _render_finding(f: dict, item: dict | None) -> list[str]:
 
 
 def render(run: dict) -> str:
-    rev = run.get("reviewer_response") or {}
-    rec = run.get("reconciliation_result") or {}
+    rev_raw = run.get("reviewer_response")
+    rec_raw = run.get("reconciliation_result")
+    rev = rev_raw or {}
+    rec = rec_raw or {}
     if not rev and not rec:
         return f"No records for run '{_clean(run.get('run_id'))}'."
 
@@ -171,17 +173,37 @@ def render(run: dict) -> str:
     backend = f"{_clean(prod.get('backend', '?'))}/{_clean(prod.get('model', '?'))}" if prod else "?"
 
     findings = rev.get("findings") or []
-    items = {it.get("finding_id"): it for it in (rec.get("items") or [])}
+    # lib.reconciliation_items(), not `rec.get("items") or []`: a malformed collection used to raise
+    # AttributeError HERE, before the unverifiable banner below could ever be printed — so `show`
+    # crashed on exactly the records it was being taught to report honestly.
+    items = {it.get("finding_id"): it for it in lib.reconciliation_items(rec)}
+
+    # Never invent a denominator (issue #16): when there IS a stored reconciliation, its pairing with
+    # the reviewer-response must check out via the same storage-boundary validator `save-reconciliation`
+    # enforces at write time — a mismatched/missing reviewer-response, a fabricated finding_id, or a
+    # duplicate makes the raised count, the outcome, and the "converged" story all unverifiable. Skip
+    # the check when there's no reconciliation yet — that's the normal "not yet recorded" case below,
+    # not an integrity problem.
+    problems = lib.reconciliation_problems(rec, rev_raw) if rec_raw else []
+    unverifiable = bool(problems)
 
     out = ["⚖️  Impasse run report"]
     out.append(f"    review: {review_id}")
     if art:
         out.append(f"    artifact: {_clean(art.get('id', '(inline)'))} ({_clean(art.get('kind', '?'))}) · reviewed {_clean(rev.get('created_at', '?'))} · backend {backend}")
     if rec.get("outcome"):
-        out.append(f"    outcome: {OUTCOME.get(rec['outcome'], _clean(rec['outcome']))}")
+        if unverifiable:
+            out.append(f"    outcome: ⚠️ unverifiable (stored: {_clean(rec['outcome'])})")
+        else:
+            out.append(f"    outcome: {OUTCOME.get(rec['outcome'], _clean(rec['outcome']))}")
+    if unverifiable:
+        out.append("    ⚠️  UNVERIFIABLE — this reconciliation's pairing with its reviewer-response "
+                   "could not be confirmed, so the tally and outcome above cannot be trusted:")
+        for p in problems:
+            out.append(f"        - {_clean(p)}")
 
     # tally
-    n = len(findings) if findings else len(items)
+    n = "?" if unverifiable else str(len(findings))
     by = {"accepted": 0, "rejected": 0, "resolved": 0, "deadlocked": 0, "withdrawn": 0}
     for it in items.values():
         by[it.get("state")] = by.get(it.get("state"), 0) + 1
@@ -201,6 +223,8 @@ def render(run: dict) -> str:
     if decided_by_you:
         tally += f" · 🧑‍⚖️ {decided_by_you} decided by you"
     out.append(tally)
+    if not unverifiable and findings and len(items) < len(findings):
+        out.append(f"    ⚠️  partial: only {len(items)} of {len(findings)} findings dispositioned")
     if rec.get("failure"):
         out.append(f"⚠️ Failure: {rec['failure'].get('code')} — {rec['failure'].get('message')}")
     out.append("─" * 78)
@@ -210,12 +234,27 @@ def render(run: dict) -> str:
         out += _render_finding(f, items.get(f.get("id")))
         out.append("─" * 78)
 
-    if pending:
+    if unverifiable:
+        # The denominator was only half the lie: an unverifiable record must not close with a
+        # confident "nothing needed you" either — that footer is exactly what made the original bug
+        # (issue #16) read as a passed gate instead of a broken one.
+        out.append("⚠️  Cannot verify what was settled — the reconciliation above could not be checked "
+                   "against its reviewer-response. Treat the tally and outcome as unconfirmed until "
+                   "the pairing above is fixed and this is re-saved.")
+    elif pending:
         if decided_by_you:
             out.append(f"⚖️  {pending} decision(s) need you; you decided {decided_by_you}; "
                        "the rest the models settled between themselves.")
         else:
             out.append(f"⚖️  {pending} decision(s) need you; the rest the models settled between themselves.")
+    elif rec.get("outcome") in ("failed", "incomplete"):
+        # The closing line used to branch only on unverifiable + pending deadlocks, so a record whose
+        # own outcome says `failed` or `incomplete` — a review that never finished — still signed off
+        # with the same "nothing needed you" as a converged one. The outcome is the record's own
+        # statement about whether the protocol completed; a summary must not contradict it.
+        out.append(f"⏳  Not a completed review — outcome is "
+                   f"{OUTCOME.get(rec['outcome'], _clean(rec['outcome']))}. "
+                   f"{len(items)} item(s) recorded; nothing here says the protocol finished.")
     elif decided_by_you:
         out.append(f"✅  Models settled {len(items) - decided_by_you}; you decided {decided_by_you}. "
                    "Nothing is waiting on you.")
@@ -262,7 +301,10 @@ def render_findings(response: dict) -> str:
     return "\n".join(out)
 
 
-_RECOGNIZED_STATES = frozenset({"accepted", "rejected", "resolved", "deadlocked", "withdrawn"})
+# Single source shared with lib.reconciliation_problems (the storage-boundary validator) — both
+# functions must agree on which states are recognized, or a state one flags and the other doesn't
+# would be a silent inconsistency between the write-time guard and the escalations-view guard.
+_RECOGNIZED_STATES = lib.RECOGNIZED_ITEM_STATES
 
 
 def _escalation_problems(rec: dict, rev: dict | None) -> list:
@@ -322,8 +364,7 @@ def _escalation_problems(rec: dict, rev: dict | None) -> list:
         else:
             problems.append("reviewer-response 'findings' is not a list")
     elif rev is None:
-        problems.append(f"reviewer-response not found for review_id {rid!r} — run the FULL protocol so "
-                        "the findings are recorded, or point at the correct review_id")
+        problems.append(lib.MISSING_REVIEWER_RESPONSE_MSG.format(rid=rid))
     else:
         problems.append("reviewer-response is malformed (not an object)")
     for it in opens:
@@ -381,11 +422,25 @@ def lifetime_recap() -> str:
     """A short, honest value recap across every reconciled run on disk — printed at the end of
     a `show` so the operator sees what independent review has surfaced for them. Facts only:
     counts come from real reconciliation records, and self-evident (no traction claims, no
-    'issues you'd have shipped'). Returns "" when nothing has been reconciled yet."""
+    'issues you'd have shipped'). Returns "" when nothing has been reconciled yet.
+
+    Eligibility comes from the validator, not from file presence (issue D5/#16/#17): a record whose
+    reconciliation_problems() is non-empty — missing sibling, fabricated finding_id, duplicate, bad
+    pairing — is QUARANTINED out of the totals rather than counted, because none of its numbers could
+    be trusted if they were. Quarantined records are disclosed, not silently dropped: this recap has
+    moved numbers the operator has already seen, in either direction, so a silent change here would
+    be exactly the kind of unnoticed drift this whole feature exists to prevent."""
     reviewed = accepted = rejected = resolved = escalated = 0
-    n = 0
+    n = quarantined = 0
     for r in lib.list_runs():
-        items = (lib.load_run(r["run_id"]).get("reconciliation_result") or {}).get("items") or []
+        run = lib.load_run(r["run_id"])
+        rec = run.get("reconciliation_result")
+        if not rec:
+            continue
+        if lib.reconciliation_problems(rec, run.get("reviewer_response")):
+            quarantined += 1
+            continue
+        items = lib.reconciliation_items(rec)
         if not items:
             continue
         n += 1
@@ -400,19 +455,26 @@ def lifetime_recap() -> str:
                 resolved += 1
             elif st == "deadlocked":
                 escalated += 1
-    if n == 0:
+    if n == 0 and quarantined == 0:
         return ""
-    rev_word = "review" if n == 1 else "reviews"
-    # Keep the dispositions distinct: 'resolved' can be host-fixed OR operator-decided, so it must
-    # NOT be rolled into the escalated count. 'escalated' counts only items still deadlocked — the
-    # ones currently AWAITING the operator (a resolved escalation is no longer counted here).
-    lines = [
-        "━" * 78,
-        f"📈 Your Impasse record — {n} {rev_word} reconciled",
-        f"   {reviewed} findings reviewed · {accepted} accepted · {rejected} refuted with evidence · "
-        f"{resolved} resolved · {escalated} awaiting you",
-        "   Each raised by an independent reviewer and ruled on by the host before it reached you.",
-    ]
+    lines = ["━" * 78]
+    if n:
+        rev_word = "review" if n == 1 else "reviews"
+        # Keep the dispositions distinct: 'resolved' can be host-fixed OR operator-decided, so it must
+        # NOT be rolled into the escalated count. 'escalated' counts only items still deadlocked — the
+        # ones currently AWAITING the operator (a resolved escalation is no longer counted here).
+        lines += [
+            f"📈 Your Impasse record — {n} {rev_word} reconciled",
+            f"   {reviewed} findings reviewed · {accepted} accepted · {rejected} refuted with evidence · "
+            f"{resolved} resolved · {escalated} awaiting you",
+            "   Each raised by an independent reviewer and ruled on by the host before it reached you.",
+        ]
+    else:
+        lines.append("📈 Your Impasse record — no verified reconciliations yet")
+    if quarantined:
+        rec_word = "record" if quarantined == 1 else "records"
+        lines.append(f"   ⚠️  {quarantined} {rec_word} quarantined (unverifiable — not counted above; "
+                     "see `report list`).")
     return "\n".join(lines)
 
 
@@ -521,35 +583,58 @@ def _open_escalations(rec: dict) -> list:
 
 
 def open_runs() -> list:
-    """Past runs that still have unresolved escalations, newest first."""
+    """Past runs that still have unresolved escalations, newest first — excluding any run whose
+    reconciliation fails lib.reconciliation_problems(). About to ask the operator to rule on a
+    deadlock, Impasse must not surface one it cannot confirm actually came from the reviewer-response
+    it claims to (issues #16/#17's failure mode, applied to the one surface where an unverifiable
+    record could still do active harm — prompting a decision built on it). Excluded runs are not
+    silently dropped: see unverifiable_open_run_ids()."""
     result = []
     for r in lib.list_runs():
-        rec = lib.load_run(r["run_id"]).get("reconciliation_result") or {}
+        run = lib.load_run(r["run_id"])
+        rec = run.get("reconciliation_result") or {}
         opens = _open_escalations(rec)
-        if opens:
+        if opens and not lib.reconciliation_problems(rec, run.get("reviewer_response")):
             result.append({"run_id": r["run_id"], "open": opens})
     return result
+
+
+def unverifiable_open_run_ids() -> list:
+    """run_ids that appear to have unresolved (deadlocked) items but were excluded from open_runs()
+    because their reconciliation cannot be verified against its reviewer-response — so `report open`
+    can disclose them by name instead of just going quiet about work that may still be pending."""
+    out = []
+    for r in lib.list_runs():
+        run = lib.load_run(r["run_id"])
+        rec = run.get("reconciliation_result") or {}
+        if _open_escalations(rec) and lib.reconciliation_problems(rec, run.get("reviewer_response")):
+            out.append(r["run_id"])
+    return out
 
 
 def prune(older_than_days: int, include_open: bool = False) -> tuple:
     """Delete records older than N days. By default, runs with unresolved escalations are
     KEPT (a pending decision shouldn't be silently discarded) unless include_open=True.
-    Returns (deleted_ids, kept_open_ids)."""
+    Returns (deleted_ids, kept_open_ids, invalid_ids) — invalid_ids names any inspected run (whether
+    it ends up deleted or kept) whose stored reconciliation fails lib.reconciliation_problems(), so an
+    orphan doesn't pass through prune without ever being flagged as one."""
     if older_than_days < 1:
         raise ValueError("prune requires --older-than >= 1 (a 0/negative age would delete everything)")
     cutoff = time.time() - older_than_days * 86400
-    deleted, kept_open = [], []
+    deleted, kept_open, invalid = [], [], []
     for r in lib.list_runs():
         if r["mtime"] >= cutoff:
             continue
-        if not include_open:
-            rec = lib.load_run(r["run_id"]).get("reconciliation_result") or {}
-            if _open_escalations(rec):
-                kept_open.append(r["run_id"])
-                continue
+        run = lib.load_run(r["run_id"])
+        rec = run.get("reconciliation_result") or {}
+        if rec and lib.reconciliation_problems(rec, run.get("reviewer_response")):
+            invalid.append(r["run_id"])
+        if not include_open and _open_escalations(rec):
+            kept_open.append(r["run_id"])
+            continue
         if lib.forget_run(r["run_id"]):
             deleted.append(r["run_id"])
-    return deleted, kept_open
+    return deleted, kept_open, invalid
 
 
 def _main(argv=None) -> int:
@@ -564,6 +649,12 @@ def _main(argv=None) -> int:
     esc.add_argument("path", help="a reconciliation-result JSON (draft or saved); its review_id locates the reviewer-response for finding context")
     sr = sub.add_parser("save-reconciliation")
     sr.add_argument("path")
+    sr.add_argument("--partial", action="store_true",
+                     help="allow saving before every raised finding is dispositioned (a deliberately "
+                          "partial reconciliation mid-protocol); refuses outcome: converged")
+    sr.add_argument("--force", action="store_true",
+                     help="replace an existing reconciliation for this review_id; the previous one is "
+                          "kept as reconciliation-result.<n>.json, never silently discarded")
     fg = sub.add_parser("forget")
     fg.add_argument("run_id")
     sub.add_parser("open")
@@ -586,15 +677,28 @@ def _main(argv=None) -> int:
         for r in runs:
             ts = datetime.datetime.fromtimestamp(r["mtime"]).strftime("%Y-%m-%d %H:%M")
             flags = ("R" if r["has_review"] else "-") + ("C" if r["has_reconciliation"] else "-")
-            rec = lib.load_run(r["run_id"]).get("reconciliation_result") or {}
+            run = lib.load_run(r["run_id"])
+            rec = run.get("reconciliation_result") or {}
             opens = len(_open_escalations(rec))
             mark = f"  ⚖️ {opens} open" if opens else ""
+            # An explicit marker rather than making the reader decode the [-C]/[R-] flag combo: a
+            # reconciliation that exists but fails the same validator save-reconciliation enforces at
+            # write time (missing/mismatched reviewer-response, fabricated or duplicate finding_id) is
+            # an orphan in the sense issues #16/#17 describe, regardless of which flag bit exposed it.
+            if r["has_reconciliation"] and lib.reconciliation_problems(rec, run.get("reviewer_response")):
+                mark += "  ⚠️ orphan (unverifiable)"
             print(f"  {ts}  [{flags}]  {r['run_id']}{mark}")
         return 0
     if args.cmd == "open":
         runs = open_runs()
+        skipped = unverifiable_open_run_ids()
         if not runs:
-            print("✅ No unresolved escalations across recorded runs.")
+            if skipped:
+                print(f"✅ No verifiable unresolved escalations — but {len(skipped)} record(s) with "
+                      "apparent deadlocks could not be verified against their reviewer-response "
+                      "(see `report list`): " + ", ".join(skipped))
+            else:
+                print("✅ No unresolved escalations across recorded runs.")
             return 0
         total = sum(len(r["open"]) for r in runs)
         print(f"⚖️  {total} unresolved decision(s) across {len(runs)} run(s):")
@@ -604,10 +708,13 @@ def _main(argv=None) -> int:
                 esc = it.get("escalation") or {}
                 q = esc.get("operator_question") or "(no question recorded)"
                 print(_wrap(f"    • {it.get('finding_id')}: ", q, "      "))
+        if skipped:
+            print(f"\n⚠️  {len(skipped)} additional record(s) have apparent deadlocks that could not "
+                  "be verified against their reviewer-response (see `report list`): " + ", ".join(skipped))
         return 0
     if args.cmd == "prune":
         try:
-            deleted, kept = prune(args.older_than, include_open=args.include_open)
+            deleted, kept, invalid = prune(args.older_than, include_open=args.include_open)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             return 2
@@ -616,6 +723,8 @@ def _main(argv=None) -> int:
         msg = f"pruned {len(deleted)} record(s) older than {args.older_than}d"
         if kept:
             msg += f"; kept {len(kept)} with open escalations (use --include-open to remove)"
+        if invalid:
+            msg += f"; {len(invalid)} inspected record(s) were unverifiable (orphaned or mismatched)"
         print(msg)
         return 0
     if args.cmd == "performance":
@@ -668,7 +777,13 @@ def _main(argv=None) -> int:
         # raise on storage or degenerate input).
         try:
             rev = lib.load_run(rid).get("reviewer_response") if isinstance(rid, str) and rid else None
-            problems = _escalation_problems(rec, rev)
+            # _escalation_problems guarantees full context for PENDING deadlocks specifically, and (by
+            # design) skips the reviewer-response pairing check entirely when there is nothing open to
+            # render — so an orphaned or fabricated reconciliation with no CURRENT deadlock used to
+            # pass here silently. lib.reconciliation_problems is the storage-boundary validator that
+            # save-reconciliation also runs, and it checks pairing unconditionally — route through
+            # both, so a structural or pairing problem refuses here even with zero open escalations.
+            problems = list(dict.fromkeys(lib.reconciliation_problems(rec, rev) + _escalation_problems(rec, rev)))
             if problems:
                 out = None
             else:
@@ -693,12 +808,25 @@ def _main(argv=None) -> int:
         except (OSError, json.JSONDecodeError) as e:
             print(f"cannot read reconciliation file: {e}", file=sys.stderr)
             return 2
-        if not isinstance(doc, dict) or not doc.get("review_id"):
-            print("reconciliation must be a JSON object with a review_id", file=sys.stderr)
+        res = lib.save_reconciliation_doc(doc, partial=args.partial, force=args.force)
+        if not res.get("ok"):
+            if res.get("conflict"):
+                print("save-reconciliation: a reconciliation already exists for this review_id "
+                      f"(reconciliation_id={res.get('reconciliation_id')!r}, "
+                      f"{res.get('item_count')} item(s)) — pass --force to replace it; the previous "
+                      "one is kept as a numbered backup, never silently discarded.", file=sys.stderr)
+            else:
+                print("save-reconciliation: refusing to save:", file=sys.stderr)
+                for r in res.get("reasons", []):
+                    print(f"  - {r}", file=sys.stderr)
             return 2
-        rid = doc["review_id"]
-        path = lib.save_run_doc(rid, "reconciliation-result", doc)
-        print(f"saved: {path}")
+        verb = "replaced" if res["replaced"] else "saved"
+        line = f"{verb}: {res['path']}"
+        if res.get("backup_path"):
+            line += f" (previous kept as {res['backup_path']})"
+        if res.get("raised"):
+            line += f" — {res['dispositioned']} of {res['raised']} findings dispositioned"
+        print(line)
         return 0
     if args.cmd == "forget":
         print("forgotten" if lib.forget_run(args.run_id) else "no such run")
