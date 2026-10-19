@@ -363,11 +363,12 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    can't prompt, so present the options yourself with **`AskUserQuestion`** — for **speed**, offer
    `standard` vs `fast` and note it is **codex-only** and that `fast` costs more credits; for
    **effort**, the `none|low|medium|high|xhigh` scale (also codex-only); for **model**, a short
-   curated candidate list plus an "other" free-text choice (Codex has no model-list command; a bad
-   model fails with a clear 400). Then map their answer to scope: a **per-run** request ("review at
-   high effort with fast mode") becomes `--effort` / `--speed` (and `--model`) on **that run**; a
-   **persistent** request ("always use fast mode", "default my reviewer to <model>") becomes the
-   matching **`set-*`** command (`set-speed` / `set-effort` / `set-model`, clear with `--clear`). The
+   curated candidate list plus an "other" free-text choice (Codex has no model-list command,
+   availability is account-dependent, and a bad model fails with a clear 400). Then map their
+   answer to scope: a **per-run** request ("review at high effort with fast mode") becomes
+   `--effort` / `--speed` (and `--model`) on **that run**; a **persistent** request ("always use
+   fast mode", "default my reviewer to <model>") becomes the matching **`set-*`** command
+   (`set-speed` / `set-effort` / `set-model`, clear with `--clear`). The
    precedence is the same for all three — per-run flag > `IMPASSE_*` env > persisted `set-*` default >
    the backend default — and **effort and speed are codex-only** (the claude backend reports both as
    `null`).
