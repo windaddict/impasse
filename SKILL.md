@@ -292,7 +292,7 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    ≈ 600s+** — and note that a ~5.7K-token code review has been observed to need ~600s on a Claude
    backend, so 600s is a floor for that size, not a comfortable ceiling.
 
-   **A `timeout` now tells you where the time went.** It carries a `telemetry` block — the phase
+   **A `timeout` tells you where the time went.** It carries a `telemetry` block — the phase
    timeline, whether the backend ever sent a byte (`received_any_bytes`), time to first byte, and
    the resolved model — plus ranked `recovery` options with exact commands. Read
    `received_any_bytes` for what it is: it says whether the reviewer CLI wrote anything at all, not
@@ -337,12 +337,6 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
 
    **Model.** Precedence: `--model <name>` (this run) > `IMPASSE_{CODEX,CLAUDE}_MODEL` env >
    persisted default (`impasse_run.py set-model --backend codex <name>`) > the backend's default.
-   **To let the operator pick interactively** (they ask to choose/change the model, or you offer):
-   the runner can't prompt, so present it yourself with `AskUserQuestion`. Codex has **no
-   model-list command**, so offer a short *curated* candidate list **plus an "other" free-text
-   choice** (availability is account-dependent; a bad model fails with a clear 400). Ask whether to
-   use it **just this run** or **persist** it — for this run pass `--model`; to persist, run
-   `impasse_run.py set-model --backend <b> <model>` (clear with `--clear`).
 
    **Effort.** Same precedence shape: `--effort <none|low|medium|high|xhigh>` (this run) >
    `IMPASSE_CODEX_EFFORT` env > persisted default (`impasse_run.py set-effort <effort>`, clear with
@@ -428,8 +422,8 @@ backend is the cross-provider reviewer). The host is auto-detected (`IMPASSE_HOS
    exit, nothing written) when: the `review_id` has no reviewer-response recorded under it; a
    `finding_id` doesn't match anything that review raised; two items share a `finding_id`; a
    `rejected` item carries no verification that contradicts the finding; or a reconciliation already
-   exists there. A mistyped `review_id` used to silently create a fresh, orphaned run directory
-   holding only your reconciliation — this is what stops that.
+   exists there. Without this check, a mistyped `review_id` would create an orphaned run directory
+   holding only your reconciliation.
    - **`--partial`** saves before every raised finding is dispositioned — legitimate mid-protocol
      (you're still working through a large finding set), but it can never pair with
      `outcome: converged`: use `incomplete` (or `deadlocked` if something is escalated). The success
@@ -644,7 +638,7 @@ degrading to the host's own context there throws away the independence you actua
   **self-review** (the host model in its own context — the last resort in the chat sandbox /
   Cowork where no reviewer subprocess can run). The runner **auto-detects** the common hosts
   (Claude, Codex, Gemini, Cursor) from strict-value env markers — best-effort for Codex, which
-  has no branded flag — and `IMPASSE_HOST` (`claude|codex|gemini|grok|cursor|other`) stays
+  has no branded flag — and `IMPASSE_HOST` (`claude|codex|gemini|grok|composer|cursor|other`) stays
   authoritative but is validated and conflict-checked. To a Codex/Gemini host the ladder inverts
   honestly — `--backend claude` becomes a cross-provider reviewer. Ambiguity, a marker/override
   conflict, or an unattributable host all get `undetermined`, never a positive cross-provider
