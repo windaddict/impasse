@@ -541,8 +541,8 @@ itself, and guessing would be worse than admitting it.
 
    | Model driving **this** Cursor chat | Set | Strongest shipped rival |
    |---|---|---|
-   | `claude-opus-5-*`, `claude-sonnet-5-*`, `claude-fable-5-*` | `IMPASSE_HOST=claude` | `--backend auto` → **codex** (cross-provider) |
-   | `gpt-5.3-codex-*`, `gpt-5.2`, `gpt-5.6-sol-*`, `gpt-5.6-luna-*` | `IMPASSE_HOST=codex` | `--backend auto` → **claude** (cross-provider) |
+   | any `claude-*` model (Opus, Sonnet, Haiku, Fable) | `IMPASSE_HOST=claude` | `--backend auto` → **codex** (cross-provider) |
+   | any OpenAI `gpt-*` model | `IMPASSE_HOST=codex` | `--backend auto` → **claude** (cross-provider) |
    | `gemini-*` | `IMPASSE_HOST=gemini` | either shipped backend is cross-provider vs Google |
    | `cursor-grok-*` | `IMPASSE_HOST=grok` | either shipped backend is cross-provider vs xAI |
    | `composer-*` | `IMPASSE_HOST=composer` | either shipped backend is cross-provider vs Anysphere — but read the Composer caveat below |
